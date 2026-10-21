@@ -12,7 +12,14 @@ import type { WorkbookJob } from "../work/reader.ts";
 import type { AgentRuntime } from "../agent/runtime.ts";
 import type { SourceProfile } from "../../src/app-types/WorkSource.types.ts";
 
-const mock = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => any>(), paths: [] as string[], read: vi.fn(), save: vi.fn(), artifactPath: vi.fn() }));
+const mock = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => any>(), paths: [] as string[], read: vi.fn(), save: vi.fn(), artifactPath: vi.fn(), networkPath: false }));
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return { ...fs, realpath: (...args: Parameters<typeof fs.realpath>) => {
+    if (mock.networkPath) return Promise.reject(Object.assign(new Error("EISDIR"), { code: "EISDIR" }));
+    return fs.realpath(...args);
+  } };
+});
 vi.mock("electron", () => ({ ipcMain: { handle: (name: string, handler: (...args: any[]) => any) => mock.handlers.set(name, handler) }, BrowserWindow: { fromWebContents: () => null }, dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: mock.paths }), showSaveDialog: mock.save } }));
 vi.mock("../work/reader.ts", () => ({ readWorkbookJob: mock.read }));
 import { registerWorkSourceHandlers } from "./workSourceHandlers.ts";
@@ -32,7 +39,14 @@ beforeEach(async () => {
   flow = new WorkSourcesFlow(db, () => undefined);
   registerWorkSourceHandlers({ db, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
 });
-afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); await rm(folder, { recursive: true, force: true }); });
+afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); mock.networkPath = false; await rm(folder, { recursive: true, force: true }); });
+
+it("picks and reads a workbook when native realpath fails with the network-drive EISDIR error", async () => {
+  mock.networkPath = true;
+  const [file] = await invoke("pickFiles", false);
+  expect(file).toMatchObject({ name: "source.xlsx", relativePath: "" });
+  expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료", rows: expect.any(Array) });
+});
 
 const artifactId = "9b3bb758-a5cb-4eda-87b3-28bac9b487e2";
 const saveArtifact = (id = artifactId) => mock.handlers.get("business:saveArtifact")!({ sender: {} }, id);

@@ -54,6 +54,25 @@ it("matches the KC file date to the report date (work date minus one), not the w
   const { input, books, file } = await setup(); input.files.cashStatus = [await file(books.status, "261014_자금현황표[KC].xlsx")];
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("기준일 2026-10-14와 일보 기준일 2026-10-13") });
 });
+it("preserves a year of historical sheets, including distant used cells, when appending the next report", async () => {
+  const { input, books, file } = await setup();
+  for (let day = 0; day < 365; day++) {
+    const name = new Date(Date.UTC(2025, 0, day + 1)).toISOString().slice(2, 10).replaceAll("-", "");
+    books.report.addWorksheet(name).getCell("A1").value = `history ${name}`;
+  }
+  const archive = books.report.getWorksheet("250101")!;
+  archive.getCell(100001, 501).value = "historical note";
+  input.files.previousReport = [await file(books.report, "연간일보.xlsx")];
+  const result = await confirm(input);
+  expect(result.status, JSON.stringify(result.status === "completed" ? {} : result)).toBe("completed");
+  if (result.status !== "completed") return;
+  const output = new ExcelJS.Workbook(); await output.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer);
+  expect(output.worksheets.map((sheet) => sheet.name)).toEqual([...books.report.worksheets.map((sheet) => sheet.name), "261013"]);
+  for (const sheet of books.report.worksheets.slice(1)) expect(output.getWorksheet(sheet.name)!.getCell("A1").value).toBe(sheet.getCell("A1").value);
+  expect(output.getWorksheet("250101")!.getCell(100001, 501).value).toBe("historical note");
+  expect(output.getWorksheet("261012")!.getCell("H10").value).toBe(100000);
+  expect(output.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
+}, artifactTestTimeout);
 it("carries sub-won interest fractions forward and reconciles them against whole-won KC balances", async () => {
   const { input, books, file } = await setup(); books.report.getWorksheet("261012")!.getCell("H10").value = 100000.27878; input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status === "failed" ? result : {})).toBe("completed");
@@ -95,7 +114,7 @@ it("requires explicit values for missing formula caches and does not silently us
 });
 it("stops when actual account cash differs from ledger or a term has not settled", async () => {
   const { books, input, file } = await setup(); const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000; input.files.cashStatus = [await file(books.status, "261013_자금현황표[KC].xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" })]) });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" }), expect.objectContaining({ key: "actualEdits", type: "movements" })]) });
 });
 it("requires corrections when planned executions do not reconcile the holding cash", async () => {
   const { input } = await setup(); input.values.actualEdits = '{"changes":[{"index":2,"amount":"2000"}]}';

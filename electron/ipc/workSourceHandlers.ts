@@ -1,10 +1,11 @@
-import { copyFile, realpath } from "node:fs/promises";
+import { copyFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { z } from "zod";
 import type { AgentRuntime } from "../agent/runtime.ts";
 import type { ExtractionPreview, SourceMapping, SourceProfile, WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { WorkSources } from "../work/sources.ts";
+import { realpath } from "../work/paths.ts";
 import { listProfiles, profileSchema, saveProfile } from "../work/profiles.ts";
 import { mappingSchema } from "../work/mapping.ts";
 import { readWorkbookJob, type WorkbookJob } from "../work/reader.ts";

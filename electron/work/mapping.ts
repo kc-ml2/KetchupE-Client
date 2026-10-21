@@ -18,7 +18,7 @@ export const mappingSchema = z.object({
 export async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(Buffer.from(bytes) as unknown as ExcelJS.Buffer);
-  if (workbook.worksheets.length > 100 || workbook.worksheets.some((sheet) => sheet.rowCount > 100000 || sheet.columnCount > 500)) throw new Error("파일이 처리 범위를 초과합니다. 시트 100개, 행 100,000개, 열 500개 이하로 나누어 주세요.");
+  // Historical sheets and distant formatted cells are valid; file size and worker budgets bound parsing.
   return workbook;
 }
 
