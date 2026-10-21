@@ -65,7 +65,7 @@ it("updates the selected original workbook after validating the generated workbo
   expect(getRun(db, runId).status).toBe("completed");
 });
 
-it("completes Daily Cash after correcting a balance mismatch without changing movement field types", async () => {
+it("preserves newly added work-date plans through a balance correction and renewed final review", async () => {
   const books = fixtureBooks(); const status = books.status.worksheets[0];
   status.getCell("O2").value = 108000; status.getCell("O4").value = 108000;
   for (let i = 0; i < 120; i++) books.report.addWorksheet(`archive-${i}`).getCell("A1").value = i;
@@ -82,11 +82,13 @@ it("completes Daily Cash after correcting a balance mismatch without changing mo
   await flow.submit(runId, action().id, chosen);
   expect(action().fields.find((field) => field.key === "actualEdits")?.type).toBe("movements");
   chosen.values.actualEdits = '{"changes":[],"add":[]}';
-  chosen.values.planEdits = '{"changes":[{"index":1,"amount":"3000"}],"add":[]}';
+  const addedPlans = [{ direction: "out", description: "당일 추가 지급", party: "추가 거래처", amount: "5000" }, { direction: "in", description: "당일 추가 입금", party: "입금 거래처", amount: "1000" }];
+  chosen.values.planEdits = JSON.stringify({ changes: [], add: addedPlans });
   await flow.submit(runId, action().id, chosen);
   expect(action().question).toContain("장부와 실제 잔고 차이");
   expect(action().question).not.toContain("형식이 변경");
   expect(action().fields.find((field) => field.key === "actualEdits")?.type).toBe("movements");
+  expect(action().fields.find((field) => field.key === "planEdits")?.type).toBe("movements");
   expect(action().input.values.planEdits).toBe(chosen.values.planEdits);
   expect(action().lockedKeys).not.toContain("actualEdits");
   chosen.values.cashChanges = '{"140013557434:KRW":{"incoming":"10000","outgoing":"2000"}}';
@@ -94,6 +96,14 @@ it("completes Daily Cash after correcting a balance mismatch without changing mo
   await flow.submit(runId, action().id, chosen);
   expect(action().question).toContain("최종 확인");
   chosen.values.review = action().fields.find((field) => field.key === "review")!.confirm!;
+  const firstReview = chosen.values.review;
+  addedPlans[0].amount = "6000";
+  chosen.values.planEdits = JSON.stringify({ changes: [], add: addedPlans });
+  await flow.submit(runId, action().id, chosen);
+  expect(action().question).toContain("최종 확인");
+  expect(action().input.values.planEdits).toBe(chosen.values.planEdits);
+  chosen.values.review = action().fields.find((field) => field.key === "review")!.confirm!;
+  expect(chosen.values.review).not.toBe(firstReview);
   await flow.submit(runId, action().id, chosen);
   expect(getRun(db, runId).status, action()?.question).toBe("completed");
   expect(flow.artifacts(threadId)).toHaveLength(2);
@@ -101,7 +111,12 @@ it("completes Daily Cash after correcting a balance mismatch without changing mo
   expect(updated.worksheets).toHaveLength(122);
   expect(updated.getWorksheet("archive-119")!.getCell("A1").value).toBe(119);
   expect(updated.getWorksheet("261013")!.getCell("H10").result).toBe(108000);
-  expect(updated.getWorksheet("261013")!.getCell("H237").result).toBe(105000);
+  const report = updated.getWorksheet("261013")!;
+  expect(report.getCell("H237").result).toBe(101000);
+  expect(report.getCell("F131").value).toContain("당일 추가 입금");
+  expect(report.getCell("H131").value).toBe(1000);
+  expect(report.getCell("F158").value).toContain("당일 추가 지급");
+  expect(report.getCell("H158").value).toBe(6000);
 }, 30000);
 
 it("persists additional structured input across DB reopen and pins the tool version", async () => {
