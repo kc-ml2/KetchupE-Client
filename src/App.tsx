@@ -4,6 +4,7 @@ import { Toaster } from "react-hot-toast";
 import { ThemeProvider } from "@Contexts/ThemeProvider";
 import { ThreadsProvider } from "@Contexts/ThreadsProvider";
 import AgentPage from "@Pages/AgentPage";
+import AuthGate from "@Features/Auth/AuthGate";
 
 const App = () => {
   const isElectron =
@@ -13,8 +14,9 @@ const App = () => {
   return (
     <HashRouter>
       <ThemeProvider>
+        <AuthGate>
         <ThreadsProvider>
-          <div className="flex flex-col h-screen bg-white">
+          <div className="flex flex-col h-full bg-white">
             <main className="flex-1 min-h-0 flex flex-col bg-white">
               <Routes>
                 <Route path="/agent" element={<AgentPage />} />
@@ -24,6 +26,7 @@ const App = () => {
             </main>
           </div>
         </ThreadsProvider>
+        </AuthGate>
         <Toaster position="top-right" />
       </ThemeProvider>
       {process.env.NODE_ENV === "development" && !isElectron && (

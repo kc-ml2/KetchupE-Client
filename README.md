@@ -52,20 +52,18 @@ npx vitest run               # 테스트 1회 실행
 npm run typecheck:electron
 ```
 
-Git에서 제외된 로컬 `.env`에 연결 정보를 설정합니다. API key/token은 저장소에 넣지 않습니다. 모델 설정은 환경변수·공식 빌드 값이 우선하고 저장 설정이 fallback이며, 앱에서 저장한 모델 키는 `safeStorage`로 암호화합니다.
+앱은 사내 이메일 인증 후 credential broker에서 사용자별 LiteLLM·MARU 키를 받습니다. 개발 실행도 같은 로그인을 사용하며, 공통 서비스 키를 앱에 주입하지 않습니다. 인증·저장·계정 분리와 운영 확인 항목은 [로그인 및 자격증명](docs/AUTHENTICATION.md)을 참고하세요.
+
+`.env`에는 생성·라우팅 모델 alias와 선택 서비스 설정을 지정할 수 있습니다. API key/token은 저장소에 넣지 않습니다.
 
 ```dotenv
-LITELLM_BASE_URL=https://your-gateway.example.com/v1/
-LITELLM_API_KEY=<발급받은 키>
-LITELLM_MODEL_ALIAS=<배포한 생성 모델 alias>
+LITELLM_MODEL_ALIAS=loki
 LITELLM_ROUTER_MODEL_ALIAS=clef
-
-# 선택: 토큰에는 Bearer 접두어를 넣지 않습니다.
-MARU_API_TOKEN=<사용자 토큰>
-MARU_MCP_ENDPOINT=https://maru.ml2-alpha.com/mcp
-TROLLEY_API_KEY=<사용자 키>
+TROLLEY_API_KEY=<선택 서비스 사용자 키>
 TROLLEY_MCP_ENDPOINT=https://trolley.ml2-alpha.com/mcp/
 ```
+
+아래 독립 진단 스크립트만 `LITELLM_API_KEY`·`LITELLM_BASE_URL`, `MARU_API_TOKEN`·`MARU_MCP_ENDPOINT`를 사용합니다. 이 값들은 앱 로그인과 연결에 영향을 주지 않습니다.
 
 ```bash
 npm run smoke:litellm
@@ -75,7 +73,7 @@ npm run probe:trolley
 
 자연어 업무 선택은 같은 LiteLLM의 `/v1/systemone`에 등록된 `clef` alias를 사용합니다. 다른 이름으로 배포했다면 `LITELLM_ROUTER_MODEL_ALIAS`를 지정하세요. `$업무ID`와 명시 mode는 라우팅 모델을 호출하지 않습니다. 생성·답변 모델은 `LITELLM_MODEL_ALIAS`를 유지합니다. 라우팅 실패 시 다른 모델로 자동 전환하지 않습니다. 설정 변경 후 개발 서버를 재시작하고 배포판은 다시 빌드합니다.
 
-MCP 키 변경 후 앱을 재시작합니다. 현재 MARU는 storage 조회·검색 및 문서 다운로드/인덱싱, Trolley는 capabilities·Operation 목록 조회까지 연결되어 있습니다. Trolley Operation 실행은 연결되어 있지 않습니다. 새 MCP의 연결 절차는 [외부 팀용 가이드](docs/WORKFLOW_INTEGRATION_GUIDE.md)를 따릅니다.
+계정을 바꾸려면 로그아웃 후 다시 인증합니다. 현재 MARU는 storage 조회·검색 본문 인용 및 문서 다운로드/인덱싱, Trolley는 capabilities·Operation 목록 조회까지 연결되어 있습니다. Trolley Operation 실행은 연결되어 있지 않습니다. 새 MCP의 연결 절차는 [외부 팀용 가이드](docs/WORKFLOW_INTEGRATION_GUIDE.md)를 따릅니다.
 
 ## 코드 찾기
 
@@ -94,8 +92,8 @@ MCP 키 변경 후 앱을 재시작합니다. 현재 MARU는 storage 조회·검
 
 - `agent.sqlite`는 대화·run·memory·trace·업무 입력의 원본입니다. Tomato는 별도 index/artifact를 관리합니다. Renderer는 파일·DB·키에 직접 접근하지 않고 typed IPC를 사용합니다.
 - 로컬 저장이 완전한 오프라인을 뜻하지 않습니다. 선택한 근거·대화는 LiteLLM으로, 관측 데이터는 설정된 content mode에 따라 OTLP gateway로 전달됩니다. embedding 모델 최초 다운로드도 네트워크가 필요합니다.
-- 업무 원천 XLSX는 로컬에서 읽고 원본을 수정하지 않습니다. 검증한 결과는 `userData/business-output`에 새 파일로 저장합니다. 원천 사본 보관과 대화 삭제 시 결과 파일 자동 정리는 현재 보장하지 않습니다.
-- 검색 collection 선택은 ACL이 아닙니다. MARU는 서버 권한을 검사하지만 로컬 history·재개·citation 재사용 전체의 권한 회수는 아직 완성되지 않았습니다.
+- 업무 원천 XLSX는 로컬에서 읽고 원본을 수정하지 않습니다. 검증한 결과는 `userData/accounts/<계정 식별자>/business-output`에 새 파일로 저장합니다. 원천 사본 보관과 대화 삭제 시 결과 파일 자동 정리는 현재 보장하지 않습니다.
+- 검색 collection 선택은 ACL이 아닙니다. MARU 문서를 사용한 대화 조회·재사용과 인용 원문 열기에서 권한을 재확인합니다. 이미 화면에 표시되거나 사용자가 복사·내보낸 내용의 원격 삭제는 지원하지 않습니다.
 - 중앙 수집은 [telemetry-gateway.ts](scripts/telemetry-gateway.ts)를 사용합니다. Desktop에는 Langfuse secret을 넣지 않습니다. 기본 `ops` mode는 자유 텍스트·식별자를 HMAC 처리하며, 모든 개인정보 제거를 보장하지 않습니다.
 - 임의 MCP 자동 설치, 외부 코드/SKILL 실행, multi-agent, 전역 실행 queue는 없습니다. 설치본 서명·fresh-install 검증과 외부 benchmark의 평가·승격은 별도 범위입니다.
 

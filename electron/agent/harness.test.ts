@@ -50,6 +50,22 @@ afterAll(async () => {
 });
 
 describe("harness", () => {
+  it("answers with cited MARU excerpts without downloading the full file", async () => {
+    const thread = createThread(db, workspace.id);
+    const document = { refId: "remote-excerpt", provider: "maru" as const, storageId: "group-a", path: "leave.pdf" };
+    const handle = harness({
+      decide: [{ ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "find_storage", arguments: { query: "휴가" } } }, answer],
+      answer: "휴가는 5일입니다 [[e1]]",
+    }, [], DEFAULT_POLICY_PROFILE, {
+      call: async () => ({ summary: "search result", documents: [document], excerpts: [{ document, text: "휴가는 5일이다." }] }),
+      readDocument: async () => { throw new Error("must not download"); },
+    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "MARU 휴가 규정" });
+    await handle.done;
+    expect(getRun(db, handle.runId).status).toBe("completed");
+    expect(db.prepare("SELECT path FROM citations WHERE run_id = ?").get(handle.runId)).toMatchObject({ path: "maru:remote-excerpt" });
+    expect(loadThread(db, thread.id).messages.at(-1)?.citations).toMatchObject([{ evidenceId: "e1", title: "leave.pdf" }]);
+  });
+
   it.each(["llm", "gated", "always-search"] as const)("uses Trolley capabilities instead of local search for %s policy", async (strategy) => {
     const thread = createThread(db, workspace.id);
     const calls: string[] = [];

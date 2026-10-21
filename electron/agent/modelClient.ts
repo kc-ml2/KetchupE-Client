@@ -97,9 +97,9 @@ export function toAgentError(error: unknown): AgentError {
   if (error instanceof Error && error.name === "TimeoutError") return new AgentError("MODEL_TIMEOUT", "model timed out");
   if (APICallError.isInstance(error)) {
     const code: AgentErrorCode = error.statusCode === 401 || error.statusCode === 403 ? "MODEL_AUTH" : "MODEL_PROTOCOL";
-    return new AgentError(code, `${error.statusCode ?? ""} ${error.message}`.trim());
+    return new AgentError(code, error.statusCode === 401 ? "LiteLLM 인증이 만료되었거나 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요." : error.statusCode === 403 ? "이 모델에 접근할 권한이 없습니다. 운영자에게 확인해 주세요." : `모델 요청이 실패했습니다 (HTTP ${error.statusCode ?? "unknown"}).`);
   }
-  return new AgentError("MODEL_PROTOCOL", error instanceof Error ? error.message : String(error));
+  return new AgentError("MODEL_PROTOCOL", "모델에 연결하지 못했거나 응답을 처리하지 못했습니다.");
 }
 
 /** Some gateways answer a forced tool call with JSON text instead. Accept that once. */

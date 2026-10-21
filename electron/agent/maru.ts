@@ -58,6 +58,7 @@ export class MaruClient {
     private readonly cacheDirectory: string,
     private readonly tomato: TomatoClient,
     private readonly endpoint = DEFAULT_MARU_ENDPOINT,
+    private readonly onRead?: (document: ExternalDocumentRef, localPath: string) => void,
   ) {
     this.connection = new McpConnection({
       id: "maru",
@@ -76,6 +77,19 @@ export class MaruClient {
   }
 
   async readDocument(document: ExternalDocumentRef, signal: AbortSignal): Promise<IngestedSource> {
+    const file = await this.authorizeDocument(document, signal);
+    if (!file.download?.url || file.download.status !== "ready") {
+      throw new AgentError("TOOL_UNAVAILABLE", "MARU did not return a downloadable file");
+    }
+    const localPath = await this.download(file, document.refId, signal);
+    signal.throwIfAborted();
+    this.onRead?.(document, localPath);
+    const collection = `maru_${document.refId}`;
+    const relativePath = `${document.storageName ?? document.storageId}/${document.path}`.replaceAll("\\", "/").replace(/^\/+/, "");
+    return this.tomato.ingestFile(localPath, collection, relativePath);
+  }
+
+  async authorizeDocument(document: ExternalDocumentRef, signal: AbortSignal): Promise<MaruResult> {
     const payload = await this.callPayload("find_storage", {
       storage_id: document.storageId,
       file_path: document.path,
@@ -83,13 +97,9 @@ export class MaruClient {
     const parsed = findResultSchema.safeParse(payload);
     if (!parsed.success) throw new AgentError("TOOL_UNAVAILABLE", "MARU returned an invalid file lookup result");
     const file = parsed.data.results.find((item) => item.storage_id === document.storageId && item.path === document.path);
-    if (!file?.download?.url || file.download.status !== "ready") {
-      throw new AgentError("TOOL_UNAVAILABLE", "MARU did not return a downloadable file");
-    }
-    const localPath = await this.download(file, document.refId, signal);
-    const collection = `maru_${document.refId}`;
-    const relativePath = `${document.storageName ?? document.storageId}/${document.path}`.replaceAll("\\", "/").replace(/^\/+/, "");
-    return this.tomato.ingestFile(localPath, collection, relativePath);
+    if (!file) throw new AgentError("TOOL_UNAVAILABLE", "MARU 문서 접근 권한을 확인하지 못했습니다.");
+    signal.throwIfAborted();
+    return file;
   }
 
   async close(): Promise<void> {
@@ -188,6 +198,8 @@ export function normalizeMaruFindResult(payload: unknown): ExternalCallResult {
     download: { status: item.download?.status, expires_at: item.download?.expires_at },
   }));
   return {
+    excerpts: parsed.data.results.slice(0, MAX_SAFE_RESULTS).filter((item) => item.type === "file").flatMap((item) =>
+      (item.matches ?? []).slice(0, 2).filter((match) => Boolean(match.text?.trim())).map((match) => ({ document: toDocumentRef(item), text: match.text!.slice(0, 400) }))),
     summary: JSON.stringify({
       result_kind: parsed.data.result_kind,
       results: safeResults,

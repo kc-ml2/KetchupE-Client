@@ -2,7 +2,11 @@ import { AgentError, EVIDENCE_SNIPPET_MAX_CHARS, type AgentErrorCode, type Evide
 import type { ChunkRecord, IngestedSource, SearchMode, SearchResult, Tomato, TomatoSearch } from "../tomato/tomato.ts";
 import type { TrolleyDiscoveryTool } from "./trolley.ts";
 
-export type ExternalCallResult = { summary: string; documents: ExternalDocumentRef[] };
+export type ExternalCallResult = {
+  summary: string;
+  documents: ExternalDocumentRef[];
+  excerpts?: Array<{ document: ExternalDocumentRef; text: string }>;
+};
 
 /** Retrieval surface the harness depends on; backed by an in-process Tomato or the utility-process client. */
 export interface SearchTools {

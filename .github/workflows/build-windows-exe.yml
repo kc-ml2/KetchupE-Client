@@ -24,8 +24,6 @@ jobs:
       KETCHUPE_TELEMETRY_CONTENT_MODE: ${{ vars.KETCHUPE_TELEMETRY_CONTENT_MODE }}
       KETCHUPE_ENVIRONMENT: production
       KETCHUPE_TENANT_ID: public
-      LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://centinels.ml2-alpha.com/v1/' }}
-      LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
       LITELLM_MODEL_ALIAS: loki
 
     steps:
@@ -40,11 +38,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Validate packaged LiteLLM settings
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:LITELLM_API_KEY)) { throw "Repository secret LITELLM_API_KEY is required." }
 
       - name: Contract, Tomato keyword, and fixture harness tests
         run: npm run test:electron

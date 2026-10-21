@@ -9,6 +9,8 @@ export const TOMATO_LONG_CALL_TIMEOUT_MS = 60 * 60 * 1000;
 
 /** Main-process handle to the Tomato utility process. Restarts the worker lazily after a crash; in-flight calls fail with TOOL_UNAVAILABLE. */
 export class TomatoClient {
+  private stopped = false;
+  private stopping?: Promise<void>;
   private child: UtilityProcess | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
@@ -23,6 +25,7 @@ export class TomatoClient {
   }
 
   private ensureChild(): UtilityProcess {
+    if (this.stopped) throw new AgentError("CANCELLED", "tomato stopped");
     if (this.child) return this.child;
     const child = utilityProcess.fork(this.workerPath, [this.home], { serviceName: "ketchupe-tomato", stdio: "inherit" });
     child.on("message", (message: WorkerResponse) => this.onMessage(message));
@@ -97,8 +100,19 @@ export class TomatoClient {
     return this.call("collectionFingerprint", [name]);
   }
 
-  stop(): void {
-    this.child?.kill();
-    this.child = undefined;
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.stopped = true;
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new AgentError("CANCELLED", "tomato stopped"));
+    }
+    this.pending.clear();
+    const child = this.child;
+    this.stopping = child ? new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      child.kill();
+    }) : Promise.resolve();
+    return this.stopping;
   }
 }

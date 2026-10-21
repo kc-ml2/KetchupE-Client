@@ -1,68 +1,85 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 // v3 local RAG agent API — narrow surface, no paths or secrets cross this bridge.
-contextBridge.exposeInMainWorld('agentAPI', {
-  submitBusinessInput: (runId, actionId, input) => ipcRenderer.invoke('business:submit', runId, actionId, input),
-  listBusinessArtifacts: (threadId) => ipcRenderer.invoke('business:artifacts', threadId),
-  openBusinessArtifact: (id) => ipcRenderer.invoke('business:openArtifact', id),
-  saveBusinessArtifact: (id) => ipcRenderer.invoke('business:saveArtifact', id),
-  submitWorkSelection: (runId, actionId, selection) => ipcRenderer.invoke('work:submitSelection', runId, actionId, selection),
-  pickWorkSources: (kind) => ipcRenderer.invoke('work:pickSources', kind),
-  pickWorkFiles: (multiple) => ipcRenderer.invoke('work:pickFiles', multiple),
-  listWorkSources: () => ipcRenderer.invoke('work:listSources'),
-  removeWorkSource: (id) => ipcRenderer.invoke('work:removeSource', id),
-  listWorkFiles: (sourceId) => ipcRenderer.invoke('work:listFiles', sourceId),
-  inspectWorkFile: (file, sheet, headerRow) => ipcRenderer.invoke('work:inspect', file, sheet, headerRow),
-  previewSourceMapping: (file, fingerprint, mapping) => ipcRenderer.invoke('work:preview', file, fingerprint, mapping),
-  listSourceProfiles: () => ipcRenderer.invoke('work:listProfiles'),
-  saveSourceProfile: (file, fingerprint, profile) => ipcRenderer.invoke('work:saveProfile', file, fingerprint, profile),
-  removeSourceProfile: (id) => ipcRenderer.invoke('work:removeProfile', id),
-  getWorkspace: () => ipcRenderer.invoke('agent:getWorkspace'),
-  setMemoryEnabled: (workspaceId, enabled) => ipcRenderer.invoke('agent:setMemoryEnabled', workspaceId, enabled),
+function agentAPI(sessionId) {
+  const invoke = (channel, ...args) => ipcRenderer.invoke(channel, sessionId, ...args);
+  return {
+  submitBusinessInput: (runId, actionId, input) => invoke('business:submit', runId, actionId, input),
+  listBusinessArtifacts: (threadId) => invoke('business:artifacts', threadId),
+  openBusinessArtifact: (id) => invoke('business:openArtifact', id),
+  saveBusinessArtifact: (id) => invoke('business:saveArtifact', id),
+  submitWorkSelection: (runId, actionId, selection) => invoke('work:submitSelection', runId, actionId, selection),
+  pickWorkSources: (kind) => invoke('work:pickSources', kind),
+  pickWorkFiles: (multiple) => invoke('work:pickFiles', multiple),
+  listWorkSources: () => invoke('work:listSources'),
+  removeWorkSource: (id) => invoke('work:removeSource', id),
+  listWorkFiles: (sourceId) => invoke('work:listFiles', sourceId),
+  inspectWorkFile: (file, sheet, headerRow) => invoke('work:inspect', file, sheet, headerRow),
+  previewSourceMapping: (file, fingerprint, mapping) => invoke('work:preview', file, fingerprint, mapping),
+  listSourceProfiles: () => invoke('work:listProfiles'),
+  saveSourceProfile: (file, fingerprint, profile) => invoke('work:saveProfile', file, fingerprint, profile),
+  removeSourceProfile: (id) => invoke('work:removeProfile', id),
+  getWorkspace: () => invoke('agent:getWorkspace'),
+  setMemoryEnabled: (workspaceId, enabled) => invoke('agent:setMemoryEnabled', workspaceId, enabled),
 
-  createThread: (workspaceId) => ipcRenderer.invoke('agent:createThread', workspaceId),
-  listThreads: (workspaceId) => ipcRenderer.invoke('agent:listThreads', workspaceId),
-  loadThread: (threadId, beforeMessageId, limit) => ipcRenderer.invoke('agent:loadThread', threadId, beforeMessageId, limit),
-  renameThread: (threadId, title) => ipcRenderer.invoke('agent:renameThread', threadId, title),
-  deleteThread: (threadId) => ipcRenderer.invoke('agent:deleteThread', threadId),
-  openRun: (threadId) => ipcRenderer.invoke('agent:openRun', threadId),
+  createThread: (workspaceId) => invoke('agent:createThread', workspaceId),
+  listThreads: (workspaceId) => invoke('agent:listThreads', workspaceId),
+  loadThread: (threadId, beforeMessageId, limit) => invoke('agent:loadThread', threadId, beforeMessageId, limit),
+  renameThread: (threadId, title) => invoke('agent:renameThread', threadId, title),
+  deleteThread: (threadId) => invoke('agent:deleteThread', threadId),
+  openRun: (threadId) => invoke('agent:openRun', threadId),
 
-  startRun: (input) => ipcRenderer.invoke('agent:startRun', input),
-  resumeRun: (runId, text) => ipcRenderer.invoke('agent:resumeRun', runId, text),
-  cancelRun: (runId) => ipcRenderer.invoke('agent:cancelRun', runId),
+  startRun: (input) => invoke('agent:startRun', input),
+  resumeRun: (runId, text) => invoke('agent:resumeRun', runId, text),
+  cancelRun: (runId) => invoke('agent:cancelRun', runId),
   onAgentEvent: (listener) => {
-    const handler = (_event, payload) => listener(payload);
+    const handler = (_event, payload) => { if (payload.sessionId === sessionId) listener(payload.event); };
     ipcRenderer.on('agent:event', handler);
     return () => ipcRenderer.removeListener('agent:event', handler);
   },
-  recordInteraction: (runId, kind) => ipcRenderer.invoke('agent:recordInteraction', runId, kind),
-  openCitation: (runId, evidenceId) => ipcRenderer.invoke('agent:openCitation', runId, evidenceId),
+  recordInteraction: (runId, kind) => invoke('agent:recordInteraction', runId, kind),
+  openCitation: (runId, evidenceId) => invoke('agent:openCitation', runId, evidenceId),
 
-  addCollection: () => ipcRenderer.invoke('collection:add'),
-  removeCollection: (name) => ipcRenderer.invoke('collection:remove', name),
-  syncCollection: (name) => ipcRenderer.invoke('collection:sync', name),
-  listCollections: (workspaceId) => ipcRenderer.invoke('collection:list', workspaceId),
-  setCollectionActive: (workspaceId, name, active) => ipcRenderer.invoke('collection:setActive', workspaceId, name, active),
+  addCollection: () => invoke('collection:add'),
+  removeCollection: (name) => invoke('collection:remove', name),
+  syncCollection: (name) => invoke('collection:sync', name),
+  listCollections: (workspaceId) => invoke('collection:list', workspaceId),
+  setCollectionActive: (workspaceId, name, active) => invoke('collection:setActive', workspaceId, name, active),
   onCollectionsChanged: (listener) => {
-    const handler = () => listener();
+    const handler = (_event, payload) => { if (payload.sessionId === sessionId) listener(); };
     ipcRenderer.on('collection:changed', handler);
     return () => ipcRenderer.removeListener('collection:changed', handler);
   },
 
-  listMemories: (workspaceId) => ipcRenderer.invoke('agent:listMemories', workspaceId),
-  addMemory: (workspaceId, input) => ipcRenderer.invoke('agent:addMemory', workspaceId, input),
-  updateMemory: (id, input) => ipcRenderer.invoke('agent:updateMemory', id, input),
-  setMemoryPinned: (id, pinned) => ipcRenderer.invoke('agent:setMemoryPinned', id, pinned),
-  confirmMemory: (id) => ipcRenderer.invoke('agent:confirmMemory', id),
-  deleteMemory: (id) => ipcRenderer.invoke('agent:deleteMemory', id),
+  listMemories: (workspaceId) => invoke('agent:listMemories', workspaceId),
+  addMemory: (workspaceId, input) => invoke('agent:addMemory', workspaceId, input),
+  updateMemory: (id, input) => invoke('agent:updateMemory', id, input),
+  setMemoryPinned: (id, pinned) => invoke('agent:setMemoryPinned', id, pinned),
+  confirmMemory: (id) => invoke('agent:confirmMemory', id),
+  deleteMemory: (id) => invoke('agent:deleteMemory', id),
 
-  getModelSettings: () => ipcRenderer.invoke('agent:getModelSettings'),
-  setModelSettings: (settings) => ipcRenderer.invoke('agent:setModelSettings', settings),
-  listModels: () => ipcRenderer.invoke('agent:listModels'),
-  testModelConnection: () => ipcRenderer.invoke('agent:testModelConnection'),
-  startCanvas: (input) => ipcRenderer.invoke('canvas:start', input),
-  canvasEdit: (runId, op, displayText) => ipcRenderer.invoke('canvas:edit', runId, op, displayText),
-  canvasAnchorChoice: (runId, choice) => ipcRenderer.invoke('canvas:anchorChoice', runId, choice),
-  loadCanvas: (runId) => ipcRenderer.invoke('canvas:load', runId),
-  openCanvasSource: (canvasId, documentId) => ipcRenderer.invoke('canvas:openSource', canvasId, documentId),
+  getModelSettings: () => invoke('agent:getModelSettings'),
+  setModelSettings: (settings) => invoke('agent:setModelSettings', settings),
+  listModels: () => invoke('agent:listModels'),
+  testModelConnection: () => invoke('agent:testModelConnection'),
+  startCanvas: (input) => invoke('canvas:start', input),
+  canvasEdit: (runId, op, displayText) => invoke('canvas:edit', runId, op, displayText),
+  canvasAnchorChoice: (runId, choice) => invoke('canvas:anchorChoice', runId, choice),
+  loadCanvas: (runId) => invoke('canvas:load', runId),
+  openCanvasSource: (canvasId, documentId) => invoke('canvas:openSource', canvasId, documentId),
+};
+}
+
+contextBridge.exposeInMainWorld('authAPI', {
+  getState: () => ipcRenderer.invoke('auth:getState'),
+  requestCode: (email) => ipcRenderer.invoke('auth:requestCode', email),
+  verifyCode: (code) => ipcRenderer.invoke('auth:verifyCode', code),
+  retry: () => ipcRenderer.invoke('auth:retry'),
+  logout: () => ipcRenderer.invoke('auth:logout'),
+  onChange: (listener) => {
+    const handler = (_event, state) => listener(state);
+    ipcRenderer.on('auth:changed', handler);
+    return () => ipcRenderer.removeListener('auth:changed', handler);
+  },
+  agent: (sessionId) => agentAPI(sessionId),
 });

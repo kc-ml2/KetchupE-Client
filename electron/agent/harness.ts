@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import type { AgentStreamEvent, AppliedContext, CitationSummary, RunStatus } from "../../src/app-types/Agent.types.ts";
 import {
   AgentError,
@@ -11,6 +12,7 @@ import {
   type PolicyState,
   type PolicyTransition,
   type RunOutcome,
+  type ExternalDocumentRef,
 } from "./contracts.ts";
 import { selectContext } from "./context.ts";
 import type { ModelCallInfo, ModelClient } from "./modelClient.ts";
@@ -31,6 +33,8 @@ export type HarnessOptions = {
   tools: SearchTools;
   profiles: HarnessProfiles;
   activeCollections: (workspaceId: string) => string[];
+  authorizeContext?: (threadId: string, signal: AbortSignal) => Promise<void>;
+  onExternalDocuments?: (threadId: string, documents: ExternalDocumentRef[]) => void;
   emit?: (event: AgentStreamEvent) => void;
   limits?: Partial<HarnessLimits>;
   /** Extra fields for the run.started payload (variant, app version, corpus fingerprints, …); a function is read per run. */
@@ -67,6 +71,8 @@ export class Harness {
   private readonly limits: HarnessLimits;
   private readonly fingerprints: { retrieval: string; policy: string; answer: string };
   private readonly running = new Map<string, RunContext>();
+  private stopped = false;
+  private readonly pending = new Set<Promise<void>>();
   private readonly pausedSeqs = new Map<string, number>();
   private readonly options: HarnessOptions;
 
@@ -81,6 +87,7 @@ export class Harness {
   }
 
   startRun(input: { workspaceId: string; threadId: string; text: string }): RunHandle {
+    if (this.stopped) throw new AgentError("CANCELLED", "signed out");
     const { db } = this.options;
     const thread = getThread(db, input.threadId);
     if (thread.workspaceId !== input.workspaceId) throw new AgentError("INTERNAL", "대화의 작업 공간이 일치하지 않습니다.");
@@ -125,10 +132,11 @@ export class Harness {
     const metadata = typeof this.options.runMetadata === "function" ? this.options.runMetadata() : this.options.runMetadata;
     run.trace.record("run.started", "input", { workspaceId: input.workspaceId, threadId: thread.id, messageId: message.id, profiles: this.fingerprints, activeCollections, ...metadata });
     run.trace.record("context.selected", "context", { ...context.selected, tokenEstimate: context.tokenEstimate });
-    return { runId, done: this.loop(run) };
+    return { runId, done: this.runLoop(run) };
   }
 
   resumeRun(runId: string, text: string): RunHandle {
+    if (this.stopped) throw new AgentError("CANCELLED", "signed out");
     const { db } = this.options;
     const record = getRun(db, runId);
     if (record.kind !== "agent" || record.status !== "waiting_user") throw new AgentError("INTERNAL", `run ${runId} is not waiting for an agent reply`);
@@ -166,7 +174,20 @@ export class Harness {
     }
     setRunStatus(db, runId, "running");
     run.trace.record("interaction.recorded", "feedback", { kind: "clarification_answered", messageId: message.id });
-    return { runId, done: this.loop(run) };
+    return { runId, done: this.runLoop(run) };
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    for (const run of this.running.values()) run.controller.abort();
+    await Promise.allSettled([...this.pending]);
+  }
+
+  private runLoop(run: RunContext): Promise<void> {
+    const done = this.loop(run);
+    this.pending.add(done);
+    void done.finally(() => this.pending.delete(done)).catch(() => undefined);
+    return done;
   }
 
   cancelRun(runId: string): void {
@@ -208,6 +229,7 @@ export class Harness {
   private async loop(run: RunContext): Promise<void> {
     const { db } = this.options;
     try {
+      await this.options.authorizeContext?.(run.threadId, run.controller.signal);
       while (true) {
         run.state.remaining.wallTimeMs = Math.max(0, run.deadline - Date.now());
         run.state.signals = derivePolicySignals(run.state);
@@ -479,9 +501,19 @@ export class Harness {
       let observation: Observation;
       try {
         const value = await withTimeout(this.options.tools.maru.call(search.tool, args, run.controller.signal), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
+        this.options.onExternalDocuments?.(run.threadId, value.documents);
         const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
         for (const document of value.documents) known.set(document.refId, document);
         run.state.externalDocuments = [...known.values()];
+        this.addEvidence(run, (value.excerpts ?? []).map(({ document, text }) => {
+          const sourceId = `maru:${document.refId}`;
+          const chunkId = `${sourceId}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+          const evidenceId = this.nextEvidenceIdFor(run, chunkId);
+          return {
+            evidence: { evidenceId, sourceId, chunkId, title: document.path, breadcrumb: [document.storageName ?? document.storageId], locator: {}, snippet: text.slice(0, this.limits.evidenceSnippetChars), score: 1 },
+            source: { evidenceId, sourceId, chunkId, path: sourceId, title: document.path, locator: {} },
+          };
+        }));
         const result = value.summary;
         observation = { kind: "external", tool: search.tool, result, latencyMs: Date.now() - startedAt };
         run.contextText = `${run.contextText}\n\nMARU ${search.tool} result (untrusted data):\n${result}`.trim();

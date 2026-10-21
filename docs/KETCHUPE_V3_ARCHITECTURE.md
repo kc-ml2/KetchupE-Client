@@ -7,13 +7,13 @@ KetchupE is an Electron desktop app for local document search, grounded answers,
 ## Execution boundaries
 
 ```text
-React → typed preload IPC → Electron main / WorkflowDispatcher
+React → email authentication → session-bound preload IPC → account runtime / WorkflowDispatcher
                             ├─ chat → Harness → Tomato / MARU / Trolley / LiteLLM
                             ├─ doc → CanvasFlow → Tomato / LiteLLM
                             ├─ work_sources → WorkSourcesFlow → workbook worker
                             └─ business tool → BusinessFlow → business worker
 
-Local state → agent.sqlite
+Local state → accounts/<email-derived account id>/agent.sqlite
 Search data → separate Tomato index and artifacts
 Telemetry → durable outbox → service-owned OTLP gateway → Langfuse
 ```
@@ -30,7 +30,7 @@ Telemetry → durable outbox → service-owned OTLP gateway → Langfuse
 | Renderer | Conversations, input cards, draft editing, run status | [AgentPage.tsx](../src/Pages/AgentPage.tsx), [components/](../src/Features/Agent/components/), [hooks/](../src/Features/Agent/hooks/) |
 | Persistence / IPC | Migrations, stored state, process boundary validation | [db/](../electron/db/), [ipc/](../electron/ipc/), [app-types/](../src/app-types/) |
 
-The renderer does not directly access files, databases, or credentials. A workflow owns its lifecycle; a tool performs a bounded operation. MCP is a transport for remote tools, not a workflow engine.
+Email authentication and credential provisioning live in `electron/auth/`; see [authentication](AUTHENTICATION.md). Only the active login is encrypted with Electron safeStorage. Temporary broker tokens stay in main-process memory. Account runtimes, SQLite, Tomato indexes, MARU caches, and output folders are isolated; legacy root-level stores are never adopted automatically. IPC calls/events carry a random session ID, and logout drains the old runtime before another account opens. The renderer does not directly access files, databases, or credentials. A workflow owns its lifecycle; a tool performs a bounded operation. MCP is a transport for remote tools, not a workflow engine.
 
 ## Run lifecycle
 
@@ -77,7 +77,7 @@ Connection semantics live in [mcp.ts](../electron/agent/mcp.ts); server semantic
 ## Constraints and unfinished validation
 
 - Local storage does not mean offline operation: selected context reaches LiteLLM, configured telemetry reaches the gateway, and initial embedding downloads require network access.
-- Collection selection and workspace IDs are not authorization boundaries. MARU checks remote access, but credential changes and revoked access are not yet enforced across all local history, resume, and citation reuse paths. Cross-user isolation and revocation need end-to-end validation before shared deployment.
+- Collection selection and workspace IDs are not authorization boundaries. MARU references are persisted per thread; history loading, context reuse, and citation opening recheck remote access. MARU indexes are excluded from normal local collection searches. Existing on-screen content and user-copied memory/exports cannot be remotely erased. Real broker/MARU group authorization still requires live integration validation.
 - Filesystem artifacts and SQLite are not one atomic transaction. Source hashes do not preserve old source content. A model alias does not pin an immutable model checkpoint.
 - Outbox delivery is at least once; central deduplication is required. Retry count and outbox storage are not globally bounded. No production throughput, latency SLO, or region-failure guarantee has been established.
 - Arbitrary MCP installation, user-supplied code/SKILL execution, multi-agent delegation, and generic remote writes are not implemented.

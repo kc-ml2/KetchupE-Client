@@ -1,6 +1,8 @@
 import {
   Client,
   StreamableHTTPClientTransport,
+  UnauthorizedError,
+  InsufficientScopeError,
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/client";
@@ -51,6 +53,8 @@ export class McpConnection {
       if (signal.aborted) throw new AgentError("CANCELLED", "cancelled");
       if (error instanceof AgentError) throw error;
       await this.reset();
+      if (error instanceof UnauthorizedError) throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} 인증이 거부되었습니다. 로그아웃 후 다시 인증해 주세요.`);
+      if (error instanceof InsufficientScopeError) throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} 접근 권한이 없습니다. 운영자에게 확인해 주세요.`);
       throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} ${name} call failed`);
     }
   }

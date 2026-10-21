@@ -110,7 +110,7 @@ export function buildRunTrace(
 
   const transitions = events.filter((event) => event.type === "policy.decided" && event.payload.transition);
   const decisions = transitions.map((event) => (event.payload.transition as PolicyTransition).decision);
-  const usedExternal = transitions.some((event) => {
+  const usedExternal = Boolean(db.prepare("SELECT 1 FROM maru_documents WHERE thread_id = ? LIMIT 1").get(run.thread_id)) || transitions.some((event) => {
     const transition = event.payload.transition as PolicyTransition;
     return transition.observation?.kind === "external"
       || transition.decision.search?.tool === "browse_storage"
@@ -478,7 +478,7 @@ function scoreTrace(score: Score, resource: Record<string, string>, environment:
   }] }] }] };
 }
 
-export type TelemetryIdentity = { installId: string; appVersion: string; os: string };
+export type TelemetryIdentity = { installId: string; accountId?: string; appVersion: string; os: string };
 type OutboxRow = { id: string; kind: "run" | "trace" | "score"; run_id: string | null; payload: string | null; attempts: number };
 type FlushResult = { traces: number; scores: number; error?: string };
 
@@ -504,7 +504,7 @@ export class LangfuseExporter {
   }
 
   userId(): string {
-    return `install:${hmac(this.identity.installId, "ketchupe-user")}`;
+    return this.identity.accountId ? `account:${this.identity.accountId}` : `install:${hmac(this.identity.installId, "ketchupe-user")}`;
   }
 
   resource(): Record<string, string> {

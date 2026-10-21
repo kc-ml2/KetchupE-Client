@@ -30,7 +30,7 @@ beforeEach(async () => {
     return job.action.kind === "inspect" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.headerRow) : extractRows(book, job.fingerprint, job.action.mapping);
   });
   flow = new WorkSourcesFlow(db, () => undefined);
-  registerWorkSourceHandlers({ db, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
+  registerWorkSourceHandlers({ db, assertSourcePaths: async () => undefined, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
 });
 afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); await rm(folder, { recursive: true, force: true }); });
 

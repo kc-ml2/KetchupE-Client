@@ -55,7 +55,7 @@ const AgentPage = (): React.JSX.Element => {
   const { threadId } = useParams<{ threadId: string }>();
   const selectedId = threadId ?? null;
   const { createThread } = useContext(ThreadsContext) as ThreadsContextType;
-  const { messages, hasMore, reload, loadOlder } = useThreadMessages(
+  const { messages, hasMore, reload, loadOlder, error: historyError } = useThreadMessages(
     api,
     selectedId,
   );
@@ -264,7 +264,7 @@ const AgentPage = (): React.JSX.Element => {
       return "에이전트의 질문에 답해 주세요...";
     return "무엇을 도와드릴까요? 예: 계약서 초안 작성, 일일자금일보 작성";
   })();
-  const errorText = startError ?? view.error ?? canvas.error ?? null;
+  const errorText = startError ?? historyError ?? view.error ?? canvas.error ?? null;
   const responsePersisted = Boolean(
     !view.isRunning &&
     view.runId &&
@@ -416,7 +416,7 @@ const AgentPage = (): React.JSX.Element => {
                     </>
                   ) : (
                     <p className="text-xs text-[#71717A]">
-                      이 배포판은 모델 연결이 고정되어 있어 변경할 수 없습니다.
+                      로그인한 계정의 LiteLLM·MARU 키를 사용합니다. 연결 정보는 이메일 인증을 통해 자동으로 설정됩니다.
                     </p>
                   )}
                 </>
@@ -446,7 +446,7 @@ const AgentPage = (): React.JSX.Element => {
                   hasMore={hasMore}
                   onLoadOlder={() => void loadOlder()}
                   onOpenCitation={(runId, evidenceId) =>
-                    void api.openCitation(runId, evidenceId)
+                    void api.openCitation(runId, evidenceId).catch(() => setStartError("원문을 열지 못했습니다. 문서 접근 권한과 연결 상태를 확인해 주세요."))
                   }
                 />
                 {view.action?.type === "business_tool" && view.runId && (
