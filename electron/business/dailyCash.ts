@@ -138,7 +138,7 @@ export const dailyCashTool: BusinessTool = {
         if (l.activeTerms.includes(row) && maturity(candidate, row) <= reportDate) { if (!a.balance.eq(0)) flowIssues.push(`${a.key}: 만기 도래했지만 계좌잔고가 ${a.balance}입니다. 만기 입금/연장 내역을 확인해 원천을 정정하세요.`); continue; }
         if (!sameWon(opening.plus(flow.incoming).minus(flow.outgoing), a.balance)) flowIssues.push(`${a.key}: 전일일보 ${opening} + 입금 ${flow.incoming} - 지급 ${flow.outgoing} ≠ 계좌잔고 ${a.balance} (장부잔액 ${a.ledger})`);
       }
-      if (flowIssues.length) return ask(`장부와 실제 잔고 차이/전일 이월을 확인하세요. 차이를 임의로 지급 처리하지 않습니다. 확인한 실제 입출금 총액을 입력하세요. 예: {"140013557434:KRW":{"incoming":"48200","outgoing":"1000000000"}}\n${flowIssues.join("\n")}`, [{ key: "cashChanges", label: "확인한 실제 계좌별 입출금 JSON" }, { key: "actualEdits", label: "실적 확인/수정" }]);
+      if (flowIssues.length) return ask(`장부와 실제 잔고 차이/전일 이월을 확인하세요. 차이를 임의로 지급 처리하지 않습니다. 확인한 실제 입출금 총액을 입력하세요. 예: {"140013557434:KRW":{"incoming":"48200","outgoing":"1000000000"}}\n${flowIssues.join("\n")}`, [{ key: "cashChanges", label: "확인한 실제 계좌별 입출금 JSON" }, movementField("actualEdits", `${reportDate} 실적`, planActual)]);
       const holdingOpening = sum(cashRows.filter((r) => r < 20).map((r) => previous.values[`H${r}`]));
       const holdingClosing = sum(kc.accounts.filter((a) => bindings.get(a.key)?.startsWith("H") && cashRows.includes(Number(bindings.get(a.key)!.slice(1))) && a.currency === "KRW").map((a) => a.balance));
       const actualClosing = holdingOpening.plus(sum(actual.filter((m) => m.direction === "in").map((m) => m.amount))).minus(sum(actual.filter((m) => m.direction === "out").map((m) => m.amount)));

@@ -10,7 +10,7 @@ export type WorkbookReply = { ok: true; result: WorkbookOverview | ExtractionPre
 /** One bounded process per read. Parsing cannot block the app or outlive its timeout. */
 export function readWorkbookJob(workerPath: string, job: WorkbookJob): Promise<WorkbookOverview | ExtractionPreview> {
   return new Promise((resolve, reject) => {
-    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-workbook", stdio: "ignore", execArgv: ["--max-old-space-size=256"] });
+    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-workbook", stdio: "ignore", execArgv: ["--max-old-space-size=1024"] });
     let settled = false;
     const finish = (error?: Error, result?: WorkbookOverview | ExtractionPreview) => {
       if (settled) return;

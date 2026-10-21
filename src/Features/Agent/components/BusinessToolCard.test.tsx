@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import type { KetchupEAgentAPI } from "@app-types/Agent.types";
 import type { BusinessAction } from "@app-types/BusinessTool.types";
@@ -123,4 +123,35 @@ it("edits planned movements in a table and submits the amount changes and added 
   await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledTimes(1));
   const submitted = vi.mocked(api.submitBusinessInput).mock.calls[0][2];
   expect(JSON.parse(submitted.values.actualEdits)).toEqual({ changes: [{ index: 2, amount: "55550" }], add: [{ direction: "in", description: "현금반납", party: "박정경", amount: "48200" }] });
+});
+
+it("adds a work-date plan separately from actuals and keeps it editable at final review", async () => {
+  const api = apiFixture();
+  const table: BusinessAction = { ...action, fields: [
+    { key: "actualEdits", label: "10/14 실적", type: "movements", required: true, rows: [] },
+    { key: "planEdits", label: "10/15 계획", type: "movements", required: true, rows: [] },
+  ], input: { values: {}, files: {} } };
+  const view = render(<BusinessToolCard key={table.id} api={api} runId="run" action={table} />);
+  const plan = within(screen.getByRole("group", { name: "10/15 계획 *" }));
+  fireEvent.click(plan.getByRole("button", { name: "계획에 없는 거래 추가" }));
+  fireEvent.change(plan.getByLabelText("추가 거래 적요"), { target: { value: "당일 추가 지급" } });
+  fireEvent.change(plan.getByLabelText("추가 거래 거래처"), { target: { value: "추가 거래처" } });
+  fireEvent.change(plan.getByLabelText("추가 거래 금액"), { target: { value: "5000" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledTimes(1));
+  const submitted = vi.mocked(api.submitBusinessInput).mock.calls[0][2];
+  expect(submitted.values.actualEdits).toBe("확인");
+  expect(JSON.parse(submitted.values.planEdits)).toEqual({ changes: [], add: [{ direction: "out", description: "당일 추가 지급", party: "추가 거래처", amount: "5000" }] });
+  const review: BusinessAction = { ...table, id: "review", input: submitted, fields: [...table.fields, { key: "review", label: "최종 확인", type: "text", required: true, confirm: "확인 ab12" }] };
+  view.rerender(<BusinessToolCard key={review.id} api={api} runId="run" action={review} />);
+  const reviewedPlan = within(screen.getByRole("group", { name: "10/15 계획 *" }));
+  expect(reviewedPlan.getByLabelText("추가 거래 적요")).toHaveValue("당일 추가 지급");
+  expect(reviewedPlan.getByLabelText("추가 거래 금액")).toHaveValue(5000);
+  fireEvent.change(reviewedPlan.getByLabelText("추가 거래 금액"), { target: { value: "6000" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledTimes(2));
+  const final = vi.mocked(api.submitBusinessInput).mock.calls[1][2];
+  expect(JSON.parse(final.values.planEdits).add[0].amount).toBe("6000");
+  expect(final.values.actualEdits).toBe("확인");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
