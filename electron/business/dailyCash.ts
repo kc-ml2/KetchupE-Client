@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { BusinessTool, ToolResult } from "./contracts.ts";
 import type { BusinessField } from "../../src/app-types/BusinessTool.types.ts";
 import { loadWorkbook } from "../work/mapping.ts";
+import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { readCashStatus, differences, parseOverrides } from "./dailyCash/cashStatus.ts";
 import { fetchHana, type Rates } from "./dailyCash/hana.ts";
 import { renderSheet } from "./dailyCash/image.ts";
@@ -79,13 +80,15 @@ export const dailyCashTool: BusinessTool = {
       if (workDate > new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) throw new Error("미래 작업일의 최종 환율과 실제 잔고는 확정할 수 없습니다.");
       for (const key of ["previousReport", "cashStatus"]) if (files[key]?.length !== 1) throw new Error(`${key}: 파일 하나를 지정하세요.`);
       if (!files.weeklyPlans?.length) throw new Error("주간계획 파일이 필요합니다.");
-      const [book, statusBook, ...weeks] = await Promise.all([files.previousReport[0], files.cashStatus[0], ...files.weeklyPlans].map((f) => loadWorkbook(f.bytes)));
-      if (book.getWorksheet(sheetDate(reportDate))) throw new Error(`${sheetDate(reportDate)} 시트가 이미 있습니다. 중복 생성하지 않습니다.`);
-      const candidate = book.worksheets.filter((s) => /^\d{6}$/.test(s.name) && isoSheetDate(s.name) < reportDate).sort((a, b) => b.name.localeCompare(a.name))[0];
-      if (!candidate) throw new Error("기준일보다 앞선 날짜의 전일 일보 시트가 없습니다.");
-      const priorDate = isoSheetDate(candidate.name);
+      const archive = await SelectiveWorkbook.open(files.previousReport[0].bytes);
+      if (archive.sheetNames.includes(sheetDate(reportDate))) throw new Error(`${sheetDate(reportDate)} 시트가 이미 있습니다. 중복 생성하지 않습니다.`);
+      const priorName = archive.sheetNames.filter((name) => /^\d{6}$/.test(name) && isoSheetDate(name) < reportDate).sort().at(-1);
+      if (!priorName) throw new Error("기준일보다 앞선 날짜의 전일 일보 시트가 없습니다.");
+      const priorDate = isoSheetDate(priorName);
       if (priorDate < shiftDate(reportDate, -7)) throw new Error(`전일 일보가 너무 오래되었습니다 (${priorDate}). ${reportDate} 직전 마감 일보가 포함된 파일로 새 작업을 시작하세요.`);
       if (priorDate !== shiftDate(reportDate, -1) && values.carryConfirmation !== "확인") return ask(`${priorDate} 마감 금액을 ${reportDate}의 전일금액으로 이월합니다. 휴무일 동안 거래가 없고 마지막 마감 일보가 맞으면 확인하고 계속하세요.`, [{ key: "carryConfirmation", label: "휴무일 거래 없음 · 마지막 마감 일보 확인", confirm: "확인" }]);
+      const [book, statusBook, ...weeks] = await Promise.all([archive.loadSheet(priorName), ...[files.cashStatus[0], ...files.weeklyPlans].map((f) => loadWorkbook(f.bytes))]);
+      const candidate = book.getWorksheet(priorName)!;
       const filenameDate = files.cashStatus[0].name.normalize("NFC").match(/^(\d{6})_/)?.[1];
       const statusDate = filenameDate ? isoSheetDate(filenameDate) : values.statusDate;
       if (!statusDate) return ask("자금현황표 내부에 기준일이 없습니다. 이 자료의 계좌잔고 마감일(작업일 전날)을 확인하세요.", [{ key: "statusDate", label: "자금현황표 기준일 YYYY-MM-DD" }]);
@@ -176,8 +179,8 @@ export const dailyCashTool: BusinessTool = {
       ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
       const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes);
       if (!sameWon(built.totalKrw, kc.total)) throw new Error(`총 원화 대사 불일치: 일보 ${built.totalKrw}, KC ${kc.total}, 차이 ${built.totalKrw.minus(kc.total)}. 결과를 발행하지 않습니다.`);
-      signal.throwIfAborted(); const image = await renderSheet(built.sheet, built.lastRow); const bytes = new Uint8Array(await book.xlsx.writeBuffer()); signal.throwIfAborted();
-      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치.`, file: { name: files.previousReport[0].name, bytes }, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최종 환율·만기·계좌 연결 확인", passed: true }], externalData: audit };
+      signal.throwIfAborted(); const image = await renderSheet(built.sheet, built.lastRow); const bytes = await archive.appendSheet(book, built.sheet.name); signal.throwIfAborted();
+      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치.`, file: { name: files.previousReport[0].name, bytes }, validationSheet: built.sheet.name, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최종 환율·만기·계좌 연결 확인", passed: true }], externalData: audit };
     } catch (error) { signal.throwIfAborted(); return { status: "failed", message: error instanceof Error ? error.message : String(error) }; }
   },
 };

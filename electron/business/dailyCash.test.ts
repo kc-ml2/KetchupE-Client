@@ -2,9 +2,11 @@
 import { expect, it, vi } from "vitest";
 import ExcelJS from "exceljs";
 import sharp from "sharp";
+import JSZip from "jszip";
+import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { dailyCashTool, applyEdits } from "./dailyCash.ts";
 import { bindAccounts, fitDescription, layout, priorAmounts } from "./dailyCash/report.ts";
-import { fixtureBooks } from "./dailyCash/fixtures.ts";
+import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
@@ -274,3 +276,32 @@ it("falls back to manually entered rates after a failed retry and records them a
   expect(review.checkpoint).toMatchObject({ rates: { source: expect.stringContaining("수동"), round: "8", date: "2026-10-13", perUnit: { USD: "1402.5", JPY: "9.5012", CNY: "199.9" } } });
   expect(fetchHana).toHaveBeenCalledTimes(2);
 });
+
+
+it("calculates and saves the next daily cash report from 366 full report sheets while parsing only the required prior sheet", async () => {
+  const { input } = await setup(); const annual = await annualReportFixture();
+  input.files.previousReport = [{ bytes: annual, name: "연간일보.xlsx", fingerprint: "annual" }];
+  const parsed: string[][] = []; const load = SelectiveWorkbook.prototype.loadSheet;
+  const spy = vi.spyOn(SelectiveWorkbook.prototype, "loadSheet").mockImplementation(async function (this: SelectiveWorkbook, name: string) {
+    const book = await load.call(this, name); parsed.push(book.worksheets.map((sheet) => sheet.name)); return book;
+  });
+  const started = performance.now();
+  try {
+    const result = await confirm(input);
+    expect(result.status, JSON.stringify(result.status !== "completed" && result)).toBe("completed");
+    if (result.status !== "completed") return;
+    expect(parsed).toEqual([["261012"], ["261012"]]);
+    expect(result.validationSheet).toBe("261013");
+    const output = await SelectiveWorkbook.open(result.file.bytes);
+    expect(output.sheetNames).toHaveLength(367);
+    const latest = await output.loadSheet(result.validationSheet!);
+    expect(latest.worksheets).toHaveLength(1);
+    expect(latest.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
+    expect(latest.getWorksheet("261013")!.pageSetup.printArea).toBe("A1:M248");
+    const before = await JSZip.loadAsync(annual); const after = await JSZip.loadAsync(result.file.bytes);
+    for (const path of Object.keys(before.files).filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))) {
+      expect(await after.file(path)!.async("string"), path).toBe(await before.file(path)!.async("string"));
+    }
+    console.info(`Annual Daily Cash: 366 input → 367 output sheets; 1 prior sheet parsed per run; ${annual.length} input bytes; ${Math.round(performance.now() - started)} ms including review, save, validation and archive comparison`);
+  } finally { spy.mockRestore(); }
+}, artifactTestTimeout);

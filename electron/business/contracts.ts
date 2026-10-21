@@ -10,7 +10,7 @@ export const businessInputSchema = z.object({
 }).strict();
 export type ToolResult =
   | { status: "needs_input"; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
-  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; image?: { name: string; bytes: Uint8Array }; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
+  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
   | { status: "failed"; message: string };
 export type BusinessTool = WorkflowRoute & {
   version: string;
