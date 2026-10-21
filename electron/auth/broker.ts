@@ -72,7 +72,15 @@ export class CredentialBroker {
       };
       throw new BrokerError(messages[response.status] ?? "인증 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.", response.status);
     }
-    try { return schema.parse(await response.json()); }
+    let parsed: T;
+    try { parsed = schema.parse(await response.json()); }
     catch { throw new BrokerError("인증 서버의 응답 형식이 올바르지 않습니다. 운영자에게 확인해 주세요."); }
+    // expires_at is server time; re-anchor it to the local clock so a skewed PC clock cannot expire codes or tokens early.
+    const serverNow = Date.parse(response.headers.get("date") ?? "");
+    const timed = parsed as { expires_at?: unknown };
+    if (Number.isFinite(serverNow) && typeof timed.expires_at === "string") {
+      timed.expires_at = new Date(Date.now() + Date.parse(timed.expires_at) - serverNow).toISOString();
+    }
+    return parsed;
   }
 }

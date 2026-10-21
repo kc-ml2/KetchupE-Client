@@ -40,7 +40,7 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
-  if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM API key가 거부되었습니다.");
+  if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요.");
   if (!response.ok) throw new AgentError("MODEL_PROTOCOL", `GET /models failed: ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ id?: string }> };
   return (body.data ?? []).map((item) => item.id ?? "").filter(Boolean);

@@ -279,7 +279,13 @@ function stopPeriodicUpdateChecks() {
   updateCheckInterval = undefined;
 }
 
+// One process per userData: two instances would share login.enc, SQLite and the Tomato index files.
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.exit(0);
+app.on("second-instance", () => { if (app.isReady()) createWindow(); });
+
 app.whenReady().then(() => {
+  if (!primaryInstance) return;
   appIconPath = resolveIconPath();
   if (process.platform === "darwin" && appIconPath) {
     app.dock?.setIcon(appIconPath);
@@ -388,5 +394,8 @@ app.on("before-quit", (event) => {
   shutdownStarted = true;
   // App exit preserves the encrypted login; explicit logout removes it.
   scope?.block();
-  void (auth ? auth.shutdown() : stopLocalAgent()).finally(() => app.exit());
+  // An open native dialog can block the drain; never let it keep the app from quitting.
+  // SQLite and the telemetry outbox are durable across an abrupt exit.
+  void Promise.race([auth ? auth.shutdown() : stopLocalAgent(), new Promise((resolve) => setTimeout(resolve, 10_000))])
+    .finally(() => app.exit());
 });

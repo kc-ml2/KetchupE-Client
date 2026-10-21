@@ -156,3 +156,10 @@ it("isolates SQLite databases, preserves legacy data, and removes only the activ
     expect(readFileSync(join(a, "agent.sqlite")).length).toBeGreaterThan(0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("re-anchors server expiry to the local clock so a fast PC clock does not expire the code", async () => {
+  const skewed = new Response(JSON.stringify({ ...challenge, expires_at: "2029-12-31T23:05:00Z" }), { status: 202, headers: { date: "Mon, 31 Dec 2029 23:00:00 GMT" } });
+  const f = fixture([skewed]);
+  await f.session.requestCode("a@kct.co.kr");
+  expect(f.session.getState()).toMatchObject({ phase: "code", expiresAt: "2030-01-01T00:05:00.000Z" });
+});

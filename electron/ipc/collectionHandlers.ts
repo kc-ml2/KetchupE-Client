@@ -10,7 +10,9 @@ const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 function collectionNameFor(folder: string, taken: Set<string>): string {
   const cleaned = basename(folder).normalize("NFKD").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^[-_]+/, "").slice(0, 40);
-  const base = NAME_PATTERN.test(cleaned) ? cleaned : `folder-${Date.now().toString(36)}`;
+  // "maru_" is reserved for remote MARU indexes, which are hidden from local collections.
+  const safe = cleaned.startsWith("maru_") ? `local-${cleaned}` : cleaned;
+  const base = NAME_PATTERN.test(safe) ? safe : `folder-${Date.now().toString(36)}`;
   let name = base;
   for (let suffix = 2; taken.has(name); suffix += 1) name = `${base}-${suffix}`;
   return name;
