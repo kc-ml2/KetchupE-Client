@@ -3,7 +3,7 @@ import type { ExtractionPreview, SourceMapping, WorkbookOverview } from "../../s
 
 export type WorkbookJob = {
   bytes: Uint8Array; fingerprint: string;
-  action: { kind: "inspect"; sheet?: string; headerRow?: number } | { kind: "extract"; mapping: SourceMapping };
+  action: { kind: "validate"; sheet: string } | { kind: "inspect"; sheet?: string; headerRow?: number } | { kind: "extract"; mapping: SourceMapping };
 };
 export type WorkbookReply = { ok: true; result: WorkbookOverview | ExtractionPreview } | { ok: false; error: string };
 

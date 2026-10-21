@@ -7,10 +7,11 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction, loadThread } from "../agent/store.ts";
 import { WorkSources } from "../work/sources.ts";
+import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { loadWorkbook } from "../work/mapping.ts";
 import { BusinessFlow } from "./flow.ts";
 import { dailyCashTool } from "./dailyCash.ts";
-import { fixtureBooks } from "./dailyCash/fixtures.ts";
+import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import type { BusinessTool, ToolResult } from "./contracts.ts";
 import type { BusinessAction, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
 
@@ -25,7 +26,7 @@ let threadId: string;
 let flow: BusinessFlow;
 const emit = vi.fn();
 const success = (): ToolResult => ({ status: "completed", summary: "테스트 업무 완료", file: { name: "테스트결과.xlsx", bytes: output }, checks: [{ name: "정답 비교", passed: true }], externalData: { rate: "fixture-only" } });
-const makeFlow = (tools = [tool], timeout = 1000) => new BusinessFlow(db, tools, join(folder, "output"), emit, async (bytes) => { await loadWorkbook(bytes); }, timeout);
+const makeFlow = (tools = [tool], timeout = 1000) => new BusinessFlow(db, tools, join(folder, "output"), emit, async (bytes, sheet) => { if (sheet) { const book = await (await SelectiveWorkbook.open(bytes)).loadSheet(sheet); expect(book.worksheets).toHaveLength(1); } else await loadWorkbook(bytes); }, timeout);
 const start = () => flow.workflows()[0].start({ threadId, workspaceId: "default", text: "테스트 엑셀 만들어줘" }).runId;
 beforeEach(async () => {
   folder = await mkdtemp(join(tmpdir(), "business-tool-")); db = openAgentDb(join(folder, "agent.sqlite"));
@@ -68,11 +69,10 @@ it("updates the selected original workbook after validating the generated workbo
 it("preserves newly added work-date plans through a balance correction and renewed final review", async () => {
   const books = fixtureBooks(); const status = books.status.worksheets[0];
   status.getCell("O2").value = 108000; status.getCell("O4").value = 108000;
-  for (let i = 0; i < 120; i++) books.report.addWorksheet(`archive-${i}`).getCell("A1").value = i;
   const sources = new WorkSources(db);
   const chosen: BusinessInput = { values: { workDate: "2026-10-14" }, files: {} };
   for (const [key, book, name] of [["previousReport", books.report, "report.xlsx"], ["weeklyPlans", books.weekly, "weekly.xlsx"], ["cashStatus", books.status, "261013_KC.xlsx"]] as const) {
-    const path = join(folder, name); await writeFile(path, Buffer.from(await book.xlsx.writeBuffer()));
+    const path = join(folder, name); await writeFile(path, key === "previousReport" ? await annualReportFixture() : Buffer.from(await book.xlsx.writeBuffer()));
     const source = (await sources.register([path], "file")).find((item) => item.name === name)!;
     chosen.files[key] = await sources.files(source.id);
   }
@@ -108,8 +108,8 @@ it("preserves newly added work-date plans through a balance correction and renew
   expect(getRun(db, runId).status, action()?.question).toBe("completed");
   expect(flow.artifacts(threadId)).toHaveLength(2);
   const updated = await loadWorkbook(await readFile(join(folder, "report.xlsx")));
-  expect(updated.worksheets).toHaveLength(122);
-  expect(updated.getWorksheet("archive-119")!.getCell("A1").value).toBe(119);
+  expect(updated.worksheets).toHaveLength(367);
+  expect(updated.getWorksheet("250101")!.getCell("H10").value).toBe(100000);
   expect(updated.getWorksheet("261013")!.getCell("H10").result).toBe(108000);
   const report = updated.getWorksheet("261013")!;
   expect(report.getCell("H237").result).toBe(101000);

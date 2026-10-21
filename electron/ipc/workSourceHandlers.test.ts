@@ -34,7 +34,7 @@ beforeEach(async () => {
   const path = join(folder, "source.xlsx"); await writeFile(path, Buffer.from(await workbook.xlsx.writeBuffer())); mock.paths = [path];
   mock.read.mockImplementation(async (_path: string, job: WorkbookJob) => {
     const book = await loadWorkbook(job.bytes);
-    return job.action.kind === "inspect" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.headerRow) : extractRows(book, job.fingerprint, job.action.mapping);
+    return job.action.kind !== "extract" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.kind === "inspect" ? job.action.headerRow : undefined) : extractRows(book, job.fingerprint, job.action.mapping);
   });
   flow = new WorkSourcesFlow(db, () => undefined);
   registerWorkSourceHandlers({ db, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
