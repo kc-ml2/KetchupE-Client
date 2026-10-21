@@ -1,0 +1,194 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-installer-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  publish-windows-release:
+    runs-on: windows-latest
+    env:
+      KETCHUPE_OTLP_ENDPOINT: ${{ vars.KETCHUPE_OTLP_ENDPOINT }}
+      KETCHUPE_OTLP_TOKEN: ${{ vars.KETCHUPE_OTLP_TOKEN }}
+      KETCHUPE_TELEMETRY_CONTENT_MODE: ${{ vars.KETCHUPE_TELEMETRY_CONTENT_MODE }}
+      KETCHUPE_ENVIRONMENT: production
+      KETCHUPE_TENANT_ID: public
+      LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://centinels.ml2-alpha.com/v1/' }}
+      LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+      LITELLM_MODEL_ALIAS: loki
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate packaged LiteLLM settings
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LITELLM_API_KEY)) { throw "Repository secret LITELLM_API_KEY is required." }
+
+      - name: Contract, Tomato keyword, and fixture harness tests
+        run: npm run test:electron
+
+      - name: Restore Electron builder caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/electron
+            .cache/electron-builder
+          key: electron-builder-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-builder-${{ runner.os }}-
+
+      - name: Sync package.json version from git tag
+        # 태그 푸시로 트리거된 빌드에서만 실행. git tag(v2.0.12) → package.json(2.0.12)
+        # electron-builder는 package.json의 version으로 release와 latest.yml을 만들기 때문에
+        # tag와 package.json이 다르면 자동 업데이트가 깨지고 verify 단계도 404가 난다.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "git tag: $tag"
+          echo "setting package.json version to: $version"
+          npm pkg set version="$version"
+          node -e "console.log('package.json version =', require('./package.json').version)"
+
+      - name: Set main bench version
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: npm pkg set version="3.0.0-bench.${GITHUB_RUN_NUMBER}"
+
+      - name: Restore Windows signing cert (optional)
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERT_BASE64)) {
+            Write-Host "No signing cert configured. Skip certificate restore."
+            exit 0
+          }
+
+          $certPath = "$env:RUNNER_TEMP\windows-signing-cert.pfx"
+          [System.IO.File]::WriteAllBytes($certPath, [System.Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          "WIN_CSC_LINK=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build renderer and main process (Vite)
+        # dist/ (renderer) + dist-electron/ (main, preload) 생성.
+        # 이 산출물이 있어야 electron-builder가 asar 패키징을 제대로 수행한다.
+        run: npm run build
+
+      - name: Package Windows installer and publish tagged releases
+        # 이 repo 가 public 이므로:
+        # - 업로드: 워크플로우 기본 GITHUB_TOKEN 으로 이 repo 에 release 생성/업로드 가능.
+        # - 다운로드(자동 업데이트): 익명으로 public asset 에 접근 → 앱에 토큰 불필요.
+        #   package.json 의 publish 설정에서 private: true 를 제거했기 때문에
+        #   app-update.yml 에 토큰이 포함되지 않는다.
+        shell: pwsh
+        run: |
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "electron-builder attempt $attempt of $maxAttempts"
+            npx electron-builder --win --publish $env:PUBLISH_MODE
+            if ($LASTEXITCODE -eq 0) {
+              exit 0
+            }
+
+            if ($attempt -eq $maxAttempts) {
+              exit $LASTEXITCODE
+            }
+
+            $delaySeconds = 30 * $attempt
+            Write-Warning "electron-builder failed with exit code $LASTEXITCODE. Retrying in $delaySeconds seconds..."
+            Start-Sleep -Seconds $delaySeconds
+          }
+        env:
+          ELECTRON_CACHE: ${{ github.workspace }}\.cache\electron
+          ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\.cache\electron-builder
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+          PUBLISH_MODE: ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
+
+      - name: List build outputs
+        shell: pwsh
+        run: Get-ChildItem -Path release -Recurse | Select-Object FullName
+
+      - name: Validate Windows outputs
+        shell: pwsh
+        run: |
+          $exeFiles = Get-ChildItem -Path release -Filter *.exe -File
+          if ($exeFiles.Count -eq 0) {
+            Write-Error "No Windows installer (.exe) found in release/."
+            exit 1
+          }
+          $latestYml = Get-ChildItem -Path release -Filter "latest*.yml" -File
+          if ($latestYml.Count -eq 0) {
+            Write-Error "No latest.yml found in release/. Auto-update metadata is missing."
+            exit 1
+          }
+          Write-Host "Windows installers:"
+          $exeFiles | ForEach-Object { Write-Host " - $($_.Name)" }
+          Write-Host "Update metadata:"
+          $latestYml | ForEach-Object { Write-Host " - $($_.Name)" }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-release-assets:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - publish-windows-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release assets on GitHub Release
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const tag = context.ref.replace("refs/tags/", "");
+            const { owner, repo } = context.repo;
+
+            const release = await github.rest.repos.getReleaseByTag({
+              owner,
+              repo,
+              tag,
+            });
+
+            const assets = release.data.assets.map((asset) => asset.name);
+            const hasExe = assets.some((name) => name.endsWith(".exe"));
+            const hasLatestYml = assets.some((name) => name === "latest.yml");
+
+            core.info(`Release tag: ${tag}`);
+            core.info(`Assets: ${assets.join(", ")}`);
+
+            if (!hasExe || !hasLatestYml) {
+              core.setFailed(
+                `Missing required assets on release ${tag}. hasExe=${hasExe}, hasLatestYml=${hasLatestYml}`,
+              );
+            }

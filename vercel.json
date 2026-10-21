@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/index.jsp", "destination": "/index.html" }
+  ]
+}

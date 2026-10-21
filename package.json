@@ -1,0 +1,164 @@
+{
+  "name": "KetchupE",
+  "private": true,
+  "version": "2.1.1",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "vite",
+    "build": "tsc -b && vite build",
+    "build:electron": "tsc -b && vite build && electron-builder",
+    "build:electron:win": "npm install --include=optional --os=win32 --cpu=x64 && npm run build && electron-builder --win --x64",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage",
+    "test:electron": "vitest run electron",
+    "typecheck:electron": "tsc -p tsconfig.electron.json",
+    "smoke:litellm": "vite-node scripts/litellm-smoke.ts",
+    "probe:maru": "vite-node scripts/maru-probe.ts",
+    "probe:trolley": "vite-node scripts/trolley-probe.ts",
+    "telemetry:gateway": "vite-node scripts/telemetry-gateway.ts"
+  },
+  "build": {
+    "appId": "com.kcml2.ketchupe",
+    "productName": "KetchupE",
+    "artifactName": "${name}-${version}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "kc-ml2",
+        "repo": "KetchupE-Client",
+        "releaseType": "release"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/assets"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "electron/assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "electron/assets/icon.png",
+        "to": "icon.png"
+      },
+      {
+        "from": "electron/assets/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "icon.icns",
+      "hardenedRuntime": true,
+      "notarize": true,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "icon": "icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**",
+      "node_modules/@img/**",
+      "node_modules/sharp/**",
+      "node_modules/kordoc/**"
+    ]
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.43",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "agentation": "^2.3.2",
+    "ai": "^7.0.92",
+    "docx": "^9.7.1",
+    "dotenv": "^16.4.5",
+    "electron-updater": "^6.8.3",
+    "exceljs": "4.4.0",
+    "kordoc": "^4.18.3",
+    "react": "^19.0.0",
+    "react-device-detect": "^2.2.3",
+    "react-dom": "^19.0.0",
+    "react-hot-toast": "^2.5.2",
+    "react-icons": "^5.5.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.5.2",
+    "react-syntax-highlighter": "^16.1.0",
+    "rehype-raw": "^7.0.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "zod": "^4.5.4",
+    "decimal.js": "10.5.0",
+    "sharp": "^0.35.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.22.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^22.15.2",
+    "@types/react": "^19.1.4",
+    "@types/react-dom": "^19.1.5",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/ui": "^3.1.4",
+    "autoprefixer": "^10.4.21",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.8.1",
+    "eslint": "^9.22.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "globals": "^16.0.0",
+    "jsdom": "^26.1.0",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vite": "^6.3.5",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-tsconfig-paths": "^5.1.4",
+    "vitest": "^3.1.4"
+  },
+  "overrides": {
+    "adm-zip": "^0.6.0",
+    "sharp": "^0.35.0"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

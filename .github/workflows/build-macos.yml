@@ -1,0 +1,129 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    env:
+      LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://centinels.ml2-alpha.com/v1/' }}
+      LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+      LITELLM_MODEL_ALIAS: loki
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate packaged LiteLLM settings
+        run: |
+          test -n "$LITELLM_API_KEY" || { echo "Repository secret LITELLM_API_KEY is required."; exit 1; }
+
+      - name: Contract, Tomato keyword, and fixture harness tests
+        run: npm run test:electron
+
+      - name: Install Developer ID certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" \
+            | base64 --decode \
+            > "$CERTIFICATE_PATH"
+
+          security create-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security set-keychain-settings \
+            -lut 21600 \
+            "$KEYCHAIN_PATH"
+
+          security unlock-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" \
+            -P "$P12_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security list-keychains \
+            -d user \
+            -s "$KEYCHAIN_PATH"
+
+          security default-keychain \
+            -d user \
+            -s "$KEYCHAIN_PATH"
+
+          security find-identity \
+            -v \
+            -p codesigning \
+            "$KEYCHAIN_PATH"
+
+      - name: Build frontend and Electron
+        run: npm run build
+        env:
+          KETCHUPE_OTLP_ENDPOINT: ${{ vars.KETCHUPE_OTLP_ENDPOINT }}
+          KETCHUPE_OTLP_TOKEN: ${{ vars.KETCHUPE_OTLP_TOKEN }}
+          KETCHUPE_TELEMETRY_CONTENT_MODE: ${{ vars.KETCHUPE_TELEMETRY_CONTENT_MODE }}
+          KETCHUPE_ENVIRONMENT: production
+          KETCHUPE_TENANT_ID: public
+      - name: Build, sign and notarize macOS app
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_KEYCHAIN: ${{ runner.temp }}/app-signing.keychain-db
+          CSC_KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          npx electron-builder \
+            --mac \
+            --publish never \
+            -c.forceCodeSigning=true
+
+      - name: Show generated files
+        run: find release -maxdepth 2 -type f -print
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KetchupE-macOS
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain \
+            "$RUNNER_TEMP/app-signing.keychain-db" || true
