@@ -8,6 +8,7 @@ import {
   Menu,
   nativeImage,
   dialog,
+  Notification,
   type MessageBoxOptions,
 } from "electron";
 import fs from "fs";
@@ -179,35 +180,53 @@ function createTray() {
   }
 }
 
+// Packaged builds have no visible console, so updater output goes to <logs>/updater.log for support.
+function updaterLog(level: string, args: unknown[]) {
+  const line = `${new Date().toISOString()} [${level}] ${args.map((arg) => (arg instanceof Error ? arg.stack ?? arg.message : typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ")}\n`;
+  (level === "error" ? console.error : console.log)(line.trimEnd());
+  try {
+    fs.mkdirSync(app.getPath("logs"), { recursive: true });
+    fs.appendFileSync(path.join(app.getPath("logs"), "updater.log"), line);
+  } catch {
+    // Logging must never break updates.
+  }
+}
+
 function setupAutoUpdater() {
   if (isDev) return;
 
+  autoUpdater.logger = {
+    info: (...args: unknown[]) => updaterLog("info", args),
+    warn: (...args: unknown[]) => updaterLog("warn", args),
+    error: (...args: unknown[]) => updaterLog("error", args),
+    debug: () => undefined,
+  };
+  updaterLog("info", [`current version ${app.getVersion()}`]);
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  autoUpdater.on("checking-for-update", () => {
-    console.log("[autoUpdater] checking for updates...");
-  });
-
   autoUpdater.on("update-available", (info) => {
     isDownloadingUpdate = true;
-    console.log("[autoUpdater] update available:", info.version);
+    if (Notification.isSupported()) {
+      new Notification({
+        title: PRODUCT_NAME,
+        body: `새 버전 ${info.version}을 다운로드하는 중입니다. 완료되면 재시작 안내가 표시됩니다.`,
+      }).show();
+    }
   });
 
   autoUpdater.on("update-not-available", () => {
     isDownloadingUpdate = false;
-    console.log("[autoUpdater] no updates found.");
   });
 
   autoUpdater.on("error", (error) => {
     isDownloadingUpdate = false;
-    console.error("[autoUpdater] failed:", error);
+    updaterLog("error", ["update failed:", error]);
   });
 
   autoUpdater.on("update-downloaded", async (info) => {
     isDownloadingUpdate = false;
     hasDownloadedUpdate = true;
-    console.log("[autoUpdater] update downloaded:", info.version);
     if (hasShownUpdateDialog) return;
     hasShownUpdateDialog = true;
 
@@ -240,7 +259,7 @@ function setupAutoUpdater() {
 
 function checkForUpdates(reason: "startup" | "scheduled") {
   if (isCheckingForUpdate || isDownloadingUpdate || hasDownloadedUpdate) {
-    console.log(`[autoUpdater] skipped ${reason} update check.`);
+    updaterLog("info", [`skipped ${reason} update check`]);
     return;
   }
 
@@ -248,7 +267,7 @@ function checkForUpdates(reason: "startup" | "scheduled") {
   autoUpdater
     .checkForUpdatesAndNotify()
     .catch((error) => {
-      console.error(`[autoUpdater] ${reason} check failed:`, error);
+      updaterLog("error", [`${reason} check failed:`, error]);
     })
     .finally(() => {
       isCheckingForUpdate = false;
