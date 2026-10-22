@@ -348,8 +348,7 @@ const AgentPage = (): React.JSX.Element => {
                   </h3>
                   <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
                     활성화한 폴더만 검색하며, 답변에는 실제 인용한 문서가
-                    표시됩니다. 일일자금일보 같은 Excel 업무도 이 폴더에서 전일
-                    일보·주간계획·자금현황표를 파일명으로 찾아 미리 채웁니다.
+                    표시됩니다.
                   </p>
                   <CollectionPanel
                     collections={collectionsState.collections}
