@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type PropsWithChildren } from "react";
 import { useNavigate } from "react-router-dom";
 import type { AuthState } from "@app-types/Auth.types";
 import { AgentApiContext } from "@Contexts/AgentApiContext";
+import { AccountContext } from "@Contexts/AccountContext";
 
 export default function AuthGate({ children }: PropsWithChildren) {
   const auth = window.authAPI;
@@ -12,6 +13,7 @@ export default function AuthGate({ children }: PropsWithChildren) {
   const [error, setError] = useState("");
   const [now, setNow] = useState(Date.now());
   const api = useMemo(() => state?.sessionId ? auth?.agent(state.sessionId) : null, [auth, state?.sessionId]);
+  const account = useMemo(() => auth && state?.email ? { email: state.email, logout: () => auth.logout() } : null, [auth, state?.email]);
 
   useEffect(() => {
     if (!auth) return;
@@ -47,14 +49,9 @@ export default function AuthGate({ children }: PropsWithChildren) {
   if (!auth) return <main className="grid h-screen place-items-center p-8">케찹이 데스크톱 앱에서 사내 이메일로 로그인해 주세요.</main>;
   if (state?.phase === "ready" && api) return (
     <AgentApiContext.Provider key={state.sessionId} value={api}>
-      <div className="flex h-screen flex-col">
-        <div className="flex items-center justify-end gap-3 border-b border-zinc-200 bg-white px-4 py-2 text-xs text-zinc-600">
-          <span>{state.email}</span>
-          <button type="button" className="rounded px-2 py-1 underline focus-visible:outline" onClick={() => act(() => auth.logout())}>로그아웃</button>
-          {error && <span role="alert">{error}</span>}
-        </div>
-        <div className="min-h-0 flex-1">{children}</div>
-      </div>
+      <AccountContext.Provider value={account}>
+        <div className="h-screen">{children}</div>
+      </AccountContext.Provider>
     </AgentApiContext.Provider>
   );
 

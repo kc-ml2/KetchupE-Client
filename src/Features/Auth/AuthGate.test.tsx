@@ -5,6 +5,8 @@ import AuthGate from "./AuthGate";
 import type { AuthAPI, AuthState } from "@app-types/Auth.types";
 import type { KetchupEAgentAPI } from "@app-types/Agent.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
+import { useContext } from "react";
+import { AccountContext } from "@Contexts/AccountContext";
 
 afterEach(() => { delete window.authAPI; });
 
@@ -17,7 +19,11 @@ it("gates private children, submits leading-zero codes, and remounts a bound API
     onChange: (listener) => { emit = listener; return () => undefined; }, agent: vi.fn().mockReturnValue(api),
   };
   window.authAPI = auth;
-  function Private() { const current = useAgentApi(); return <div>{current === api ? "private account" : "wrong API"}</div>; }
+  function Private() {
+    const current = useAgentApi();
+    const account = useContext(AccountContext);
+    return <div>{current === api ? "private account" : "wrong API"}<span>{account?.email}</span><button onClick={() => void account?.logout()}>로그아웃</button></div>;
+  }
   render(<MemoryRouter><AuthGate><Private /></AuthGate></MemoryRouter>);
   expect(await screen.findByLabelText("사내 이메일")).toBeInTheDocument();
   expect(screen.queryByText("private account")).not.toBeInTheDocument();
