@@ -151,6 +151,8 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
         maxRetries: 0,
         tools: { [toolName]: tool({ description, inputSchema: schema }) },
         toolChoice: { type: "tool", toolName },
+        // Gateway reasoning models default to xhigh; a short structured decision took ~48s at that effort.
+        providerOptions: { openaiCompatible: { reasoningEffort: "low" } },
         onLanguageModelCallEnd: ({ usage, finishReason }) => report({
           purpose,
           modelAlias: profile.modelAlias,
