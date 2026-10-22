@@ -289,6 +289,13 @@ describe("harness", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE thread_id = ?").get(thread.id)).toMatchObject({ count: 0 });
   });
 
+  it("keeps an answer that cites none of the retrieved evidence", async () => {
+    const thread = createThread(db, workspace.id);
+    const handle = harness({ decide: [search("연차"), answer], answer: "연결된 MCP는 MARU와 Trolley입니다." }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "어떤 MCP가 연결돼 있어?" });
+    await handle.done;
+    expect(getRun(db, handle.runId).status).toBe("completed");
+  });
+
   it("uses confirmed memory in context and rejects answers without known evidence citations", async () => {
     const id = proposeMemory(db, { workspaceId: workspace.id, kind: "preference", content: "답변은 존댓말로" });
     confirmMemory(db, id);

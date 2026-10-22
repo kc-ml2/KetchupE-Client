@@ -593,8 +593,11 @@ export class Harness {
       repaired = true;
       check = validateCitations(text, run.state.evidence);
     }
-    const citationsFailed = run.state.evidence.length > 0 && check.valid.length === 0;
-    run.trace.record("answer.validated", "citation", { valid: check.valid, invalid: check.invalid, repaired, usage: answerUsage, failed: citationsFailed }, { parentSeq, startedAt });
+    // Citing only unknown ids is a grounding failure. Citing nothing means the model judged the retrieved
+    // evidence irrelevant (e.g. "어떤 MCP가 연결돼 있어?" against local docs); keep that answer, uncited.
+    const citationsFailed = run.state.evidence.length > 0 && check.valid.length === 0 && repaired;
+    const uncited = run.state.evidence.length > 0 && check.valid.length === 0 && !repaired;
+    run.trace.record("answer.validated", "citation", { valid: check.valid, invalid: check.invalid, repaired, usage: answerUsage, failed: citationsFailed, uncited }, { parentSeq, startedAt });
     if (citationsFailed) throw new AgentError("INVALID_CITATION", "answer did not cite known evidence");
 
     const citations: CitationSummary[] = check.valid.map((id) => {
