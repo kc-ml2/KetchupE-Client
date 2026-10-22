@@ -27,6 +27,7 @@ jobs:
       LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://centinels.ml2-alpha.com/v1/' }}
       LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
       LITELLM_MODEL_ALIAS: loki
+      LITELLM_ROUTER_MODEL_ALIAS: clef-flash
 
     steps:
       - name: Checkout

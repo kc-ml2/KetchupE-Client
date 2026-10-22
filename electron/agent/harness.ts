@@ -14,7 +14,7 @@ import {
 } from "./contracts.ts";
 import { selectContext } from "./context.ts";
 import type { ModelCallInfo, ModelClient } from "./modelClient.ts";
-import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFingerprint } from "./policy.ts";
+import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFingerprint, smallTalkDecision } from "./policy.ts";
 import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "./store.ts";
 import { chunkToEvidence, normalizeQuery, resultToEvidence, withTimeout, type EvidenceSource, type SearchTools } from "./tools.ts";
 import { readTrace, TraceWriter } from "./trace.ts";
@@ -327,6 +327,9 @@ export class Harness {
 
   private async decide(run: RunContext): Promise<PolicyDecision> {
     const { policy } = this.options.profiles;
+    const smallTalk = smallTalkDecision(run.state, policy.version);
+    const smallTalkValidation = smallTalk && validateDecision(smallTalk, run.state, policy.allowedActions);
+    if (smallTalkValidation?.ok) return smallTalkValidation.decision;
     const wantsExternal = (Boolean(this.options.tools.maru) && /maru|마루/iu.test(run.state.userGoal))
       || (Boolean(this.options.tools.trolley) && /trolley|트롤리/iu.test(run.state.userGoal));
     if (policy.strategy === "always-search" && !wantsExternal) {

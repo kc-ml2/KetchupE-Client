@@ -180,7 +180,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       cancel: (id: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.cancel(id) : workflow.cancel(id),
     })),
   ], (text, routes, input) => routeMessage(
-    { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef" },
+    { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" },
     text,
     AbortSignal.timeout(policyProfile.runTimeoutMs),
     routes,

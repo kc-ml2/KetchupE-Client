@@ -27,6 +27,23 @@ export const POLICY_VARIANTS: Record<string, PolicyProfile> = {
 };
 export const DEFAULT_VARIANT = "adaptive-v1";
 
+// ponytail: fixed greeting list, not intent classification. Anything longer or unlisted still goes through the policy.
+const SMALL_TALK = /^(안녕(하세요|하십니까)?|하이|헬로|ㅎㅇ|반가(워|워요|습니다)|고마워(요)?|감사(합니다|해요)?|ㄳ|ㄱㅅ|hi|hello|hey|thanks?( you)?)$/iu;
+
+/** A bare greeting or thanks on the first step answers directly: searching documents for "안녕?" only adds latency. */
+export function smallTalkDecision(state: PolicyState, policyVersion: string): PolicyDecision | undefined {
+  const text = state.userGoal.normalize("NFC").trim().replace(/[\s!?.~^ㅎㅋ]+$/u, "");
+  if (state.previousDecisions.length || !SMALL_TALK.test(text)) return undefined;
+  return {
+    action: "ANSWER",
+    taskDifficulty: 0,
+    predictedSuccess: 1,
+    evidenceSufficiency: 0,
+    reasonCode: "NO_RETRIEVAL_NEEDED",
+    policyVersion,
+  };
+}
+
 /** Deterministic baseline. Answer generation still uses the configured ModelClient. */
 export function alwaysSearchDecision(state: PolicyState, policyVersion: string): PolicyDecision {
   if (!state.previousDecisions.includes("SEARCH") && state.remaining.searches > 0) {

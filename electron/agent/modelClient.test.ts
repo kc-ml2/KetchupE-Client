@@ -56,3 +56,15 @@ it("bounds model discovery even when no caller signal is provided", async () => 
   controller.abort();
   expect(requestSignal?.aborted).toBe(true);
 });
+
+it("asks for low reasoning effort on policy decisions", async () => {
+  let body: Record<string, unknown> | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response("busy", { status: 503 });
+  }));
+
+  const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
+  await client.decide({ runId: "r", step: 1, userGoal: "안녕?", selectedMemories: [], activeCollections: [], recentMessages: [], evidence: [], previousDecisions: [], remaining: { steps: 1, modelCalls: 1, searchCalls: 1, verifyCalls: 1 } } as never, DEFAULT_POLICY_PROFILE, new AbortController().signal).catch(() => undefined);
+  expect(body).toMatchObject({ reasoning_effort: "low" });
+});
