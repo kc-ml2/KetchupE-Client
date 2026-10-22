@@ -277,6 +277,7 @@ const AgentPage = (): React.JSX.Element => {
     ),
   );
   const streamingText = responsePersisted ? "" : view.streamingText;
+  const workflowBusy = stopping || starting || view.isRunning || canvas.isBusy;
   const workflowStatus = (() => {
     if (stopping) return "작업을 중단하는 중...";
     if (starting) return "요청을 준비하는 중...";
@@ -545,7 +546,7 @@ const AgentPage = (): React.JSX.Element => {
                   />
                   <span
                     role="status"
-                    className="flex-1 font-medium text-[#18181B] dark:text-[#FAFAFA]"
+                    className={`flex-1 font-medium text-[#18181B] dark:text-[#FAFAFA] ${workflowBusy ? "animate-pulse motion-reduce:animate-none" : ""}`}
                   >
                     {workflowStatus}
                   </span>
