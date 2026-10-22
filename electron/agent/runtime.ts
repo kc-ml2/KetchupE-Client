@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { WorkSourcesFlow, WORK_SOURCES_ROUTE } from "./workSourcesFlow.ts";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentStreamEvent, CollectionSummary } from "../../src/app-types/Agent.types.ts";
+import type { AgentStreamEvent, CollectionSummary, MaruStorageSummary } from "../../src/app-types/Agent.types.ts";
 import { CollectionWatchers } from "../collectionWatchers.ts";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { PIPELINE_PROFILE, type Collection } from "../tomato/tomato.ts";
@@ -28,7 +28,7 @@ import { ANSWER_PROMPT_VERSION, assignVariant, POLICY_VARIANTS } from "./policy.
 import { accountModelSettings, loadTelemetrySettings, type ModelSettings } from "./settings.ts";
 import { interactionScore, LangfuseExporter, loadInstallId } from "./telemetry.ts";
 import type { InteractionKind } from "../../src/app-types/Agent.types.ts";
-import { ensureWorkspace, inactiveCollections, recentMessages, getRunAction } from "./store.ts";
+import { excludedMaruStorages, ensureWorkspace, inactiveCollections, recentMessages, getRunAction } from "./store.ts";
 import { MaruClient } from "./maru.ts";
 import { MaruAccess } from "./maruAccess.ts";
 import { DEFAULT_TROLLEY_ENDPOINT, TrolleyClient } from "./trolley.ts";
@@ -49,6 +49,8 @@ export type AgentRuntime = {
   collections: () => Collection[];
   refreshCollections: () => Promise<Collection[]>;
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
+  /** MARU storages the account can read, with this workspace's on/off state (default on). */
+  maruStorages: (workspaceId: string) => Promise<MaruStorageSummary[]>;
   settings: () => ModelSettings;
   /** Development builds may switch the generation model; credentials always come from the account. */
   modelSelectable: boolean;
@@ -154,6 +156,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       answer: { modelAlias: current.modelAlias || "gateway-default", promptVersion: ANSWER_PROMPT_VERSION },
     },
     activeCollections,
+    excludedMaruStorages: (workspaceId) => excludedMaruStorages(db, workspaceId),
     authorizeContext: (threadId, signal) => maruAccess.authorizeThread(threadId, AbortSignal.any([signal, accessSignal()])),
     onExternalDocuments: (threadId, documents) => maruAccess.record(threadId, documents),
     emit: options.emitAgentEvent,
@@ -278,6 +281,10 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
           lastError: state?.lastError,
         };
       });
+    },
+    async maruStorages(workspaceId) {
+      const excluded = new Set(excludedMaruStorages(db, workspaceId));
+      return (await maru.listStorages(accessSignal())).map((storage) => ({ ...storage, active: !excluded.has(storage.storageId) }));
     },
     quiesce,
     authorizeThread,

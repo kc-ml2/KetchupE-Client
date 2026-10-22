@@ -96,6 +96,8 @@ export type PolicyState = {
   userGoal: string;
   selectedMemories: SelectedMemory[];
   activeCollections: string[];
+  /** MARU storages the user turned off; every other accessible storage is searched with local collections. */
+  excludedMaruStorages?: string[];
   maruAvailable?: boolean;
   trolleyAvailable?: boolean;
   externalDocuments?: ExternalDocumentRef[];

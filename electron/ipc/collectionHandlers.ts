@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import { realpath } from "node:fs/promises";
 import { BrowserWindow, dialog, ipcMain } from "electron";
 import type { AgentRuntime } from "../agent/runtime.ts";
-import { setCollectionActive } from "../agent/store.ts";
+import { MARU_STORAGE_PREFIX, setCollectionActive } from "../agent/store.ts";
 import { TOMATO_LONG_CALL_TIMEOUT_MS } from "../tomato/tomatoClient.ts";
 import { WorkSources } from "../work/sources.ts";
 
@@ -21,6 +21,8 @@ function collectionNameFor(folder: string, taken: Set<string>): string {
 export function registerCollectionHandlers(runtime: AgentRuntime, handle: typeof ipcMain.handle = ipcMain.handle.bind(ipcMain), assertActive: () => void = () => undefined): void {
   handle("collection:list", (_event, workspaceId: string) => runtime.collectionSummaries(workspaceId));
   handle("collection:setActive", (_event, workspaceId: string, name: string, active: boolean) => setCollectionActive(runtime.db, workspaceId, name, active));
+  handle("maru:listStorages", (_event, workspaceId: string) => runtime.maruStorages(workspaceId));
+  handle("maru:setStorageActive", (_event, workspaceId: string, storageId: string, active: boolean) => setCollectionActive(runtime.db, workspaceId, `${MARU_STORAGE_PREFIX}${String(storageId)}`, Boolean(active)));
 
   // The renderer never supplies a path: only the native dialog result is registered.
   handle("collection:add", async (event) => {

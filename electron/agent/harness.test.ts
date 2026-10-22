@@ -11,7 +11,7 @@ import { Harness } from "./harness.ts";
 import { addMemory, confirmMemory, proposeMemory } from "./memory.ts";
 import { createFixtureClient, type FixtureScript } from "./modelClient.ts";
 import { ANSWER_PROMPT_VERSION, DEFAULT_POLICY_PROFILE, gatedDecision, smallTalkDecision } from "./policy.ts";
-import { createThread, deleteThread, ensureWorkspace, getRun, listThreads, loadThread } from "./store.ts";
+import { excludedMaruStorages, createThread, deleteThread, ensureWorkspace, getRun, inactiveCollections, listThreads, loadThread, setCollectionActive } from "./store.ts";
 import { tomatoTools, type SearchTools } from "./tools.ts";
 import { readTrace, transitions } from "./trace.ts";
 import { buildRunTrace } from "./telemetry.ts";
@@ -118,6 +118,66 @@ describe("harness", () => {
     expect(events.at(-1)!.seq).toBeGreaterThan(lastSeq);
     expect(loadThread(db, thread.id).messages).toHaveLength(2);
     expect(() => deleteThread(db, thread.id)).not.toThrow();
+  });
+
+  it("searches MARU storages with local folders by default and cites both", async () => {
+    const thread = createThread(db, workspace.id);
+    const document = { refId: "maru-leave", provider: "maru" as const, storageId: "storage-a", storageName: "인사팀", path: "규정/휴가.hwp" };
+    const scopes: string[][] = [];
+    const handle = new Harness({
+      db,
+      model: createFixtureClient({ decide: [search("연차 정산"), answer], answer: "연차는 수당으로 정산합니다 [[e1]] [[e2]]" }),
+      tools: { ...tomatoTools(tomato, { mode: "hybrid", topK: 1 }), maru: {
+        call: async () => { throw new Error("chat search must not call find_storage directly"); },
+        readDocument: async () => { throw new Error("must not download"); },
+        searchExcerpts: async (_question, storageIds) => { scopes.push(storageIds); return [{ document, text: "MARU 연차 규정: 미사용 연차는 수당으로 정산한다." }]; },
+      } },
+      profiles: { retrieval: PIPELINE_PROFILE, policy: DEFAULT_POLICY_PROFILE, answer: { modelAlias: "fixture", promptVersion: ANSWER_PROMPT_VERSION } },
+      activeCollections: () => ["work"],
+      excludedMaruStorages: () => ["storage-off"],
+    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산 방법" });
+    await handle.done;
+    expect(scopes).toEqual([["storage-off"]]);
+    expect(getRun(db, handle.runId).status).toBe("completed");
+    const paths = (db.prepare("SELECT path FROM citations WHERE run_id = ? ORDER BY evidence_id").all(handle.runId) as Array<{ path: string }>).map((row) => row.path);
+    expect(paths).toHaveLength(2);
+    expect(paths).toContain("maru:maru-leave");
+    expect(loadThread(db, thread.id).messages.at(-1)?.citations).toHaveLength(2);
+  });
+
+  it("keeps MARU storages on until turned off without affecting local folder defaults", () => {
+    expect(excludedMaruStorages(db, workspace.id)).toEqual([]);
+    setCollectionActive(db, workspace.id, "maru:storage-x", true);
+    setCollectionActive(db, workspace.id, "maru:storage-y", false);
+    expect(excludedMaruStorages(db, workspace.id)).toEqual(["storage-y"]);
+    expect(inactiveCollections(db, workspace.id).has("work")).toBe(false);
+    setCollectionActive(db, workspace.id, "maru:storage-y", true);
+    expect(excludedMaruStorages(db, workspace.id)).toEqual([]);
+  });
+
+  it.each([
+    ["skips storages turned off", "연차 정산 방법", ["storage-off"], [["storage-off"]]],
+    ["searches turned-off storages too when the question mentions MARU", "MARU에서 연차 정산 찾아줘", ["storage-off"], [[]]],
+    ["treats 공유 저장소 as an explicit MARU request", "공유 저장소에서 연차 정산 찾아줘", ["storage-off"], [[]]],
+  ] as const)("%s", async (_name, text, excluded, expected) => {
+    const thread = createThread(db, workspace.id);
+    const scopes: string[][] = [];
+    const handle = new Harness({
+      db,
+      model: createFixtureClient({ decide: [search("연차 정산"), answer], answer: "연차는 수당으로 정산합니다 [[e1]]" }),
+      tools: { ...tomatoTools(tomato, { mode: "hybrid", topK: 1 }), maru: {
+        call: async () => ({ summary: "", documents: [] }),
+        readDocument: async () => { throw new Error("must not download"); },
+        searchExcerpts: async (_question, storageIds) => { scopes.push(storageIds); throw new AgentError("TOOL_UNAVAILABLE", "MARU down"); },
+      } },
+      profiles: { retrieval: PIPELINE_PROFILE, policy: DEFAULT_POLICY_PROFILE, answer: { modelAlias: "fixture", promptVersion: ANSWER_PROMPT_VERSION } },
+      activeCollections: () => ["work"],
+      excludedMaruStorages: () => [...excluded],
+    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text });
+    await handle.done;
+    expect(scopes).toEqual(expected);
+    // A MARU failure leaves local evidence usable.
+    expect(getRun(db, handle.runId).status).toBe("completed");
   });
 
   it("SEARCH → ANSWER with validated citation and trace", async () => {

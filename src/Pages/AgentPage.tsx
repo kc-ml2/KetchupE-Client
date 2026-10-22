@@ -37,6 +37,7 @@ import AnchorChoicePrompt from "@Features/Agent/components/AnchorChoicePrompt";
 import CollectionPanel from "@Features/Agent/components/CollectionPanel";
 import MemoryPanel from "@Features/Agent/components/MemoryPanel";
 import ModelSettingsForm from "@Features/Agent/components/ModelSettingsForm";
+import MaruStoragePanel from "@Features/Agent/components/MaruStoragePanel";
 import WorkSourcePanel from "@Features/Agent/components/WorkSourcePanel";
 // import { guideCopy } from "@config/guideCopy";
 
@@ -360,6 +361,7 @@ const AgentPage = (): React.JSX.Element => {
                       void collectionsState.setActive(name, active)
                     }
                   />
+                  {api && <MaruStoragePanel api={api} workspaceId={WORKSPACE_ID} />}
                 </>
               )}
               {tab === "context" && (

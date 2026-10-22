@@ -4,6 +4,7 @@ import type { AgentStreamEvent, AppliedContext, CitationSummary, RunStatus } fro
 import {
   AgentError,
   LIMITS,
+  type AgentErrorCode,
   validateDecision,
   type Evidence,
   type Observation,
@@ -20,8 +21,12 @@ import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFinger
 import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "./store.ts";
 import { chunkToEvidence, normalizeQuery, resultToEvidence, withTimeout, type EvidenceSource, type SearchTools } from "./tools.ts";
 import { readTrace, TraceWriter } from "./trace.ts";
+import { MARU_EXCERPT_CHARS } from "./maru.ts";
 import { stripInvalidCitations, validateCitations } from "./verify.ts";
 import { cancelWaitingRun, type RunHandle } from "./runLifecycle.ts";
+
+/** An explicit MARU request ("공유 저장소" in the UI) searches every accessible storage, including ones turned off. */
+const MARU_REQUEST = /maru|마루|공유\s*저장소/iu;
 
 export type AnswerProfile = { modelAlias: string; promptVersion: string };
 export type HarnessProfiles = { retrieval: Record<string, unknown>; policy: PolicyProfile; answer: AnswerProfile };
@@ -33,6 +38,7 @@ export type HarnessOptions = {
   tools: SearchTools;
   profiles: HarnessProfiles;
   activeCollections: (workspaceId: string) => string[];
+  excludedMaruStorages?: (workspaceId: string) => string[];
   authorizeContext?: (threadId: string, signal: AbortSignal) => Promise<void>;
   onExternalDocuments?: (threadId: string, documents: ExternalDocumentRef[]) => void;
   emit?: (event: AgentStreamEvent) => void;
@@ -114,6 +120,7 @@ export class Harness {
       userGoal: goal,
       selectedMemories: context.memories,
       activeCollections,
+      excludedMaruStorages: this.options.tools.maru ? this.options.excludedMaruStorages?.(input.workspaceId) ?? [] : [],
       maruAvailable: Boolean(this.options.tools.maru),
       trolleyAvailable: Boolean(this.options.tools.trolley),
       externalDocuments: [],
@@ -130,7 +137,7 @@ export class Harness {
     };
     const run = this.createContext(runId, thread.id, input.workspaceId, state, context.contextText);
     const metadata = typeof this.options.runMetadata === "function" ? this.options.runMetadata() : this.options.runMetadata;
-    run.trace.record("run.started", "input", { workspaceId: input.workspaceId, threadId: thread.id, messageId: message.id, profiles: this.fingerprints, activeCollections, ...metadata });
+    run.trace.record("run.started", "input", { workspaceId: input.workspaceId, threadId: thread.id, messageId: message.id, profiles: this.fingerprints, activeCollections, excludedMaruStorages: state.excludedMaruStorages, ...metadata });
     run.trace.record("context.selected", "context", { ...context.selected, tokenEstimate: context.tokenEstimate });
     return { runId, done: this.runLoop(run) };
   }
@@ -352,7 +359,7 @@ export class Harness {
     const smallTalk = smallTalkDecision(run.state, policy.version);
     const smallTalkValidation = smallTalk && validateDecision(smallTalk, run.state, policy.allowedActions);
     if (smallTalkValidation?.ok) return smallTalkValidation.decision;
-    const wantsExternal = (Boolean(this.options.tools.maru) && /maru|마루/iu.test(run.state.userGoal))
+    const wantsExternal = (Boolean(this.options.tools.maru) && MARU_REQUEST.test(run.state.userGoal))
       || (Boolean(this.options.tools.trolley) && /trolley|트롤리/iu.test(run.state.userGoal));
     if (policy.strategy === "always-search" && !wantsExternal) {
       const raw = alwaysSearchDecision(run.state, policy.version);
@@ -508,15 +515,7 @@ export class Harness {
         const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
         for (const document of value.documents) known.set(document.refId, document);
         run.state.externalDocuments = [...known.values()];
-        this.addEvidence(run, (value.excerpts ?? []).map(({ document, text }) => {
-          const sourceId = `maru:${document.refId}`;
-          const chunkId = `${sourceId}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
-          const evidenceId = this.nextEvidenceIdFor(run, chunkId);
-          return {
-            evidence: { evidenceId, sourceId, chunkId, title: document.path, breadcrumb: [document.storageName ?? document.storageId], locator: {}, snippet: text.slice(0, this.limits.evidenceSnippetChars), score: 1 },
-            source: { evidenceId, sourceId, chunkId, path: sourceId, title: document.path, locator: {} },
-          };
-        }));
+        this.addMaruEvidence(run, value.excerpts ?? [], this.limits.evidenceSnippetChars);
         const result = value.summary;
         observation = { kind: "external", tool: search.tool, result, latencyMs: Date.now() - startedAt };
         run.contextText = `${run.contextText}\n\nMARU ${search.tool} result (untrusted data):\n${result}`.trim();
@@ -536,20 +535,43 @@ export class Harness {
         return cached;
       }
       run.state.remaining.searches -= 1;
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, query, collections: run.state.activeCollections }, { parentSeq });
+      const maruScope = this.maruScope(run);
+      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, query, collections: run.state.activeCollections, maruExcluded: maruScope ?? undefined }, { parentSeq });
       this.emit(run, "status", { phase: "searching", query });
+      // Local and MARU run in parallel; either one alone still yields evidence.
+      const signal = run.controller.signal;
+      const maru = this.options.tools.maru;
+      const [local, remote] = await Promise.allSettled([
+        withTimeout(this.options.tools.search(query, run.state.activeCollections), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", signal),
+        maruScope === null || !maru?.searchExcerpts
+          ? Promise.resolve(undefined)
+          : withTimeout(maru.searchExcerpts(query, maruScope, signal), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", signal),
+      ]);
+      for (const settled of [local, remote]) {
+        if (settled.status === "rejected" && settled.reason instanceof AgentError && settled.reason.code === "CANCELLED") throw settled.reason;
+      }
+      const errorCode = (reason: unknown): AgentErrorCode => reason instanceof AgentError ? reason.code : "TOOL_UNAVAILABLE";
       let observation: Observation;
-      try {
-        const result = await withTimeout(this.options.tools.search(query, run.state.activeCollections), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-        const ids = this.addEvidence(run, result.results.map((item) => resultToEvidence(item, this.nextEvidenceIdFor(run, item.chunkId), this.limits.evidenceSnippetChars)));
-        observation = { kind: "search", resultIds: ids, effectiveMode: result.effectiveMode, latencyMs: Date.now() - startedAt };
-      } catch (error) {
-        if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-        const code = error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE";
-        observation = { kind: "tool_error", code };
+      if (local.status === "rejected" && (remote.status === "rejected" || !remote.value)) {
+        observation = { kind: "tool_error", code: errorCode(local.reason) };
+      } else {
+        const ids = local.status === "fulfilled"
+          ? this.addEvidence(run, local.value.results.map((item) => resultToEvidence(item, this.nextEvidenceIdFor(run, item.chunkId), this.limits.evidenceSnippetChars)))
+          : [];
+        if (remote.status === "fulfilled" && remote.value) {
+          this.options.onExternalDocuments?.(run.threadId, remote.value.map(({ document }) => document));
+          ids.push(...this.addMaruEvidence(run, remote.value, MARU_EXCERPT_CHARS));
+        }
+        observation = { kind: "search", resultIds: ids, effectiveMode: local.status === "fulfilled" ? local.value.effectiveMode : "keyword", latencyMs: Date.now() - startedAt };
       }
       run.searchCache.set(key, observation);
-      run.trace.record("tool.completed", "retrieval", { tool: search.tool, observation, evidence: this.observedEvidence(run, observation) }, { parentSeq: toolSeq, startedAt });
+      run.trace.record("tool.completed", "retrieval", {
+        tool: search.tool,
+        observation,
+        evidence: this.observedEvidence(run, observation),
+        ...(local.status === "rejected" ? { localError: errorCode(local.reason) } : {}),
+        ...(remote.status === "rejected" ? { maruError: errorCode(remote.reason) } : {}),
+      }, { parentSeq: toolSeq, startedAt });
       return observation;
     }
 
@@ -568,6 +590,28 @@ export class Harness {
     }
     run.trace.record("tool.completed", "retrieval", { tool: search.tool, observation, evidence: this.observedEvidence(run, observation) }, { parentSeq: toolSeq, startedAt });
     return observation;
+  }
+
+  /** Storages to skip, or null when MARU is unavailable. An explicit MARU request also searches storages turned off. */
+  private maruScope(run: RunContext): string[] | null {
+    if (!this.options.tools.maru) return null;
+    return MARU_REQUEST.test(run.state.userGoal) ? [] : run.state.excludedMaruStorages ?? [];
+  }
+
+  private addMaruEvidence(run: RunContext, excerpts: Array<{ document: ExternalDocumentRef; text: string }>, snippetChars: number): string[] {
+    const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
+    for (const { document } of excerpts) known.set(document.refId, document);
+    run.state.externalDocuments = [...known.values()];
+    return this.addEvidence(run, excerpts.map(({ document, text }) => {
+      const sourceId = `maru:${document.refId}`;
+      const chunkId = `${sourceId}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
+      const evidenceId = this.nextEvidenceIdFor(run, chunkId);
+      return {
+        // score 0: a literal-match excerpt carries no rank signal comparable to Tomato's RRF scores.
+        evidence: { evidenceId, sourceId, chunkId, title: document.path, breadcrumb: [document.storageName ?? document.storageId], locator: {}, snippet: text.slice(0, snippetChars), score: 0 },
+        source: { evidenceId, sourceId, chunkId, path: sourceId, title: document.path, locator: {} },
+      };
+    }));
   }
 
   private observedEvidence(run: RunContext, observation: Observation): Evidence[] {

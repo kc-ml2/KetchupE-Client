@@ -17,6 +17,7 @@ export interface SearchTools {
   maru?: {
     call(tool: "browse_storage" | "find_storage", args: Record<string, unknown>, signal: AbortSignal): Promise<ExternalCallResult>;
     readDocument(document: ExternalDocumentRef, signal: AbortSignal): Promise<IngestedSource>;
+    searchExcerpts?(question: string, excludedStorageIds: string[], signal: AbortSignal): Promise<Array<{ document: ExternalDocumentRef; text: string }>>;
   };
 }
 

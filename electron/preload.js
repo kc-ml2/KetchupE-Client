@@ -45,6 +45,8 @@ function agentAPI(sessionId) {
   syncCollection: (name) => invoke('collection:sync', name),
   listCollections: (workspaceId) => invoke('collection:list', workspaceId),
   setCollectionActive: (workspaceId, name, active) => invoke('collection:setActive', workspaceId, name, active),
+  listMaruStorages: (workspaceId) => invoke('maru:listStorages', workspaceId),
+  setMaruStorageActive: (workspaceId, storageId, active) => invoke('maru:setStorageActive', workspaceId, storageId, active),
   onCollectionsChanged: (listener) => {
     const handler = (_event, payload) => { if (payload.sessionId === sessionId) listener(); };
     ipcRenderer.on('collection:changed', handler);

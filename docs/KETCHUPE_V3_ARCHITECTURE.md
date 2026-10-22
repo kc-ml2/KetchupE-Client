@@ -67,7 +67,7 @@ Answers stream provisionally before final citation validation. A valid citation 
 
 ## Remote services and observability
 
-- **MARU:** storage browsing/search and authorized document download. The adapter renews the exact document URL, checks HTTPS/origin/size, caches locally, and indexes through Tomato. Signed URLs stay out of prompts and trace.
+- **MARU:** storage browsing/search and authorized document download. Every accessible storage except those turned off in the Files tab (on by default; turned-off ones too when the question mentions MARU) are searched in the same `search_local_docs` step as local collections: the question is reduced to up to three literal keywords, `find_storage` runs per keyword × storage with `include_content`, and about 1,000 characters around the first hit of the best-matching files become citable evidence. MARU matching is literal (ripgrep over files and pre-extracted PDF/Office/HWP text), not semantic. Opening a citation renews the exact document URL, checks HTTPS/origin/size, caches locally, and indexes through Tomato. Signed URLs stay out of prompts and trace.
 - **Trolley:** capability checks and Operation listing only. Listing an Operation does not enable its execution.
 - **LiteLLM:** configured model transport. It does not own local state or business calculations.
 - **Telemetry:** local SQLite remains authoritative. The outbox retries delivery to the service-owned gateway; desktop builds do not contain Langfuse secrets. Content modes are `ops`, `redacted_eval`, and `internal_full`; redaction is not a guarantee that all personal data is removed. Trolley content is excluded from central telemetry.
@@ -77,7 +77,7 @@ Connection semantics live in [mcp.ts](../electron/agent/mcp.ts); server semantic
 ## Constraints and unfinished validation
 
 - Local storage does not mean offline operation: selected context reaches LiteLLM, configured telemetry reaches the gateway, and initial embedding downloads require network access.
-- Collection selection and workspace IDs are not authorization boundaries. MARU references are persisted per thread; history loading, context reuse, and citation opening recheck remote access. MARU indexes are excluded from normal local collection searches. Existing on-screen content and user-copied memory/exports cannot be remotely erased. Real broker/MARU group authorization still requires live integration validation.
+- Collection selection and workspace IDs are not authorization boundaries. MARU references are persisted per thread; history loading, context reuse, and citation opening recheck remote access. Downloaded MARU indexes (`maru_*`) are excluded from local collection searches; MARU storages are searched remotely instead. Existing on-screen content and user-copied memory/exports cannot be remotely erased. Real broker/MARU group authorization still requires live integration validation.
 - Filesystem artifacts and SQLite are not one atomic transaction. Source hashes do not preserve old source content. A model alias does not pin an immutable model checkpoint.
 - Outbox delivery is at least once; central deduplication is required. Retry count and outbox storage are not globally bounded. No production throughput, latency SLO, or region-failure guarantee has been established.
 - Arbitrary MCP installation, user-supplied code/SKILL execution, multi-agent delegation, and generic remote writes are not implemented.
