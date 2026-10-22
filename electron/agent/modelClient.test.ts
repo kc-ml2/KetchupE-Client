@@ -9,15 +9,18 @@ it("omits temperature from LiteLLM requests", async () => {
   let body: Record<string, unknown> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(JSON.stringify({
-      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    const chunks = [
+      { choices: [{ delta: { role: "assistant", content: "o" } }] },
+      { choices: [{ delta: { content: "k" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+    ];
+    return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
   }));
 
   const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
   await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
   expect(body).not.toHaveProperty("temperature");
+  // Canvas drafts stream so a long generation is not cut by the proxy idle timeout (HTTP 524).
+  expect(body).toMatchObject({ stream: true, reasoning_effort: "medium" });
 });
 
 it("does not hide HTTP retries outside the harness budget", async () => {
