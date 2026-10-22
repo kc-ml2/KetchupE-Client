@@ -36,7 +36,7 @@ Email authentication and credential provisioning live in `electron/auth/`; see [
 
 `Workspace → Thread → Run → Message / Step`. A thread has at most one `running` or `waiting_user` run; there is no global execution queue.
 
-- New requests use an explicit mode, `$workflow_id`, or Clef choice-based routing over every registered capability. Explicit selections bypass the model. Routing uses LiteLLM `/v1/systemone` and `LITELLM_ROUTER_MODEL_ALIAS` (default `clef`); generation keeps its existing model. Errors do not silently fall back to another workflow or model.
+- New requests use an explicit mode, `$workflow_id`, or Clef choice-based routing over every registered capability. Explicit selections bypass the model. Routing uses LiteLLM `/v1/systemone` and `LITELLM_ROUTER_MODEL_ALIAS` (default `clef-flash`); generation keeps its existing model. Errors do not silently fall back to another workflow or model.
 - Replies to a waiting run return to its persisted owner. A running run rejects another start; Canvas uses dedicated edit/resume actions.
 - Waiting state survives restart. Runs interrupted while executing are cancelled at startup, not automatically replayed.
 - Each executor owns cancellation and terminal events. The renderer accepts matching run IDs with increasing event sequence numbers.

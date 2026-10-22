@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, open, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { WorkFile, WorkSource } from "../../src/app-types/WorkSource.types.ts";
+import { realpath } from "./paths.ts";
 
 export const MAX_WORKBOOK_BYTES = 20 * 1024 * 1024;
 export class WorkSources {

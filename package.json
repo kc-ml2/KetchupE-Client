@@ -1,7 +1,7 @@
 {
   "name": "KetchupE",
   "private": true,
-  "version": "2.1.1",
+  "version": "3.0.7",
   "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.js",
@@ -104,12 +104,15 @@
     "@ai-sdk/openai-compatible": "^3.0.43",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/client": "^2.0.0",
+    "@xmldom/xmldom": "0.9.12",
     "agentation": "^2.3.2",
     "ai": "^7.0.92",
+    "decimal.js": "10.5.0",
     "docx": "^9.7.1",
     "dotenv": "^16.4.5",
     "electron-updater": "^6.8.3",
     "exceljs": "4.4.0",
+    "jszip": "3.10.1",
     "kordoc": "^4.18.3",
     "react": "^19.0.0",
     "react-device-detect": "^2.2.3",
@@ -122,9 +125,8 @@
     "rehype-raw": "^7.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "zod": "^4.5.4",
-    "decimal.js": "10.5.0",
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.0",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

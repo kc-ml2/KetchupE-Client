@@ -3,14 +3,14 @@ import type { ExtractionPreview, SourceMapping, WorkbookOverview } from "../../s
 
 export type WorkbookJob = {
   bytes: Uint8Array; fingerprint: string;
-  action: { kind: "inspect"; sheet?: string; headerRow?: number } | { kind: "extract"; mapping: SourceMapping };
+  action: { kind: "validate"; sheet: string } | { kind: "inspect"; sheet?: string; headerRow?: number } | { kind: "extract"; mapping: SourceMapping };
 };
 export type WorkbookReply = { ok: true; result: WorkbookOverview | ExtractionPreview } | { ok: false; error: string };
 
 /** One bounded process per read. Parsing cannot block the app or outlive its timeout. */
 export function readWorkbookJob(workerPath: string, job: WorkbookJob): Promise<WorkbookOverview | ExtractionPreview> {
   return new Promise((resolve, reject) => {
-    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-workbook", stdio: "ignore", execArgv: ["--max-old-space-size=256"] });
+    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-workbook", stdio: "ignore", execArgv: ["--max-old-space-size=1024"] });
     let settled = false;
     const finish = (error?: Error, result?: WorkbookOverview | ExtractionPreview) => {
       if (settled) return;

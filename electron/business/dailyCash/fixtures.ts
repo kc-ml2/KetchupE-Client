@@ -36,3 +36,23 @@ export function fixtureBooks() {
   k.addRow([3, "", "", "", "환종별합계", "KRW", 110000, 110000, 10000, 10000, 11000, 11000, 109000, 109000, 109000]);
   return { report, weekly, status };
 }
+
+/** 366 real worksheet XML parts, each carrying the full report layout, formulas and styles. */
+export async function annualReportFixture() {
+  const { default: JSZip } = await import("jszip");
+  const zip = await JSZip.loadAsync(await fixtureBooks().report.xlsx.writeBuffer());
+  const sheet = await zip.file("xl/worksheets/sheet1.xml")!.async("string");
+  let workbook = await zip.file("xl/workbook.xml")!.async("string");
+  let rels = await zip.file("xl/_rels/workbook.xml.rels")!.async("string");
+  let types = await zip.file("[Content_Types].xml")!.async("string");
+  for (let i = 0; i < 365; i++) {
+    const name = new Date(Date.UTC(2025, 0, i + 1)).toISOString().slice(2, 10).replaceAll("-", "");
+    const id = i + 2;
+    zip.file(`xl/worksheets/sheet${id}.xml`, sheet);
+    workbook = workbook.replace("</sheets>", `<sheet name="${name}" sheetId="${id}" state="${i === 0 ? "veryHidden" : "visible"}" r:id="history${id}"/></sheets>`);
+    rels = rels.replace("</Relationships>", `<Relationship Id="history${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${id}.xml"/></Relationships>`);
+    types = types.replace("</Types>", `<Override PartName="/xl/worksheets/sheet${id}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+  }
+  zip.file("xl/workbook.xml", workbook); zip.file("xl/_rels/workbook.xml.rels", rels); zip.file("[Content_Types].xml", types);
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}

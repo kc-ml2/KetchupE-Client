@@ -6,7 +6,7 @@ on:
 
 jobs:
   notion_sync:
-    if: github.repository == 'kc-ml2/KetchupE'
+    if: github.repository == 'kc-ml2/KetchupE-Client'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

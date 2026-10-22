@@ -2,9 +2,11 @@
 import { expect, it, vi } from "vitest";
 import ExcelJS from "exceljs";
 import sharp from "sharp";
+import JSZip from "jszip";
+import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { dailyCashTool, applyEdits } from "./dailyCash.ts";
 import { bindAccounts, fitDescription, layout, priorAmounts } from "./dailyCash/report.ts";
-import { fixtureBooks } from "./dailyCash/fixtures.ts";
+import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
@@ -54,6 +56,25 @@ it("matches the KC file date to the report date (work date minus one), not the w
   const { input, books, file } = await setup(); input.files.cashStatus = [await file(books.status, "261014_자금현황표[KC].xlsx")];
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("기준일 2026-10-14와 일보 기준일 2026-10-13") });
 });
+it("preserves a year of historical sheets, including distant used cells, when appending the next report", async () => {
+  const { input, books, file } = await setup();
+  for (let day = 0; day < 365; day++) {
+    const name = new Date(Date.UTC(2025, 0, day + 1)).toISOString().slice(2, 10).replaceAll("-", "");
+    books.report.addWorksheet(name).getCell("A1").value = `history ${name}`;
+  }
+  const archive = books.report.getWorksheet("250101")!;
+  archive.getCell(100001, 501).value = "historical note";
+  input.files.previousReport = [await file(books.report, "연간일보.xlsx")];
+  const result = await confirm(input);
+  expect(result.status, JSON.stringify(result.status === "completed" ? {} : result)).toBe("completed");
+  if (result.status !== "completed") return;
+  const output = new ExcelJS.Workbook(); await output.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer);
+  expect(output.worksheets.map((sheet) => sheet.name)).toEqual([...books.report.worksheets.map((sheet) => sheet.name), "261013"]);
+  for (const sheet of books.report.worksheets.slice(1)) expect(output.getWorksheet(sheet.name)!.getCell("A1").value).toBe(sheet.getCell("A1").value);
+  expect(output.getWorksheet("250101")!.getCell(100001, 501).value).toBe("historical note");
+  expect(output.getWorksheet("261012")!.getCell("H10").value).toBe(100000);
+  expect(output.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
+}, artifactTestTimeout);
 it("carries sub-won interest fractions forward and reconciles them against whole-won KC balances", async () => {
   const { input, books, file } = await setup(); books.report.getWorksheet("261012")!.getCell("H10").value = 100000.27878; input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status === "failed" ? result : {})).toBe("completed");
@@ -95,7 +116,7 @@ it("requires explicit values for missing formula caches and does not silently us
 });
 it("stops when actual account cash differs from ledger or a term has not settled", async () => {
   const { books, input, file } = await setup(); const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000; input.files.cashStatus = [await file(books.status, "261013_자금현황표[KC].xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" })]) });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" }), expect.objectContaining({ key: "actualEdits", type: "movements" })]) });
 });
 it("requires corrections when planned executions do not reconcile the holding cash", async () => {
   const { input } = await setup(); input.values.actualEdits = '{"changes":[{"index":2,"amount":"2000"}]}';
@@ -255,3 +276,32 @@ it("falls back to manually entered rates after a failed retry and records them a
   expect(review.checkpoint).toMatchObject({ rates: { source: expect.stringContaining("수동"), round: "8", date: "2026-10-13", perUnit: { USD: "1402.5", JPY: "9.5012", CNY: "199.9" } } });
   expect(fetchHana).toHaveBeenCalledTimes(2);
 });
+
+
+it("calculates and saves the next daily cash report from 366 full report sheets while parsing only the required prior sheet", async () => {
+  const { input } = await setup(); const annual = await annualReportFixture();
+  input.files.previousReport = [{ bytes: annual, name: "연간일보.xlsx", fingerprint: "annual" }];
+  const parsed: string[][] = []; const load = SelectiveWorkbook.prototype.loadSheet;
+  const spy = vi.spyOn(SelectiveWorkbook.prototype, "loadSheet").mockImplementation(async function (this: SelectiveWorkbook, name: string) {
+    const book = await load.call(this, name); parsed.push(book.worksheets.map((sheet) => sheet.name)); return book;
+  });
+  const started = performance.now();
+  try {
+    const result = await confirm(input);
+    expect(result.status, JSON.stringify(result.status !== "completed" && result)).toBe("completed");
+    if (result.status !== "completed") return;
+    expect(parsed).toEqual([["261012"], ["261012"]]);
+    expect(result.validationSheet).toBe("261013");
+    const output = await SelectiveWorkbook.open(result.file.bytes);
+    expect(output.sheetNames).toHaveLength(367);
+    const latest = await output.loadSheet(result.validationSheet!);
+    expect(latest.worksheets).toHaveLength(1);
+    expect(latest.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
+    expect(latest.getWorksheet("261013")!.pageSetup.printArea).toBe("A1:M248");
+    const before = await JSZip.loadAsync(annual); const after = await JSZip.loadAsync(result.file.bytes);
+    for (const path of Object.keys(before.files).filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))) {
+      expect(await after.file(path)!.async("string"), path).toBe(await before.file(path)!.async("string"));
+    }
+    console.info(`Annual Daily Cash: 366 input → 367 output sheets; 1 prior sheet parsed per run; ${annual.length} input bytes; ${Math.round(performance.now() - started)} ms including review, save, validation and archive comparison`);
+  } finally { spy.mockRestore(); }
+}, artifactTestTimeout);

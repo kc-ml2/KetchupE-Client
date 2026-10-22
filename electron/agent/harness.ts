@@ -16,7 +16,7 @@ import {
 } from "./contracts.ts";
 import { selectContext } from "./context.ts";
 import type { ModelCallInfo, ModelClient } from "./modelClient.ts";
-import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFingerprint } from "./policy.ts";
+import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFingerprint, smallTalkDecision } from "./policy.ts";
 import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "./store.ts";
 import { chunkToEvidence, normalizeQuery, resultToEvidence, withTimeout, type EvidenceSource, type SearchTools } from "./tools.ts";
 import { readTrace, TraceWriter } from "./trace.ts";
@@ -349,6 +349,9 @@ export class Harness {
 
   private async decide(run: RunContext): Promise<PolicyDecision> {
     const { policy } = this.options.profiles;
+    const smallTalk = smallTalkDecision(run.state, policy.version);
+    const smallTalkValidation = smallTalk && validateDecision(smallTalk, run.state, policy.allowedActions);
+    if (smallTalkValidation?.ok) return smallTalkValidation.decision;
     const wantsExternal = (Boolean(this.options.tools.maru) && /maru|마루/iu.test(run.state.userGoal))
       || (Boolean(this.options.tools.trolley) && /trolley|트롤리/iu.test(run.state.userGoal));
     if (policy.strategy === "always-search" && !wantsExternal) {
@@ -622,8 +625,11 @@ export class Harness {
       repaired = true;
       check = validateCitations(text, run.state.evidence);
     }
-    const citationsFailed = run.state.evidence.length > 0 && check.valid.length === 0;
-    run.trace.record("answer.validated", "citation", { valid: check.valid, invalid: check.invalid, repaired, usage: answerUsage, failed: citationsFailed }, { parentSeq, startedAt });
+    // Citing only unknown ids is a grounding failure. Citing nothing means the model judged the retrieved
+    // evidence irrelevant (e.g. "어떤 MCP가 연결돼 있어?" against local docs); keep that answer, uncited.
+    const citationsFailed = run.state.evidence.length > 0 && check.valid.length === 0 && repaired;
+    const uncited = run.state.evidence.length > 0 && check.valid.length === 0 && !repaired;
+    run.trace.record("answer.validated", "citation", { valid: check.valid, invalid: check.invalid, repaired, usage: answerUsage, failed: citationsFailed, uncited }, { parentSeq, startedAt });
     if (citationsFailed) throw new AgentError("INVALID_CITATION", "answer did not cite known evidence");
 
     const citations: CitationSummary[] = check.valid.map((id) => {

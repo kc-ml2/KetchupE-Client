@@ -22,7 +22,7 @@ export class BusinessFlow {
   private readonly active = new Map<string, AbortController>();
   constructor(private readonly db: DatabaseSync, tools: BusinessTool[], private readonly outputDir: string,
     private readonly emit: (event: AgentStreamEvent) => void,
-    private readonly validateWorkbook: (bytes: Uint8Array) => Promise<void>,
+    private readonly validateWorkbook: (bytes: Uint8Array, sheet?: string) => Promise<void>,
     private readonly timeoutMs = 120000) {
     for (const tool of tools) {
       if (this.tools.has(tool.id)) throw new Error("duplicate business tool");
@@ -132,7 +132,7 @@ export class BusinessFlow {
       else if (result.status === "completed") {
         if (!result.checks.length || result.checks.some((check) => check.passed !== true)) throw new Error("업무 검증을 통과하지 못했습니다.");
         if (!/^[^/\\:*?"<>|]{1,150}\.xlsx$/i.test(result.file.name) || [...result.file.name].some((char) => char.charCodeAt(0) < 32) || !(result.file.bytes instanceof Uint8Array) || result.file.bytes.length > 20 * 1024 * 1024) throw new Error("잘못된 출력 파일입니다.");
-        await this.abortable(this.validateWorkbook(result.file.bytes), controller.signal);
+        await this.abortable(this.validateWorkbook(result.file.bytes, result.validationSheet), controller.signal);
         controller.signal.throwIfAborted();
         const outputs = [result.file];
         if (result.image) {

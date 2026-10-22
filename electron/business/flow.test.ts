@@ -7,11 +7,15 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction, loadThread } from "../agent/store.ts";
 import { WorkSources } from "../work/sources.ts";
+import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { loadWorkbook } from "../work/mapping.ts";
 import { BusinessFlow } from "./flow.ts";
 import { dailyCashTool } from "./dailyCash.ts";
+import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import type { BusinessTool, ToolResult } from "./contracts.ts";
-import type { BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
+import type { BusinessAction, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
+
+vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 
 let folder: string;
 let db: ReturnType<typeof openAgentDb>;
@@ -22,7 +26,7 @@ let threadId: string;
 let flow: BusinessFlow;
 const emit = vi.fn();
 const success = (): ToolResult => ({ status: "completed", summary: "테스트 업무 완료", file: { name: "테스트결과.xlsx", bytes: output }, checks: [{ name: "정답 비교", passed: true }], externalData: { rate: "fixture-only" } });
-const makeFlow = (tools = [tool], timeout = 1000) => new BusinessFlow(db, tools, join(folder, "output"), emit, async (bytes) => { await loadWorkbook(bytes); }, timeout);
+const makeFlow = (tools = [tool], timeout = 1000) => new BusinessFlow(db, tools, join(folder, "output"), emit, async (bytes, sheet) => { if (sheet) { const book = await (await SelectiveWorkbook.open(bytes)).loadSheet(sheet); expect(book.worksheets).toHaveLength(1); } else await loadWorkbook(bytes); }, timeout);
 const start = () => flow.workflows()[0].start({ threadId, workspaceId: "default", text: "테스트 엑셀 만들어줘" }).runId;
 beforeEach(async () => {
   folder = await mkdtemp(join(tmpdir(), "business-tool-")); db = openAgentDb(join(folder, "agent.sqlite"));
@@ -61,6 +65,59 @@ it("updates the selected original workbook after validating the generated workbo
   expect(updated.getWorksheet("결과")?.getCell("A1").value).toBe("updated");
   expect(getRun(db, runId).status).toBe("completed");
 });
+
+it("preserves newly added work-date plans through a balance correction and renewed final review", async () => {
+  const books = fixtureBooks(); const status = books.status.worksheets[0];
+  status.getCell("O2").value = 108000; status.getCell("O4").value = 108000;
+  const sources = new WorkSources(db);
+  const chosen: BusinessInput = { values: { workDate: "2026-10-14" }, files: {} };
+  for (const [key, book, name] of [["previousReport", books.report, "report.xlsx"], ["weeklyPlans", books.weekly, "weekly.xlsx"], ["cashStatus", books.status, "261013_KC.xlsx"]] as const) {
+    const path = join(folder, name); await writeFile(path, key === "previousReport" ? await annualReportFixture() : Buffer.from(await book.xlsx.writeBuffer()));
+    const source = (await sources.register([path], "file")).find((item) => item.name === name)!;
+    chosen.files[key] = await sources.files(source.id);
+  }
+  flow = makeFlow([dailyCashTool], 30000);
+  const { runId, done } = flow.workflows()[0].start({ threadId, workspaceId: "default", text: "일일자금일보 작성" }); await done;
+  const action = () => getRunAction(db, runId) as BusinessAction;
+  await flow.submit(runId, action().id, chosen);
+  expect(action().fields.find((field) => field.key === "actualEdits")?.type).toBe("movements");
+  chosen.values.actualEdits = '{"changes":[],"add":[]}';
+  const addedPlans = [{ direction: "out", description: "당일 추가 지급", party: "추가 거래처", amount: "5000" }, { direction: "in", description: "당일 추가 입금", party: "입금 거래처", amount: "1000" }];
+  chosen.values.planEdits = JSON.stringify({ changes: [], add: addedPlans });
+  await flow.submit(runId, action().id, chosen);
+  expect(action().question).toContain("장부와 실제 잔고 차이");
+  expect(action().question).not.toContain("형식이 변경");
+  expect(action().fields.find((field) => field.key === "actualEdits")?.type).toBe("movements");
+  expect(action().fields.find((field) => field.key === "planEdits")?.type).toBe("movements");
+  expect(action().input.values.planEdits).toBe(chosen.values.planEdits);
+  expect(action().lockedKeys).not.toContain("actualEdits");
+  chosen.values.cashChanges = '{"140013557434:KRW":{"incoming":"10000","outgoing":"2000"}}';
+  chosen.values.actualEdits = '{"changes":[{"index":2,"amount":"2000"}],"add":[]}';
+  await flow.submit(runId, action().id, chosen);
+  expect(action().question).toContain("최종 확인");
+  chosen.values.review = action().fields.find((field) => field.key === "review")!.confirm!;
+  const firstReview = chosen.values.review;
+  addedPlans[0].amount = "6000";
+  chosen.values.planEdits = JSON.stringify({ changes: [], add: addedPlans });
+  await flow.submit(runId, action().id, chosen);
+  expect(action().question).toContain("최종 확인");
+  expect(action().input.values.planEdits).toBe(chosen.values.planEdits);
+  chosen.values.review = action().fields.find((field) => field.key === "review")!.confirm!;
+  expect(chosen.values.review).not.toBe(firstReview);
+  await flow.submit(runId, action().id, chosen);
+  expect(getRun(db, runId).status, action()?.question).toBe("completed");
+  expect(flow.artifacts(threadId)).toHaveLength(2);
+  const updated = await loadWorkbook(await readFile(join(folder, "report.xlsx")));
+  expect(updated.worksheets).toHaveLength(367);
+  expect(updated.getWorksheet("250101")!.getCell("H10").value).toBe(100000);
+  expect(updated.getWorksheet("261013")!.getCell("H10").result).toBe(108000);
+  const report = updated.getWorksheet("261013")!;
+  expect(report.getCell("H237").result).toBe(101000);
+  expect(report.getCell("F131").value).toContain("당일 추가 입금");
+  expect(report.getCell("H131").value).toBe(1000);
+  expect(report.getCell("F158").value).toContain("당일 추가 지급");
+  expect(report.getCell("H158").value).toBe(6000);
+}, 30000);
 
 it("persists additional structured input across DB reopen and pins the tool version", async () => {
   vi.mocked(tool.execute).mockResolvedValueOnce({ status: "needs_input", question: "어떤 계좌인가요?", checkpoint: { fx: { value: "1300.00", date: "2026-10-15", source: "fixture" } }, fields: [{ key: "account", type: "text", label: "계좌", required: true }] });

@@ -25,11 +25,12 @@ Fields support `file`, `date`, `text`, `number`, and `movements`. `multiple: tru
 
 ## Execution and storage
 
-- Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Source files are not modified.
+- Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Windows network-drive `realpath` failures with `EISDIR` retry Node's non-native resolver, preserving canonical-path and symlink checks. Source files are modified only by tools declaring `updateSource`, after validation.
 - Limits: 20 MiB per source file, 100 MiB total input, 30 fields, checkpoint JSON up to 1,000,000 characters, and 20 MiB per output file.
+- Workbook loading does not reject files based on total sheet count or worksheet dimensions: annual Daily Cash history and distant cells are preserved. File size, worker memory, and execution-time limits still apply.
 - The first accepted execution freezes initial values, file references, hashes, and tool version. Sources are re-read and hashes checked on subsequent submissions. Source or version changes require a new task.
 - Questions and state live in `business_jobs` / `run_actions`. Waiting jobs survive restart; interrupted execution is cancelled without automatic replay.
-- Each execution runs in an Electron utility process with a 120-second limit and 512 MiB V8 heap cap, not an RSS cap. Cancellation terminates the worker. Tool errors and timeouts normally return to input for correction.
+- Each execution runs in an Electron utility process with a 120-second limit and 1 GiB V8 heap cap, not an RSS cap. Workbook inspection/output validation uses a separate process with the same heap cap and a 30-second limit. Cancellation terminates the business worker. Tool errors and timeouts normally return to input for correction.
 - Every business check must pass, and the XLSX must reopen successfully. Optional PNGs are also validated. File-format validation does not establish accounting correctness.
 - Artifacts are saved without overwriting under `userData/business-output/<artifact-id>/`. Only validated, DB-registered artifacts appear in chat; opening rechecks their hashes. Audit records retain checks and applied external data, excluding credentials.
 - Raw source workbooks are not sent to the routing model or telemetry. Requests and recent user messages do reach the routing model. Source snapshots, historical code replay, and automatic artifact cleanup are not implemented; deleting a conversation does not delete output files.
@@ -100,3 +101,10 @@ npx vite-node scripts/bank-fixture.ts fixtures
 ```
 
 The offline demo generates synthetic inputs, review text, XLSX, and PNG with fixed test rates. Expected cash: 100,000 + 10,000 − 1,000 = 109,000; after next-day plans, 107,000. Generated `fixtures/` files are ignored by Git; tests generate their own data in memory. App execution uses the live rate lookup and operator confirmation.
+
+
+### Annual Daily Cash workbooks (v3.0.1)
+
+Daily Cash reads the workbook sheet-name index and parses only the latest dated report before the report date, regardless of tab order. Historical worksheet XML and its related parts remain in the original ZIP archive; the completed report is appended with its own strings and remapped styles. Output validation also loads only the new report sheet. The complete XLSX is still read/written on disk, and shared string/style metadata is loaded; this is selective worksheet parsing, not a partial file transfer. The existing 20 MiB per-file limit remains.
+
+Regression fixtures cover 366 full report sheets → 367 sheets, byte-for-byte preservation of every old worksheet, repeated appends, formulas, shared strings, custom number formats, dates, hidden tabs, named ranges, print areas, comments, hyperlinks, and conditional formatting. Structured Excel tables in the new report template are rejected before saving to avoid duplicate workbook-global table names; historical tables and other archived parts are preserved.

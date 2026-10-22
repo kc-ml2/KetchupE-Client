@@ -178,8 +178,8 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   });
 
   const workSourcesFlow = new WorkSourcesFlow(db, options.emitAgentEvent);
-  const businessFlow = new BusinessFlow(db, businessTools.map((tool) => ({ ...tool, execute: ({ signal, ...input }) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input }, signal) })), join(options.userData, "business-output"), options.emitAgentEvent, async (bytes) => {
-    await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: { kind: "inspect" } });
+  const businessFlow = new BusinessFlow(db, businessTools.map((tool) => ({ ...tool, execute: ({ signal, ...input }) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input }, signal) })), join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
+    await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
   });
   const workflows = new WorkflowDispatcher(db, [
     {
@@ -207,7 +207,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       cancel: (id: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.cancel(id) : workflow.cancel(id),
     })),
   ], (text, routes, input) => routeMessage(
-    { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef" },
+    { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" },
     text,
     AbortSignal.any([lifetime.signal, AbortSignal.timeout(policyProfile.runTimeoutMs)]),
     routes,

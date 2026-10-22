@@ -2,15 +2,37 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatabaseSync } from "node:sqlite";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { WorkSources } from "./sources.ts";
 import { listProfiles, saveProfile } from "./profiles.ts";
 
+const mock = vi.hoisted(() => ({ realpathError: "" }));
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return { ...fs, realpath: (...args: Parameters<typeof fs.realpath>) => {
+    if (mock.realpathError) return Promise.reject(Object.assign(new Error(mock.realpathError), { code: mock.realpathError }));
+    return fs.realpath(...args);
+  } };
+});
+
+describe.each(["", "EISDIR"])("work sources with native realpath error '%s'", (error) => {
 let folder: string; let db: DatabaseSync; let sources: WorkSources;
-beforeEach(async () => { folder = await mkdtemp(join(tmpdir(), "work-source-")); db = openAgentDb(":memory:"); sources = new WorkSources(db); });
-afterEach(async () => { db.close(); await rm(folder, { recursive: true, force: true }); });
+beforeEach(async () => { mock.realpathError = error; folder = await mkdtemp(join(tmpdir(), "work-source-")); db = openAgentDb(":memory:"); sources = new WorkSources(db); });
+afterEach(async () => { mock.realpathError = ""; db.close(); await rm(folder, { recursive: true, force: true }); });
+
+it("does not bypass permission or missing-file failures", async () => {
+  const path = join(folder, "report.xlsx"); await writeFile(path, "original");
+  for (const code of ["EACCES", "ENOENT"]) {
+    mock.realpathError = code;
+    await expect(sources.register([path], "file")).rejects.toMatchObject({ code });
+  }
+  mock.realpathError = error;
+  await expect(sources.register([join(folder, "missing.xlsx")], "file")).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(sources.register([folder], "file")).rejects.toThrow("XLSX");
+  expect(sources.list()).toEqual([]);
+});
 
 it("registers references without copying, discovers nested XLSX files and detects changed bytes", async () => {
   const root = join(folder, "selected"); await mkdir(join(root, "nested"), { recursive: true });
@@ -55,4 +77,5 @@ it("persists mappings and rejects stale updates instead of overwriting a newer r
   expect(listProfiles(db)).toEqual([profile]);
   expect(saveProfile(db, profile, "hash").revision).toBe(2);
   expect(() => saveProfile(db, profile, "hash")).toThrow("변경되었거나");
+});
 });

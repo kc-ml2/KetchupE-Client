@@ -7,7 +7,7 @@ export type BusinessReply = { ok: true; result: ToolResult } | { ok: false; erro
 export function executeBusinessJob(workerPath: string, job: BusinessJob, signal: AbortSignal): Promise<ToolResult> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-business-tool", stdio: "ignore", execArgv: ["--max-old-space-size=512"] });
+    const child = utilityProcess.fork(workerPath, [], { serviceName: "ketchupe-business-tool", stdio: "ignore", execArgv: ["--max-old-space-size=1024"] });
     let settled = false;
     const finish = (error?: Error, result?: ToolResult) => {
       if (settled) return;

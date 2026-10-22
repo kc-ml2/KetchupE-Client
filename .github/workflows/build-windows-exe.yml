@@ -25,6 +25,7 @@ jobs:
       KETCHUPE_ENVIRONMENT: production
       KETCHUPE_TENANT_ID: public
       LITELLM_MODEL_ALIAS: loki
+      LITELLM_ROUTER_MODEL_ALIAS: clef-flash
 
     steps:
       - name: Checkout
@@ -121,6 +122,21 @@ jobs:
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
           PUBLISH_MODE: ${{ startsWith(github.ref, 'refs/tags/v') && 'always' || 'never' }}
 
+      - name: Zip installer and attach to tagged release
+        # Edge 가 서명 안 된 .exe 다운로드를 차단하므로 .exe.zip 을 함께 올린다.
+        # 원본 .exe 와 latest.yml 은 자동 업데이트용으로 그대로 둔다.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path release -Filter *.exe -File | ForEach-Object {
+            $zip = "$($_.FullName).zip"
+            Compress-Archive -Path $_.FullName -DestinationPath $zip -Force
+            gh release upload $env:GITHUB_REF_NAME $zip --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: List build outputs
         shell: pwsh
         run: Get-ChildItem -Path release -Recurse | Select-Object FullName
@@ -176,12 +192,13 @@ jobs:
             const assets = release.data.assets.map((asset) => asset.name);
             const hasExe = assets.some((name) => name.endsWith(".exe"));
             const hasLatestYml = assets.some((name) => name === "latest.yml");
+            const hasExeZip = assets.some((name) => name.endsWith(".exe.zip"));
 
             core.info(`Release tag: ${tag}`);
             core.info(`Assets: ${assets.join(", ")}`);
 
-            if (!hasExe || !hasLatestYml) {
+            if (!hasExe || !hasLatestYml || !hasExeZip) {
               core.setFailed(
-                `Missing required assets on release ${tag}. hasExe=${hasExe}, hasLatestYml=${hasLatestYml}`,
+                `Missing required assets on release ${tag}. hasExe=${hasExe}, hasLatestYml=${hasLatestYml}, hasExeZip=${hasExeZip}`,
               );
             }

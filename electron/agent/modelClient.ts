@@ -157,6 +157,8 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
         maxRetries: 0,
         tools: { [toolName]: tool({ description, inputSchema: schema }) },
         toolChoice: { type: "tool", toolName },
+        // Gateway reasoning models default to xhigh; a short structured decision took ~48s at that effort.
+        providerOptions: { openaiCompatible: { reasoningEffort: "low" } },
         onLanguageModelCallEnd: ({ usage, finishReason }) => report({
           purpose,
           modelAlias: profile.modelAlias,
@@ -205,7 +207,8 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
       const startedAt = Date.now();
       try {
         // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
-        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, onError: () => undefined });
+        // medium, not the gateway's xhigh default: a full contract draft at xhigh takes several minutes.
+        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, providerOptions: { openaiCompatible: { reasoningEffort: "medium" } }, onError: () => undefined });
         let text = "";
         for await (const part of result.fullStream) {
           if (part.type === "text-delta") text += part.text;

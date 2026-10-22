@@ -58,7 +58,7 @@ npm run typecheck:electron
 
 ```dotenv
 LITELLM_MODEL_ALIAS=loki
-LITELLM_ROUTER_MODEL_ALIAS=clef
+LITELLM_ROUTER_MODEL_ALIAS=clef-flash
 TROLLEY_API_KEY=<선택 서비스 사용자 키>
 TROLLEY_MCP_ENDPOINT=https://trolley.ml2-alpha.com/mcp/
 ```
@@ -71,7 +71,7 @@ npm run probe:maru
 npm run probe:trolley
 ```
 
-자연어 업무 선택은 같은 LiteLLM의 `/v1/systemone`에 등록된 `clef` alias를 사용합니다. 다른 이름으로 배포했다면 `LITELLM_ROUTER_MODEL_ALIAS`를 지정하세요. `$업무ID`와 명시 mode는 라우팅 모델을 호출하지 않습니다. 생성·답변 모델은 `LITELLM_MODEL_ALIAS`를 유지합니다. 라우팅 실패 시 다른 모델로 자동 전환하지 않습니다. 설정 변경 후 개발 서버를 재시작하고 배포판은 다시 빌드합니다.
+자연어 업무 선택은 같은 LiteLLM의 `/v1/systemone`에 등록된 `clef-flash` alias를 사용합니다. 다른 이름으로 배포했다면 `LITELLM_ROUTER_MODEL_ALIAS`를 지정하세요. `$업무ID`와 명시 mode는 라우팅 모델을 호출하지 않습니다. 생성·답변 모델은 `LITELLM_MODEL_ALIAS`를 유지합니다. 라우팅 실패 시 다른 모델로 자동 전환하지 않습니다. 설정 변경 후 개발 서버를 재시작하고 배포판은 다시 빌드합니다.
 
 계정을 바꾸려면 로그아웃 후 다시 인증합니다. 현재 MARU는 storage 조회·검색 본문 인용 및 문서 다운로드/인덱싱, Trolley는 capabilities·Operation 목록 조회까지 연결되어 있습니다. Trolley Operation 실행은 연결되어 있지 않습니다. 새 MCP의 연결 절차는 [외부 팀용 가이드](docs/WORKFLOW_INTEGRATION_GUIDE.md)를 따릅니다.
 

@@ -10,7 +10,7 @@ import { AgentError, type PolicyDecision, type PolicyProfile, type PolicyState }
 import { Harness } from "./harness.ts";
 import { addMemory, confirmMemory, proposeMemory } from "./memory.ts";
 import { createFixtureClient, type FixtureScript } from "./modelClient.ts";
-import { ANSWER_PROMPT_VERSION, DEFAULT_POLICY_PROFILE, gatedDecision } from "./policy.ts";
+import { ANSWER_PROMPT_VERSION, DEFAULT_POLICY_PROFILE, gatedDecision, smallTalkDecision } from "./policy.ts";
 import { createThread, deleteThread, ensureWorkspace, getRun, listThreads, loadThread } from "./store.ts";
 import { tomatoTools, type SearchTools } from "./tools.ts";
 import { readTrace, transitions } from "./trace.ts";
@@ -209,6 +209,20 @@ describe("harness", () => {
     expect(gatedDecision({ ...strong, signals: { evidenceCount: 3, uniqueSourceCount: 1, topEvidenceScore: 1 / 61 } }, "gated-1")).toBeUndefined();
   });
 
+  it("answers a bare greeting without searching or a policy call", async () => {
+    const thread = createThread(db, workspace.id);
+    const calls: string[] = [];
+    const profile: PolicyProfile = { ...DEFAULT_POLICY_PROFILE, strategy: "gated" };
+    const handle = harness({ decide: [], answer: "안녕하세요!", onCall: (call) => calls.push(call.purpose) }, [], profile)
+      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "안녕?" });
+    await handle.done;
+
+    expect(getRun(db, handle.runId).status).toBe("completed");
+    expect(transitions(db, handle.runId).map((transition) => transition.decision.action)).toEqual(["ANSWER"]);
+    expect(calls).toEqual(["answer"]);
+    expect(smallTalkDecision({ ...transitions(db, handle.runId)[0].state, userGoal: "안녕, 연차 규정 알려줘" }, "gated-1")).toBeUndefined();
+  });
+
   it("calls MARU and gives its result to answer generation", async () => {
     const thread = createThread(db, workspace.id);
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
@@ -289,6 +303,13 @@ describe("harness", () => {
     deleteThread(db, thread.id);
     expect(listThreads(db, workspace.id).some((item) => item.id === thread.id)).toBe(false);
     expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE thread_id = ?").get(thread.id)).toMatchObject({ count: 0 });
+  });
+
+  it("keeps an answer that cites none of the retrieved evidence", async () => {
+    const thread = createThread(db, workspace.id);
+    const handle = harness({ decide: [search("연차"), answer], answer: "연결된 MCP는 MARU와 Trolley입니다." }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "어떤 MCP가 연결돼 있어?" });
+    await handle.done;
+    expect(getRun(db, handle.runId).status).toBe("completed");
   });
 
   it("uses confirmed memory in context and rejects answers without known evidence citations", async () => {
