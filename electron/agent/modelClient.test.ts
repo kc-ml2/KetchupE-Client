@@ -23,6 +23,20 @@ it("omits temperature from LiteLLM requests", async () => {
   expect(body).toMatchObject({ stream: true, reasoning_effort: "medium" });
 });
 
+it("resends once when the connection drops before any HTTP response", async () => {
+  const fetch = vi.fn()
+    .mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("other side closed") }))
+    .mockResolvedValueOnce(new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } }));
+  vi.stubGlobal("fetch", fetch);
+  const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
+  await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
+  expect(fetch).toHaveBeenCalledTimes(2);
+
+  fetch.mockReset().mockRejectedValue(new TypeError("fetch failed", { cause: new Error("other side closed") }));
+  await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).rejects.toMatchObject({ code: "MODEL_PROTOCOL", message: expect.stringContaining("other side closed") });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
 it("does not hide HTTP retries outside the harness budget", async () => {
   const fetch = vi.fn(async () => new Response("busy", { status: 503 }));
   vi.stubGlobal("fetch", fetch);

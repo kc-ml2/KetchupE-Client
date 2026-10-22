@@ -102,6 +102,10 @@ export function toAgentError(error: unknown): AgentError {
       const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
       return new AgentError("MODEL_PROTOCOL", `모델 응답 스트림이 중간에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
     }
+    if (error.statusCode === undefined) {
+      const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
+      return new AgentError("MODEL_PROTOCOL", `모델 서버 연결이 응답 전에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
+    }
     const code: AgentErrorCode = error.statusCode === 401 || error.statusCode === 403 ? "MODEL_AUTH" : "MODEL_PROTOCOL";
     return new AgentError(code, error.statusCode === 401 ? "LiteLLM 인증이 만료되었거나 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요." : error.statusCode === 403 ? "이 모델에 접근할 권한이 없습니다. 운영자에게 확인해 주세요." : `모델 요청이 실패했습니다 (HTTP ${error.statusCode ?? "unknown"}).`);
   }
@@ -120,6 +124,19 @@ function extractJsonObject(text: string): unknown {
   }
 }
 
+/**
+ * The gateway can close a pooled keep-alive socket right after a response; the next request then fails instantly with
+ * no HTTP status. Resend once on a fresh connection. Any HTTP response (including 5xx) is returned as is, never retried.
+ */
+export async function fetchWithConnectionRetry(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (init?.signal?.aborted || !(error instanceof TypeError)) throw error;
+    return fetch(input, init);
+  }
+}
+
 export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient {
   const self: ModelClient = {} as ModelClient;
   const report = (info: ModelCallInfo) => {
@@ -131,6 +148,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     baseURL: normalizeBaseURL(options.baseURL),
     apiKey: options.apiKey,
     includeUsage: true,
+    fetch: fetchWithConnectionRetry,
   });
 
   async function structuredCall<T>(
