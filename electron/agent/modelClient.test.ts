@@ -20,7 +20,7 @@ it("omits temperature from LiteLLM requests", async () => {
   await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
   expect(body).not.toHaveProperty("temperature");
   // Canvas drafts stream so a long generation is not cut by the proxy idle timeout (HTTP 524).
-  expect(body).toMatchObject({ stream: true });
+  expect(body).toMatchObject({ stream: true, reasoning_effort: "medium" });
 });
 
 it("does not hide HTTP retries outside the harness budget", async () => {
