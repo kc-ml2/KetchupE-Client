@@ -9,15 +9,18 @@ it("omits temperature from LiteLLM requests", async () => {
   let body: Record<string, unknown> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    return new Response(JSON.stringify({
-      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }), { status: 200, headers: { "content-type": "application/json" } });
+    const chunks = [
+      { choices: [{ delta: { role: "assistant", content: "o" } }] },
+      { choices: [{ delta: { content: "k" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+    ];
+    return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
   }));
 
   const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
   await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
   expect(body).not.toHaveProperty("temperature");
+  // Canvas drafts stream so a long generation is not cut by the proxy idle timeout (HTTP 524).
+  expect(body).toMatchObject({ stream: true });
 });
 
 it("does not hide HTTP retries outside the harness budget", async () => {
@@ -43,15 +46,6 @@ it("validates JSON fallback verification results instead of trusting a type cast
   expect(fetch).toHaveBeenCalledTimes(2);
 });
 
-it("uses loki only when the account's gateway exposes it", async () => {
-  const gateway = (ids: string[]) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }))));
-  gateway(["gpt-x", "loki"]);
-  expect(await resolveModelAlias("https://g.example", "k")).toBe("loki");
-  gateway(["gpt-x"]);
-  expect(await resolveModelAlias("https://g.example", "k")).toBe("gpt-x");
-  expect(await resolveModelAlias("https://g.example", "k", "chosen")).toBe("chosen");
-});
-
 it("bounds model discovery even when no caller signal is provided", async () => {
   let requestSignal: AbortSignal | undefined;
   vi.stubGlobal("fetch", vi.fn(async (_url, init: RequestInit) => {
@@ -64,4 +58,13 @@ it("bounds model discovery even when no caller signal is provided", async () => 
   await listModels("https://gateway.example.com/v1/", "test", controller.signal);
   controller.abort();
   expect(requestSignal?.aborted).toBe(true);
+});
+
+it("uses loki only when the account's gateway exposes it", async () => {
+  const gateway = (ids: string[]) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }))));
+  gateway(["gpt-x", "loki"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("loki");
+  gateway(["gpt-x"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("gpt-x");
+  expect(await resolveModelAlias("https://g.example", "k", "chosen")).toBe("chosen");
 });

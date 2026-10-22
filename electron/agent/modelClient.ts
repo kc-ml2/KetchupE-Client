@@ -97,6 +97,11 @@ export function toAgentError(error: unknown): AgentError {
   if (error instanceof Error && error.name === "AbortError") return new AgentError("CANCELLED", "cancelled");
   if (error instanceof Error && error.name === "TimeoutError") return new AgentError("MODEL_TIMEOUT", "model timed out");
   if (APICallError.isInstance(error)) {
+    // 200 means the body broke after headers (stream cut mid-way). The cause is a transport error, never the response body.
+    if (error.statusCode === 200) {
+      const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
+      return new AgentError("MODEL_PROTOCOL", `모델 응답 스트림이 중간에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
+    }
     const code: AgentErrorCode = error.statusCode === 401 || error.statusCode === 403 ? "MODEL_AUTH" : "MODEL_PROTOCOL";
     return new AgentError(code, error.statusCode === 401 ? "LiteLLM 인증이 만료되었거나 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요." : error.statusCode === 403 ? "이 모델에 접근할 권한이 없습니다. 운영자에게 확인해 주세요." : `모델 요청이 실패했습니다 (HTTP ${error.statusCode ?? "unknown"}).`);
   }
@@ -199,9 +204,16 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     async complete(input, profile, signal) {
       const startedAt = Date.now();
       try {
-        const result = await generateText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0 });
-        report({ purpose: input.purpose ?? "canvas", modelAlias: profile.modelAlias, latencyMs: Date.now() - startedAt, promptTokens: result.usage.inputTokens ?? 0, completionTokens: result.usage.outputTokens ?? 0, finishReason: result.finishReason });
-        return result.text;
+        // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
+        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, onError: () => undefined });
+        let text = "";
+        for await (const part of result.fullStream) {
+          if (part.type === "text-delta") text += part.text;
+          else if (part.type === "error") throw part.error;
+        }
+        const usage = await result.usage;
+        report({ purpose: input.purpose ?? "canvas", modelAlias: profile.modelAlias, latencyMs: Date.now() - startedAt, promptTokens: usage.inputTokens ?? 0, completionTokens: usage.outputTokens ?? 0, finishReason: await result.finishReason });
+        return text;
       } catch (error) {
         throw toAgentError(error);
       }

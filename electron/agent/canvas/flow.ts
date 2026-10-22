@@ -338,7 +338,8 @@ export class CanvasFlow {
   private async complete(trace: TraceWriter, prompt: string, signal: AbortSignal): Promise<string> {
     const startedAt = Date.now();
     const seq = trace.record("model.started", "generation", { purpose: "canvas", modelAlias: this.options.profile.modelAlias });
-    const text = await withTimeout(this.options.model.complete({ prompt, purpose: "canvas" }, this.options.profile, signal), LIMITS.runTimeoutMs, "MODEL_TIMEOUT", signal);
+    // No client-side deadline: reasoning models need minutes for a full draft. The user cancels via the run signal.
+    const text = await this.options.model.complete({ prompt, purpose: "canvas" }, this.options.profile, signal);
     const last = this.options.model.lastCallFor ? this.options.model.lastCallFor(signal) : this.options.model.lastCall;
     trace.record("model.completed", "generation", { purpose: "canvas", latencyMs: Date.now() - startedAt, modelAlias: last?.modelAlias, promptTokens: last?.promptTokens, completionTokens: last?.completionTokens, finishReason: last?.finishReason }, { parentSeq: seq, startedAt });
     return text;
