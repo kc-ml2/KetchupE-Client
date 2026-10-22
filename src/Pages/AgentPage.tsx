@@ -409,8 +409,8 @@ const AgentPage = (): React.JSX.Element => {
                   {modelConfigurable ? (
                     <>
                       <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                        LiteLLM 게이트웨이와 사용할 모델을 지정합니다. 기본
-                        모델은 loki입니다.
+                        로그인한 계정의 LiteLLM 게이트웨이에서 사용할 모델을
+                        선택합니다.
                       </p>
                       <ModelSettingsForm api={api} />
                     </>

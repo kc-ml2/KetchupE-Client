@@ -1,5 +1,5 @@
 import type { ServiceKeys } from "../auth/broker.ts";
-import { DEFAULT_LITELLM_MODEL_ALIAS, normalizeBaseURL } from "./modelClient.ts";
+import { normalizeBaseURL } from "./modelClient.ts";
 
 export type ModelSettings = { baseURL: string; modelAlias: string; apiKey?: string };
 export const TELEMETRY_CONTENT_MODES = ["ops", "redacted_eval", "internal_full"] as const;
@@ -36,6 +36,7 @@ export function accountModelSettings(keys: ServiceKeys): ModelSettings {
   return {
     baseURL: normalizeBaseURL(keys.litellm.base_url),
     apiKey: keys.litellm.api_key,
-    modelAlias: process.env.LITELLM_MODEL_ALIAS?.trim() || DEFAULT_LITELLM_MODEL_ALIAS,
+    // Empty → resolveModelAlias picks from what this account's gateway key exposes.
+    modelAlias: process.env.LITELLM_MODEL_ALIAS?.trim() ?? "",
   };
 }

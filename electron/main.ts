@@ -351,6 +351,7 @@ function setupAuth() {
         userData: accountDirectory(root, account.email),
         workerPath: path.join(__dirname, "tomato.worker.js"),
         appVersion: app.getVersion(),
+        modelSelectable: isDev,
         emitAgentEvent: (event) => {
           if (auth?.getState().sessionId === sessionId) broadcast("agent:event", { sessionId, event });
         },

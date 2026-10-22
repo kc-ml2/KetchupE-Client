@@ -50,7 +50,9 @@ export type AgentRuntime = {
   refreshCollections: () => Promise<Collection[]>;
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
   settings: () => ModelSettings;
-  updateSettings: (settings: ModelSettings) => void;
+  /** Development builds may switch the generation model; credentials always come from the account. */
+  modelSelectable: boolean;
+  updateSettings: (settings: { modelAlias: string }) => void;
   listModels: () => Promise<string[]>;
   resolvedModelAlias: () => Promise<string>;
   telemetry: LangfuseExporter;
@@ -72,6 +74,7 @@ export type RuntimeOptions = {
   appVersion: string;
   emitAgentEvent: (event: AgentStreamEvent) => void;
   emitCollectionsChanged: () => void;
+  modelSelectable?: boolean;
 };
 
 export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
@@ -81,7 +84,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   const lifetime = new AbortController();
   let stopped = false;
   let draining: Promise<unknown> | undefined;
-  const current = accountModelSettings(options.account.keys);
+  let current = accountModelSettings(options.account.keys);
   const telemetrySettings = loadTelemetrySettings();
   const installId = loadInstallId(options.userData);
   // Variant is fixed for the process lifetime so every run in a session lands in one arm.
@@ -248,7 +251,11 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     collections: () => collections,
     refreshCollections,
     settings: () => current,
-    updateSettings: () => { throw new AgentError("MODEL_AUTH", "연결 정보는 로그인 계정에서 관리합니다."); },
+    modelSelectable: Boolean(options.modelSelectable),
+    updateSettings: ({ modelAlias }) => {
+      if (!options.modelSelectable) throw new AgentError("MODEL_AUTH", "연결 정보는 로그인 계정에서 관리합니다.");
+      current = { ...current, modelAlias: modelAlias.trim() };
+    },
     listModels: () => (current.apiKey ? listModels(current.baseURL, current.apiKey) : Promise.resolve([])),
     resolvedModelAlias,
     telemetry,

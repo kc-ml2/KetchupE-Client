@@ -9,7 +9,7 @@ it("ignores shared environment credentials and preserves the gateway prefix", ()
   vi.stubEnv("LITELLM_API_KEY", "shared-key");
   vi.stubEnv("LITELLM_BASE_URL", "https://old.example/v1/");
   vi.stubEnv("LITELLM_MODEL_ALIAS", "");
-  expect(accountModelSettings(keys)).toEqual({ baseURL: "https://ketchupe.ml2-alpha.com/gateway/v1/", apiKey: "personal-key", modelAlias: "loki" });
+  expect(accountModelSettings(keys)).toEqual({ baseURL: "https://ketchupe.ml2-alpha.com/gateway/v1/", apiKey: "personal-key", modelAlias: "" });
 });
 
 it("keeps the configured model alias without replacing the user's key", () => {

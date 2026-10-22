@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from "vitest";
-import { createLiteLLMClient, listModels } from "./modelClient.ts";
+import { createLiteLLMClient, listModels, resolveModelAlias } from "./modelClient.ts";
 import { DEFAULT_POLICY_PROFILE } from "./policy.ts";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -41,6 +41,15 @@ it("validates JSON fallback verification results instead of trusting a type cast
   await expect(client.verify(input, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toEqual(result);
   expect(client.lastCall?.promptTokens).toBe(1);
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it("uses loki only when the account's gateway exposes it", async () => {
+  const gateway = (ids: string[]) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }))));
+  gateway(["gpt-x", "loki"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("loki");
+  gateway(["gpt-x"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("gpt-x");
+  expect(await resolveModelAlias("https://g.example", "k", "chosen")).toBe("chosen");
 });
 
 it("bounds model discovery even when no caller signal is provided", async () => {

@@ -131,7 +131,7 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   deleteMemory(id: string): Promise<void>;
 
   getModelSettings(): Promise<{ baseURL: string; modelAlias: string; hasApiKey: boolean; configurable: boolean }>;
-  setModelSettings(settings: { baseURL: string; modelAlias: string; apiKey?: string }): Promise<void>;
+  setModelSettings(settings: { modelAlias: string }): Promise<void>;
   listModels(): Promise<string[]>;
   testModelConnection(): Promise<{ ok: boolean; models: string[]; resolvedAlias: string }>;
 

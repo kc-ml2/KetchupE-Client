@@ -46,12 +46,13 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
   return (body.data ?? []).map((item) => item.id ?? "").filter(Boolean);
 }
 
-/** Explicit alias wins; otherwise the first model the gateway exposes. */
+/** Explicit alias wins; otherwise loki when the gateway exposes it, else the first exposed model. */
 export async function resolveModelAlias(baseURL: string, apiKey: string, explicit?: string): Promise<string> {
   if (explicit?.trim()) return explicit.trim();
-  const [first] = await listModels(baseURL, apiKey);
-  if (!first) throw new AgentError("MODEL_PROTOCOL", "LiteLLM이 노출하는 모델이 없습니다.");
-  return first;
+  const models = await listModels(baseURL, apiKey);
+  const alias = models.includes(DEFAULT_LITELLM_MODEL_ALIAS) ? DEFAULT_LITELLM_MODEL_ALIAS : models[0];
+  if (!alias) throw new AgentError("MODEL_PROTOCOL", "LiteLLM이 노출하는 모델이 없습니다.");
+  return alias;
 }
 
 export interface ModelClient {

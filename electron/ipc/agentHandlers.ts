@@ -76,14 +76,15 @@ export function registerAgentHandlers(runtime: AgentRuntime, handle: typeof ipcM
   handle("agent:confirmMemory", (_event, id: string) => confirmMemory(db, id));
   handle("agent:deleteMemory", (_event, id: string) => deleteMemory(db, id));
 
-  handle("agent:getModelSettings", () => {
+  handle("agent:getModelSettings", async () => {
     const settings = runtime.settings();
-    return { baseURL: settings.baseURL, modelAlias: settings.modelAlias, hasApiKey: Boolean(settings.apiKey), configurable: false };
+    const modelAlias = await runtime.resolvedModelAlias().catch(() => settings.modelAlias);
+    return { baseURL: settings.baseURL, modelAlias, hasApiKey: Boolean(settings.apiKey), configurable: runtime.modelSelectable };
   });
   handle("agent:listModels", () => runtime.listModels());
   handle("agent:testModelConnection", async () => {
     const models = await runtime.listModels();
     return { ok: models.length > 0, models, resolvedAlias: models.length ? await runtime.resolvedModelAlias() : "" };
   });
-  handle("agent:setModelSettings", (_event, settings: { baseURL: string; modelAlias: string; apiKey?: string }) => runtime.updateSettings(settings));
+  handle("agent:setModelSettings", (_event, settings: { modelAlias: string }) => runtime.updateSettings({ modelAlias: String(settings?.modelAlias ?? "") }));
 }
