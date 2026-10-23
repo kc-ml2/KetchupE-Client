@@ -137,6 +137,13 @@ export async function fetchWithConnectionRetry(input: string | URL | Request, in
   }
 }
 
+const PROVIDER_NAME = "ketchupe-litellm";
+/**
+ * Turns off thinking on the vLLM-served Qwen behind LiteLLM (passed through as `chat_template_kwargs`).
+ * With thinking on, a one-sentence answer took 17s/563 tokens vs 1s/34 off, and long answers hit MODEL_TIMEOUT.
+ */
+const NO_THINKING = { [PROVIDER_NAME]: { chat_template_kwargs: { enable_thinking: false } } };
+
 export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient {
   const self: ModelClient = {} as ModelClient;
   const report = (info: ModelCallInfo) => {
@@ -144,7 +151,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     options.onCall?.(info);
   };
   const provider = createOpenAICompatible({
-    name: "ketchupe-litellm",
+    name: PROVIDER_NAME,
     baseURL: normalizeBaseURL(options.baseURL),
     apiKey: options.apiKey,
     includeUsage: true,
@@ -175,8 +182,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
         maxRetries: 0,
         tools: { [toolName]: tool({ description, inputSchema: schema }) },
         toolChoice: { type: "tool", toolName },
-        // Gateway reasoning models default to xhigh; a short structured decision took ~48s at that effort.
-        providerOptions: { openaiCompatible: { reasoningEffort: "low" } },
+        providerOptions: NO_THINKING,
         onLanguageModelCallEnd: ({ usage, finishReason }) => report({
           purpose,
           modelAlias: profile.modelAlias,
@@ -225,8 +231,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
       const startedAt = Date.now();
       try {
         // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
-        // medium, not the gateway's xhigh default: a full contract draft at xhigh takes several minutes.
-        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, providerOptions: { openaiCompatible: { reasoningEffort: "medium" } }, onError: () => undefined });
+        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
         let text = "";
         for await (const part of result.fullStream) {
           if (part.type === "text-delta") text += part.text;
@@ -249,6 +254,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
           prompt: messages.prompt,
           abortSignal: signal,
           maxRetries: 0,
+          providerOptions: NO_THINKING,
         });
         let ttftMs: number | undefined;
         for await (const text of result.textStream) {

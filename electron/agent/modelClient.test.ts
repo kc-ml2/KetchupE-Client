@@ -20,7 +20,7 @@ it("omits temperature from LiteLLM requests", async () => {
   await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
   expect(body).not.toHaveProperty("temperature");
   // Canvas drafts stream so a long generation is not cut by the proxy idle timeout (HTTP 524).
-  expect(body).toMatchObject({ stream: true, reasoning_effort: "medium" });
+  expect(body).toMatchObject({ stream: true, chat_template_kwargs: { enable_thinking: false } });
 });
 
 it("resends once when the connection drops before any HTTP response", async () => {
@@ -83,7 +83,7 @@ it("uses loki only when the account's gateway exposes it", async () => {
   expect(await resolveModelAlias("https://g.example", "k", "chosen")).toBe("chosen");
 });
 
-it("asks for low reasoning effort on policy decisions", async () => {
+it("turns thinking off on policy decisions", async () => {
   let body: Record<string, unknown> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -92,5 +92,6 @@ it("asks for low reasoning effort on policy decisions", async () => {
 
   const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
   await client.decide({ runId: "r", step: 1, userGoal: "안녕?", selectedMemories: [], activeCollections: [], recentMessages: [], evidence: [], previousDecisions: [], remaining: { steps: 1, modelCalls: 1, searchCalls: 1, verifyCalls: 1 } } as never, DEFAULT_POLICY_PROFILE, new AbortController().signal).catch(() => undefined);
-  expect(body).toMatchObject({ reasoning_effort: "low" });
+  expect(body).toMatchObject({ chat_template_kwargs: { enable_thinking: false } });
+  expect(body).not.toHaveProperty("reasoning_effort");
 });
