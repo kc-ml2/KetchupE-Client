@@ -82,20 +82,28 @@ export function validateResult(raw: unknown, rows: InputRow[]): AnalysisResult {
   const result = analysisResult.parse(raw);
   if (result.tables.reduce((n, table) => n + table.rows.length, 0) > 5000) throw new Error("결과는 5,000행 이하로 집계해 주세요.");
   const available = new Set(rows.map((row) => row.id));
+  // Models often confuse the input id with the Excel row number; say exactly which value is wrong so a repair can succeed.
+  const unknown = (where: string, id: number) => {
+    const sameRow = rows.find((row) => row.row === id);
+    return new Error(`${where}의 ${id}는 존재하지 않는 입력 r.id입니다 (r.id는 1~${rows.length}).${sameRow ? ` 엑셀 행 번호 r.row가 아니라 r.id(${sameRow.id} 등)를 사용하세요.` : ""}`);
+  };
   const used = new Set<number>();
   for (const table of result.tables) for (const row of table.rows) {
     if (row.cells.length !== table.columns.length || new Set(row.sourceRows).size !== row.sourceRows.length) throw new Error("결과 열 또는 원본 행이 중복/누락되었습니다.");
     for (const id of row.sourceRows) {
-      if (!available.has(id)) throw new Error("존재하지 않는 원본 행을 참조했습니다.");
+      if (!available.has(id)) throw unknown(`표 "${table.title}" sourceRows`, id);
       used.add(id);
     }
   }
   const excluded = new Set<number>();
   for (const item of result.excluded) {
-    if (!available.has(item.row) || used.has(item.row) || excluded.has(item.row)) throw new Error("제외 행이 원본 또는 분석 대상과 일치하지 않습니다.");
+    if (!available.has(item.row)) throw unknown("excluded.row", item.row);
+    if (used.has(item.row)) throw new Error(`r.id ${item.row}이(가) 결과 sourceRows와 excluded에 동시에 있습니다. 결과에 기여한 행은 excluded에서 빼고, 제외한 행은 sourceRows에서 빼세요.`);
+    if (excluded.has(item.row)) throw new Error(`r.id ${item.row}이(가) excluded에 두 번 있습니다. 행마다 제외 이유를 하나만 남기세요.`);
     excluded.add(item.row);
   }
-  if (used.size + excluded.size !== available.size) throw new Error("분석에서 누락한 행의 제외 이유가 필요합니다.");
+  const missing = [...available].filter((id) => !used.has(id) && !excluded.has(id));
+  if (missing.length) throw new Error(`r.id ${missing.slice(0, 20).join(", ")}${missing.length > 20 ? ` 외 ${missing.length - 20}개` : ""} 누락: 결과 sourceRows에도 excluded에도 없습니다. 모든 입력 행을 둘 중 하나에 넣으세요.`);
   if (result.chart && result.charts?.length) throw new Error("chart 또는 charts 중 하나만 사용하세요.");
   for (const chart of result.charts ?? (result.chart ? [result.chart] : [])) {
     const { table: index, x, y } = chart;

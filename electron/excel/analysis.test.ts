@@ -77,3 +77,19 @@ it("escapes HTML content and exports XLSX with typed values, evidence and no exe
   expect(book.getWorksheet("차트 1")).toBeTruthy();
   expect(book.getWorksheet("분석 안내")!.getSheetValues().flat()).toContain(report.sourceNotes[0]);
 });
+
+it("tells the model exactly which evidence id is wrong so a repair can succeed", () => {
+  const rows = [3, 4, 5].map((row, i) => ({ id: i + 1, fileId: "file1", sheet: "실험", row, values: {} }));
+  const result = (sourceRows: number[], excluded: number[]) => ({ tables: [{ title: "표", columns: ["값"], rows: [{ cells: [1], sourceRows }] }], excluded: excluded.map(row => ({ row, reason: "미측정" })), notes: [], chart: null });
+  expect(() => validateResult(result([1, 2], [5]), rows)).toThrow("엑셀 행 번호 r.row가 아니라 r.id(3 등)");
+  expect(() => validateResult(result([1, 2], [2]), rows)).toThrow("r.id 2이(가) 결과 sourceRows와 excluded에 동시에");
+  expect(() => validateResult(result([1], [2, 2]), rows)).toThrow("excluded에 두 번");
+  expect(() => validateResult(result([1], []), rows)).toThrow("r.id 2, 3 누락");
+  expect(validateResult(result([1, 2], [3]), rows).excluded).toHaveLength(1);
+});
+
+it("explains a missing return instead of a vague JSON error", async () => {
+  const rows = [{ id: 1, fileId: "file1", sheet: "실험", row: 2, values: {} }];
+  await expect(runAnalysis("function analyze(input) { return {}; }", rows)).rejects.toThrow("함수를 선언만 하고 호출하지 않았는지");
+  await expect(runAnalysis("return () => ({})", rows)).rejects.toThrow("함수 자체를 반환");
+});
