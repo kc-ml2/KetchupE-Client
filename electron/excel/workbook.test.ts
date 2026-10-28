@@ -1,5 +1,6 @@
 // @vitest-environment node
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { expect, it } from "vitest";
 import { profileWorkbook, readAnalysisRows } from "./workbook.ts";
 import { fixturePlan } from "./fixtures.ts";
@@ -198,4 +199,34 @@ it("preserves numeric merged cell identity and checks explicit header/data bound
   expect(data.rows.map((r) => r.sourceCells!["인장강도"])).toEqual(["B3", "B3"]);
   await expect(readAnalysisRows(bytes, { ...fixturePlan.inputs[0], headerStartRow: 2 })).rejects.toThrow("순서");
   await expect(readAnalysisRows(bytes, { ...fixturePlan.inputs[0], firstDataRow: 1 })).rejects.toThrow("순서");
+});
+
+it("reads workbooks whose SpreadsheetML elements use a namespace prefix (OpenXML SDK style)", async () => {
+  const book = new ExcelJS.Workbook();
+  const sheet = book.addWorksheet("실험 데이터");
+  sheet.addRow(["소재", "인장강도"]); sheet.addRow(["A", 50]);
+  const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer());
+  const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"';
+  for (const name of ["xl/workbook.xml", "xl/worksheets/sheet1.xml", "xl/sharedStrings.xml", "xl/styles.xml"]) {
+    const xml = await zip.file(name)!.async("string");
+    zip.file(name, xml.replace(ns, ns.replace("xmlns", "xmlns:x")).replace(/<(\/?)(?![?!])([A-Za-z])/g, "<$1x:$2"));
+  }
+  const prefixed = await zip.generateAsync({ type: "uint8array" });
+  expect(await zip.file("xl/workbook.xml")!.async("string")).toContain("<x:workbook");
+  const profile = await profileWorkbook(prefixed);
+  expect(profile.sheets[0]).toMatchObject({ name: "실험 데이터", rows: 2 });
+  expect(profile.sheets[0].preview[1].cells).toEqual(["A", 50]);
+});
+
+it("reads ISO date cells (t=\"d\") as dates instead of their leading year number", async () => {
+  const book = new ExcelJS.Workbook();
+  const sheet = book.addWorksheet("실험");
+  sheet.addRow(["실험일시"]); sheet.addRow([new Date(Date.UTC(2026, 9, 19, 9))]); sheet.addRow([new Date(Date.UTC(2026, 9, 20))]);
+  sheet.getColumn(1).numFmt = "yyyy-mm-dd hh:mm";
+  const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer());
+  const xml = await zip.file("xl/worksheets/sheet1.xml")!.async("string");
+  const iso = ["2026-10-19T09:00:00", "2026-10-20"];
+  zip.file("xl/worksheets/sheet1.xml", xml.replace(/<c r="A([23])"([^>]*)><v>[^<]*<\/v>/g, (_m, row: string, attrs: string) => `<c r="A${row}"${attrs} t="d"><v>${iso[Number(row) - 2]}</v>`));
+  const profile = await profileWorkbook(await zip.generateAsync({ type: "uint8array" }));
+  expect(profile.sheets[0].preview.slice(1).map(row => row.cells[0])).toEqual(["2026-10-19T09:00:00.000Z", "2026-10-20"]);
 });
