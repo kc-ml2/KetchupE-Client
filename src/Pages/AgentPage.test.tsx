@@ -126,6 +126,26 @@ describe("입력창 위 워크플로 상태", () => {
     expect(within(bar).getByRole("status")).toHaveTextContent("원천 자료 확인 및 업무 실행 중");
   });
 
+  it("추가 확인 답변은 업무 제출 응답을 기다리지 않고 실행 중에 채팅에 표시한다", async () => {
+    const api = setup({ runId: "excel-run", kind: "excel_work", status: "waiting_user", action: {
+      id: "follow-up", type: "business_tool", title: "엑셀 작업하기", question: "어떤 기준으로 집계할까요?",
+      fields: [{ key: "answer1", label: "확인 내용", type: "text", required: true }], input: { values: {}, files: {} },
+    } });
+    let finish!: () => void;
+    api.submitBusinessInput.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const card = await screen.findByRole("form", { name: "엑셀 작업하기 입력" });
+    fireEvent.change(within(card).getByRole("textbox", { name: "확인 내용 *" }), { target: { value: "실험일별 평균으로 정리해줘" } });
+    fireEvent.click(within(card).getByRole("button", { name: "확인하고 계속" }));
+    expect(api.submitBusinessInput).toHaveBeenCalledWith("excel-run", "follow-up", { values: { answer1: "실험일별 평균으로 정리해줘" }, files: {} });
+    api.loadThread.mockResolvedValue({ messages: [{ id: "answer-1", threadId: "old-thread", runId: "excel-run", role: "user", content: "확인 내용: 실험일별 평균으로 정리해줘", createdAt: "2026-10-28T00:00:00Z" }], hasMore: false });
+    try {
+      api.emit({ runId: "excel-run", seq: 1, type: "status", payload: { phase: "분석 중", messagesChanged: true } });
+      expect(await screen.findByText("확인 내용: 실험일별 평균으로 정리해줘")).toBeInTheDocument();
+      expect(within(screen.getByRole("group", { name: "워크플로 상태" })).getByRole("status")).toHaveTextContent("분석 중");
+      expect(screen.queryByRole("form", { name: "엑셀 작업하기 입력" })).not.toBeInTheDocument();
+    } finally { await act(async () => finish()); }
+  });
+
   it("복원한 계약서의 참고 문서 선택으로 이동하고 대기 중에도 중단한다", async () => {
     const api = setup({ runId: "canvas-run", kind: "canvas", status: "waiting_user" });
     const bar = screen.getByRole("group", { name: "워크플로 상태" });

@@ -1,6 +1,6 @@
 import { utilityProcess } from "electron";
 import type { BusinessTool, ToolResult } from "./contracts.ts";
-export type BusinessJob = { toolId: string; version: string; input: Omit<Parameters<BusinessTool["execute"]>[0], "signal"> };
+export type BusinessJob = { toolId: string; version: string; input: Omit<Parameters<BusinessTool["execute"]>[0], "signal" | "onProgress"> };
 export type BusinessReply = { ok: true; result: ToolResult } | { ok: false; error: string };
 
 /** Killing the worker also stops synchronous workbook/calculation code on cancel or timeout. */

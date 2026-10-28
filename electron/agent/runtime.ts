@@ -1,3 +1,8 @@
+import { createExcelTool } from "../excel/tool.ts";
+import { createExcelWorker, executeExcelJob } from "../excel/workerClient.ts";
+import type { ExcelJob } from "../excel/workerClient.ts";
+import type { ExcelJobs } from "../excel/tool.ts";
+import { printReportPdf } from "../excel/pdf.ts";
 import { BusinessFlow } from "../business/flow.ts";
 import { businessTools } from "../business/registry.ts";
 import { executeBusinessJob } from "../business/workerClient.ts";
@@ -193,7 +198,19 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   });
 
   const workSourcesFlow = new WorkSourcesFlow(db, options.emitAgentEvent);
-  const businessFlow = new BusinessFlow(db, businessTools.map((tool) => ({ ...tool, execute: ({ signal, ...input }) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input }, signal) })), join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
+  const excelWorkerPath = join(dirname(options.workerPath), "excel.worker.js");
+  const excelJobs = (run: <J extends ExcelJob>(job: J, signal: AbortSignal) => Promise<unknown>): ExcelJobs => ({
+    profile: (bytes, signal, query, inspection) => run({ kind: "profile", bytes, query, inspection }, signal) as ReturnType<ExcelJobs["profile"]>,
+    analyze: (files, plan, signal) => run({ kind: "analyze", files, plan }, signal) as ReturnType<ExcelJobs["analyze"]>,
+    export: (report, format, signal) => run({ kind: "export", report, format }, signal) as ReturnType<ExcelJobs["export"]>,
+  });
+  const excelTool = createExcelTool({
+    complete: (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "excel", maxOutputTokens: 10000 }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal),
+    ...excelJobs((job, signal) => executeExcelJob(excelWorkerPath, job, signal)),
+    session: () => { const worker = createExcelWorker(excelWorkerPath); return { ...excelJobs(worker.run), close: worker.close }; },
+    pdf: printReportPdf,
+  });
+  const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
     await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
   });
   const workflows = new WorkflowDispatcher(db, [

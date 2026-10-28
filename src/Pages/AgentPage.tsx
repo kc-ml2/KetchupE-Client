@@ -16,6 +16,7 @@ import Sidebar from "@Features/Sidebar/components/Sidebar";
 import NavRail from "@Features/Sidebar/components/NavRail";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
+import { REVISE_REQUEST_TEXT } from "@app-types/BusinessTool.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
 import { useThreadMessages } from "@Features/Agent/hooks/useThreadMessages";
 import {
@@ -534,6 +535,7 @@ const AgentPage = (): React.JSX.Element => {
                     api={api}
                     threadId={selectedId}
                     running={view.isRunning}
+                    onRevise={() => void startRequest(REVISE_REQUEST_TEXT, "excel_work", selectedId)}
                   />
                 )}
                 <div

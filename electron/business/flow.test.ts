@@ -55,6 +55,41 @@ it("executes a registered tool using selected bytes and delivers only verified a
   expect(JSON.parse(String(db.prepare("SELECT audit FROM business_artifacts").get()!.audit)).externalData).toEqual({ rate: "fixture-only" });
 });
 
+it("allows opted-in request/file revisions but rejects changed bytes at a retained source path", async () => {
+  tool.editable = true;
+  tool.fields.push({ key: "request", type: "text", label: "요청", required: true }, { key: "revision", type: "text", label: "수정", required: false });
+  tool.fields.find(field => field.key === "source")!.multiple = true;
+  input.values.request = "합계";
+  vi.mocked(tool.execute).mockResolvedValue({ status: "needs_input", question: "어떤 기준인가요?", fields: [{ key: "answer1", type: "text", label: "답변", required: true }], checkpoint: { report: { obsolete: true } } });
+  const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  expect((getRunAction(db, runId) as BusinessAction).lockedKeys).toEqual([]);
+  const nextBook = new ExcelJS.Workbook(); nextBook.addWorksheet("자료").addRows([["금액"], [200]]);
+  const secondPath = join(folder, "second.xlsx"); await writeFile(secondPath, Buffer.from(await nextBook.xlsx.writeBuffer()));
+  const sources = new WorkSources(db); await sources.register([secondPath], "file");
+  const second = sources.list().find(source => source.name === "second.xlsx")!;
+  const revised = { values: { ...input.values, request: "평균" }, files: { source: [...input.files.source, ...(await sources.files(second.id))] } };
+  await flow.submit(runId, getRunAction(db, runId)!.id, revised);
+  expect(vi.mocked(tool.execute).mock.calls[1][0].checkpoint).toEqual({});
+  expect(vi.mocked(tool.execute).mock.calls[1][0].files.source).toHaveLength(2);
+  await writeFile(join(folder, "source.xlsx"), "changed");
+  await flow.workflows()[0].resume!(runId, "모든 값 기준으로").done;
+  expect(tool.execute).toHaveBeenCalledTimes(2);
+  expect((getRunAction(db, runId) as BusinessAction).question).toContain("원천 파일 내용이 변경");
+});
+
+it("validates every output before publishing any of a multi-file result", async () => {
+  const good = success();
+  if (good.status !== "completed") throw new Error("not completed");
+  vi.mocked(tool.execute).mockResolvedValue({ ...good, additionalFiles: [{ name: "invalid.xlsx", bytes: Buffer.from("bad") }] });
+  const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  expect(flow.artifacts(threadId)).toHaveLength(0);
+  vi.mocked(tool.execute).mockResolvedValue({ ...good, additionalFiles: [{ name: "second.xlsx", bytes: output }] });
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  expect(flow.artifacts(threadId).map(item => item.name)).toEqual(["테스트결과.xlsx", "second.xlsx"]);
+});
+
 it("updates the selected original workbook after validating the generated workbook", async () => {
   const sourcePath = join(folder, "source.xlsx");
   const generated = new ExcelJS.Workbook(); generated.addWorksheet("결과").getCell("A1").value = "updated"; output = Buffer.from(await generated.xlsx.writeBuffer());
@@ -167,12 +202,22 @@ it.each(["checks", "xlsx", "name", "throw"])("never publishes invalid output: %s
   expect(getRun(db, runId).status).toBe("waiting_user"); expect(flow.artifacts(threadId)).toEqual([]);
 });
 
+it("does not let an existing XLSX tool publish other formats without an app validator", async () => {
+  vi.mocked(tool.execute).mockResolvedValue({ status: "completed", summary: "test", file: { name: "report.html", bytes: Buffer.from("<!doctype html>") }, checks: [{ name: "shape", passed: true }] });
+  const runId = start(); await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  expect(getRun(db, runId).status).toBe("waiting_user");
+  expect(flow.artifacts(threadId)).toHaveLength(0);
+});
+
 it("ignores late completion after cancellation and prevents simultaneous submissions", async () => {
   let resolve!: (result: ToolResult) => void;
   let entered!: () => void; const started = new Promise<void>((done) => { entered = done; });
   vi.mocked(tool.execute).mockImplementation(() => { entered(); return new Promise((done) => { resolve = done; }); });
   const runId = start(); const actionId = getRunAction(db, runId)!.id;
   const pending = flow.submit(runId, actionId, input); await started;
+  expect(getRun(db, runId).status).toBe("running");
+  expect(loadThread(db, threadId).messages.at(-1)).toMatchObject({ role: "user", content: "기준일: 2026-10-15\n원천: source.xlsx" });
+  expect(emit).toHaveBeenCalledWith(expect.objectContaining({ runId, type: "status", payload: expect.objectContaining({ messagesChanged: true }) }));
   await expect(flow.submit(runId, actionId, input)).rejects.toThrow("이미 처리");
   flow.cancel(runId); resolve(success()); await pending;
   expect(getRun(db, runId).status).toBe("cancelled"); expect(flow.artifacts(threadId)).toEqual([]);

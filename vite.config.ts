@@ -65,6 +65,15 @@ export default defineConfig(({ mode }) => {
         },
       },
       {
+        entry: "electron/workers/excel.worker.ts",
+        vite: {
+          build: {
+            outDir: "dist-electron",
+            rollupOptions: { external: ["electron", "exceljs", "sharp", "quickjs-emscripten", "jszip", "@xmldom/xmldom"], output: { format: "es" } },
+          },
+        },
+      },
+      {
         // Preload scripts - use plain JS to avoid ESM issues
         entry: "electron/preload.js",
         onstart(options) {

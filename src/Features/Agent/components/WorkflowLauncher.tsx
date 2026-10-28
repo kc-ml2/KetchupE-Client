@@ -4,6 +4,11 @@ import type { WorkflowShortcut } from "@app-types/Navigation.types";
 // ponytail: mirrors the workflow IDs registered in electron/agent/runtime.ts; add a listWorkflows IPC if the set starts changing often.
 const WORKFLOW_SHORTCUTS: readonly WorkflowShortcut[] = [
   {
+    mode: "excel_work",
+    label: "엑셀 작업하기",
+    description: "실험 · 여러 엑셀을 비교·분석하고 PDF·HTML·엑셀로 만듭니다.",
+  },
+  {
     mode: "daily_cash",
     label: "일일자금일보 작성하기",
     description: "원천 엑셀을 지정해 일일자금일보를 만듭니다.",

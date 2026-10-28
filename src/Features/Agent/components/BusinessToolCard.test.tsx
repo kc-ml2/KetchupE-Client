@@ -8,6 +8,23 @@ const file = { sourceId: "local", relativePath: "source.xlsx", name: "source.xls
 const action: BusinessAction = { id: "action", type: "business_tool", title: "일일자금일보", question: "자료를 지정하세요", fields: [{ key: "date", label: "기준일", type: "date", required: true }, { key: "source", label: "입출금 내역", type: "file", required: true }], input: { values: {}, files: {} } };
 const apiFixture = () => ({ listWorkSources: vi.fn().mockResolvedValue([{ id: "local" }]), listWorkFiles: vi.fn().mockResolvedValue([file]), submitBusinessInput: vi.fn().mockResolvedValue(undefined), pickWorkFiles: vi.fn().mockResolvedValue([]), listBusinessArtifacts: vi.fn().mockResolvedValue([]), openBusinessArtifact: vi.fn().mockResolvedValue(undefined), saveBusinessArtifact: vi.fn().mockResolvedValue(true) }) as unknown as KetchupEAgentAPI;
 
+it("submits an explicitly chosen Excel output format", async () => {
+  const api = apiFixture();
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [{ key: "format", label: "결과 형식", type: "select", required: false, options: [{ value: "pdf", label: "PDF" }, { value: "html", label: "HTML" }, { value: "xlsx", label: "엑셀" }] }] }} />);
+  expect(screen.getByLabelText("결과 형식")).toHaveValue("");
+  fireEvent.change(screen.getByLabelText("결과 형식"), { target: { value: "xlsx" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledWith("run", "action", { files: {}, values: { format: "xlsx" } }));
+});
+
+it.each(["pdf", "html", "xlsx"])("saves a %s artifact by ID", async (extension) => {
+  const api = apiFixture();
+  vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "output", runId: "run", name: `분석.${extension}`, toolId: "excel_work", version: "0.1" }]);
+  render(<BusinessArtifacts api={api} threadId="thread" running={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: `분석.${extension} 저장` }));
+  await waitFor(() => expect(api.saveBusinessArtifact).toHaveBeenCalledWith("output"));
+});
+
 it("collects declared inputs without a mapping editor and passes the owning action", async () => {
   const api = apiFixture(); render(<BusinessToolCard api={api} runId="run" action={action} />);
   await screen.findByRole("option", { name: "source.xlsx" });
@@ -60,6 +77,31 @@ it("reloads completed artifacts and opens by artifact ID rather than renderer pa
   view.rerender(<BusinessArtifacts api={api} threadId="thread" running={false} />);
   fireEvent.click(await screen.findByRole("button", { name: "일보.xlsx 열기 · v1.0" }));
   expect(api.openBusinessArtifact).toHaveBeenCalledWith("artifact");
+});
+
+it.each([undefined, "평균 대신 합계로 바꿔줘"])("shows the revision field only for an existing revision: %s", async revision => {
+  const api = apiFixture();
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action,
+    fields: [{ key: "request", label: "요청사항", type: "text", required: true }, { key: "revision", label: "추가·수정 요청", type: "text", required: false }],
+    input: { files: {}, values: { request: "실험 결과를 정리해줘", ...(revision ? { revision } : {}) } } }} />);
+  expect(screen.getByLabelText("요청사항 *")).toBeInTheDocument();
+  if (revision) {
+    expect(screen.getByLabelText("추가·수정 요청")).toHaveValue(revision);
+    fireEvent.change(screen.getByLabelText("추가·수정 요청"), { target: { value: "" } });
+    expect(screen.getByLabelText("추가·수정 요청")).toBeInTheDocument();
+  } else expect(screen.queryByLabelText("추가·수정 요청")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
+});
+
+it("offers Excel revision and disables it during a running job", async () => {
+  const api = apiFixture(), onRevise = vi.fn();
+  vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "result", runId: "run", name: "보고서.xlsx", toolId: "excel_work", version: "0.4" }]);
+  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevise={onRevise} />);
+  fireEvent.click(await screen.findByRole("button", { name: "엑셀 결과 수정하기" }));
+  expect(onRevise).toHaveBeenCalledTimes(1);
+  view.rerender(<BusinessArtifacts api={api} threadId="thread" running={true} onRevise={onRevise} />);
+  expect(await screen.findByRole("button", { name: "엑셀 결과 수정하기" })).toBeDisabled();
 });
 
 it.each([true, false, "저장할 수 없습니다"])("downloads a PNG by artifact ID and handles save result %s", async (result) => {

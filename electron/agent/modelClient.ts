@@ -64,10 +64,10 @@ export interface ModelClient {
   verify(input: VerifyInput, profile: PolicyProfile, signal: AbortSignal): Promise<VerificationResult>;
   streamAnswer(input: AnswerInput, profile: PolicyProfile, signal: AbortSignal): AsyncIterable<AnswerEvent>;
   /** Plain text completion (canvas classify/draft/edit). */
-  complete(input: { system?: string; prompt: string; purpose?: ModelCallPurpose }, profile: PolicyProfile, signal: AbortSignal): Promise<string>;
+  complete(input: { system?: string; prompt: string; purpose?: ModelCallPurpose; maxOutputTokens?: number }, profile: PolicyProfile, signal: AbortSignal): Promise<string>;
 }
 
-export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas";
+export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas" | "excel";
 
 export type ModelCallInfo = {
   purpose: ModelCallPurpose;
@@ -231,7 +231,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
       const startedAt = Date.now();
       try {
         // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
-        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
+        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, maxOutputTokens: input.maxOutputTokens, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
         let text = "";
         for await (const part of result.fullStream) {
           if (part.type === "text-delta") text += part.text;

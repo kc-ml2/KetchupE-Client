@@ -90,3 +90,17 @@ it("does not show a running spinner for an unavailable tool", () => {
   act(() => result.current.attach("not-ready", undefined, "abstained"));
   expect(result.current.view).toMatchObject({ isRunning: false, phase: null });
 });
+
+it("refreshes persisted answers once and ignores progress, duplicate and unrelated events", () => {
+  const { api, emit } = fakeApi();
+  const reload = vi.fn();
+  const { result } = renderHook(() => useAgentRun(api, "thread", reload), { wrapper: StrictMode });
+  act(() => result.current.attach("run-1"));
+  const accepted: AgentStreamEvent = { runId: "run-1", seq: 1, type: "status", payload: { phase: "분석 중", messagesChanged: true } };
+  emit(accepted);
+  emit(accepted);
+  emit({ ...accepted, runId: "other", seq: 2 });
+  emit({ ...accepted, seq: 2, payload: { phase: "보고서 생성 중" } });
+  expect(reload).toHaveBeenCalledTimes(1);
+  expect(result.current.view).toMatchObject({ isRunning: true, phase: "보고서 생성 중" });
+});
