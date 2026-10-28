@@ -32,6 +32,8 @@ import { excludedMaruStorages, ensureWorkspace, inactiveCollections, recentMessa
 import { MaruClient } from "./maru.ts";
 import { MaruAccess } from "./maruAccess.ts";
 import { DEFAULT_TROLLEY_ENDPOINT, TrolleyClient } from "./trolley.ts";
+import { McpConnection, type McpServerConfig } from "./mcp.ts";
+import { ToolRegistry } from "./toolRegistry.ts";
 
 export const DEFAULT_RETRIEVAL = { mode: "hybrid", topK: 8 } as const;
 
@@ -77,6 +79,8 @@ export type RuntimeOptions = {
   emitAgentEvent: (event: AgentStreamEvent) => void;
   emitCollectionsChanged: () => void;
   modelSelectable?: boolean;
+  /** Account-scoped connections supplied by the application; every allowed tool must be reviewed as read-only. */
+  readOnlyMcpServers?: Array<McpServerConfig & { allowedTools: readonly string[] }>;
 };
 
 export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
@@ -142,9 +146,17 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   const maruAccess = new MaruAccess(db, maru, join(options.userData, "mcp-cache", "maru"));
   const accessSignal = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]);
   const authorizeThread = (threadId: string) => maruAccess.authorizeThread(threadId, accessSignal());
+  const toolRegistry = new ToolRegistry();
+  const additionalServers = (options.readOnlyMcpServers ?? []).map((config) => ({ config, connection: new McpConnection(config) }));
+  const toolsReady = Promise.all(additionalServers.map(async ({ config, connection }) => {
+    try { await toolRegistry.registerMcp(connection, config.allowedTools, accessSignal()); }
+    catch { console.warn(`[agent] MCP tool discovery unavailable: ${config.id}`); }
+  }));
   const harness = new Harness({
     db,
     model: harnessModel,
+    toolRegistry,
+    toolsReady,
     tools: {
       ...tomatoTools(tomato, DEFAULT_RETRIEVAL),
       ...(maru ? { maru } : {}),
@@ -293,6 +305,8 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     stop: async () => {
       quiesce();
       await draining;
+      await toolsReady;
+      await Promise.all(additionalServers.map(({ connection }) => connection.close()));
       await maru?.close();
       await trolley?.close();
       await telemetry.stop();

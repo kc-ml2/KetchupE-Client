@@ -3,6 +3,7 @@ import type { ChunkRecord, IngestedSource, SearchMode, SearchResult, Tomato, Tom
 import type { TrolleyDiscoveryTool } from "./trolley.ts";
 
 export type ExternalCallResult = {
+  data?: unknown;
   summary: string;
   documents: ExternalDocumentRef[];
   excerpts?: Array<{ document: ExternalDocumentRef; text: string }>;

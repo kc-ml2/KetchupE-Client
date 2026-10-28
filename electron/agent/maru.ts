@@ -87,8 +87,8 @@ export class MaruClient {
 
   async call(tool: (typeof MARU_TOOLS)[number], args: Record<string, unknown>, signal: AbortSignal): Promise<ExternalCallResult> {
     const payload = await this.callPayload(tool, args, signal);
-    if (tool === "find_storage") return normalizeMaruFindResult(payload);
-    return { summary: JSON.stringify(sanitizeMaruResult(payload), null, 2), documents: [] };
+    if (tool === "find_storage") return { ...normalizeMaruFindResult(payload), data: payload };
+    return { data: payload, summary: JSON.stringify(sanitizeMaruResult(payload), null, 2), documents: [] };
   }
 
   /** Storage roots the account's teams can read. */

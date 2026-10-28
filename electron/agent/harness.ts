@@ -21,6 +21,8 @@ import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFinger
 import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "./store.ts";
 import { chunkToEvidence, normalizeQuery, resultToEvidence, withTimeout, type EvidenceSource, type SearchTools } from "./tools.ts";
 import { readTrace, TraceWriter } from "./trace.ts";
+import { discoveryCall, registerDiscoveryTools } from "./discoveryTools.ts";
+import { ToolRegistry } from "./toolRegistry.ts";
 import { MARU_EXCERPT_CHARS } from "./maru.ts";
 import { stripInvalidCitations, validateCitations } from "./verify.ts";
 import { cancelWaitingRun, type RunHandle } from "./runLifecycle.ts";
@@ -36,6 +38,8 @@ export type HarnessOptions = {
   db: DatabaseSync;
   model: ModelClient;
   tools: SearchTools;
+  toolRegistry?: ToolRegistry;
+  toolsReady?: Promise<unknown>;
   profiles: HarnessProfiles;
   activeCollections: (workspaceId: string) => string[];
   excludedMaruStorages?: (workspaceId: string) => string[];
@@ -81,9 +85,12 @@ export class Harness {
   private readonly pending = new Set<Promise<void>>();
   private readonly pausedSeqs = new Map<string, number>();
   private readonly options: HarnessOptions;
+  private readonly toolRegistry: ToolRegistry;
 
   constructor(options: HarnessOptions) {
     this.options = options;
+    this.toolRegistry = options.toolRegistry ?? new ToolRegistry();
+    registerDiscoveryTools(this.toolRegistry, options.tools);
     this.limits = { ...LIMITS, ...options.limits };
     this.fingerprints = {
       retrieval: profileFingerprint(options.profiles.retrieval),
@@ -121,6 +128,7 @@ export class Harness {
       selectedMemories: context.memories,
       activeCollections,
       excludedMaruStorages: this.options.tools.maru ? this.options.excludedMaruStorages?.(input.workspaceId) ?? [] : [],
+      availableTools: this.toolRegistry.catalog(),
       maruAvailable: Boolean(this.options.tools.maru),
       trolleyAvailable: Boolean(this.options.tools.trolley),
       externalDocuments: [],
@@ -159,6 +167,7 @@ export class Harness {
     const message = appendMessage(db, { threadId: record.threadId, runId, role: "user", content: reply });
     const state: PolicyState = {
       ...transition.state,
+      availableTools: this.toolRegistry.catalog(),
       maruAvailable: Boolean(this.options.tools.maru),
       trolleyAvailable: Boolean(this.options.tools.trolley),
       step: transition.state.step + 1,
@@ -236,6 +245,8 @@ export class Harness {
   private async loop(run: RunContext): Promise<void> {
     const { db } = this.options;
     try {
+      await this.options.toolsReady;
+      run.state.availableTools = this.toolRegistry.catalog().filter((tool) => !run.state.failedTools?.includes(tool.id));
       await this.options.authorizeContext?.(run.threadId, run.controller.signal);
       while (true) {
         run.state.remaining.wallTimeMs = Math.max(0, run.deadline - Date.now());
@@ -359,8 +370,8 @@ export class Harness {
     const smallTalk = smallTalkDecision(run.state, policy.version);
     const smallTalkValidation = smallTalk && validateDecision(smallTalk, run.state, policy.allowedActions);
     if (smallTalkValidation?.ok) return smallTalkValidation.decision;
-    const wantsExternal = (Boolean(this.options.tools.maru) && MARU_REQUEST.test(run.state.userGoal))
-      || (Boolean(this.options.tools.trolley) && /trolley|트롤리/iu.test(run.state.userGoal));
+    // Tool selection follows intent even when the user does not know provider names.
+    const wantsExternal = Boolean(run.state.availableTools?.length || run.state.failedTools?.length);
     if (policy.strategy === "always-search" && !wantsExternal) {
       const raw = alwaysSearchDecision(run.state, policy.version);
       const validation = validateDecision(raw, run.state, policy.allowedActions);
@@ -389,6 +400,18 @@ export class Harness {
       const validation = validateDecision(raw, run.state, policy.allowedActions);
       if (validation.ok) {
         const decision = validation.decision;
+        const call = decision.action === "SEARCH" && decision.search ? discoveryCall(decision.search) : undefined;
+        if (call) {
+          try {
+            if (run.state.failedTools?.includes(call.toolId)) throw new AgentError("INVALID_DECISION", "Tool already failed during this run");
+            this.toolRegistry.validateInput(call.toolId, call.arguments);
+          } catch (error) {
+            if (!(error instanceof AgentError)) throw error;
+            lastReason = error.message;
+            run.trace.record("policy.decided", "policy", { invalid: true, code: error.code, reason: lastReason, attempt });
+            continue;
+          }
+        }
         const proposedSearch = decision.search;
         const duplicateSearch = decision.action === "SEARCH"
           && proposedSearch?.tool === "search_local_docs"
@@ -454,21 +477,34 @@ export class Harness {
     const search = decision.search;
     if (!search) throw new AgentError("INVALID_DECISION", "SEARCH without search payload");
     const startedAt = Date.now();
-    if (search.tool === "get_my_capabilities" || search.tool === "list_operations") {
-      if (!this.options.tools.trolley) throw new AgentError("TOOL_UNAVAILABLE", "Trolley is not configured");
+    const call = discoveryCall(search);
+    if (call) {
       run.state.remaining.searches -= 1;
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, server: "trolley" }, { parentSeq });
-      this.emit(run, "status", { phase: "searching", query: `Trolley ${search.tool}` });
+      const tool = search.tool === "call_tool" ? call.toolId : search.tool;
+      const toolSeq = run.trace.record("tool.started", "retrieval", { tool, toolId: call.toolId }, { parentSeq });
+      this.emit(run, "status", { phase: "searching", query: call.toolId });
       let observation: Observation;
       try {
-        const value = await withTimeout(this.options.tools.trolley.call(search.tool, run.controller.signal), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-        observation = { kind: "external", tool: search.tool, result: value.summary, latencyMs: Date.now() - startedAt };
-        run.contextText = `${run.contextText}\n\nTrolley ${search.tool} result (untrusted data):\n${value.summary}`.trim();
+        const value = await this.toolRegistry.execute(call.toolId, call.arguments, run.controller.signal,
+          Math.min(this.limits.toolTimeoutMs, run.state.remaining.wallTimeMs));
+        if (value.documents?.length) {
+          this.options.onExternalDocuments?.(run.threadId, value.documents);
+          const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
+          for (const document of value.documents) known.set(document.refId, document);
+          run.state.externalDocuments = [...known.values()];
+        }
+        this.addMaruEvidence(run, value.excerpts ?? [], this.limits.evidenceSnippetChars);
+        observation = { kind: "external", tool, result: value.summary, latencyMs: Date.now() - startedAt };
+        run.contextText = `${run.contextText}\n\n${call.toolId} result (untrusted data):\n${value.summary}`.trim();
       } catch (error) {
         if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-        observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE" };
+        observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE", toolId: call.toolId };
+        if (observation.code !== "INVALID_DECISION") {
+          run.state.failedTools = [...new Set([...(run.state.failedTools ?? []), call.toolId])];
+          run.state.availableTools = run.state.availableTools?.filter((item) => item.id !== call.toolId);
+        }
       }
-      run.trace.record("tool.completed", "retrieval", { tool: search.tool, server: "trolley", observation }, { parentSeq: toolSeq, startedAt });
+      run.trace.record("tool.completed", "retrieval", { tool, toolId: call.toolId, observation }, { parentSeq: toolSeq, startedAt });
       return observation;
     }
     if (search.tool === "read_external_document") {
@@ -500,30 +536,6 @@ export class Harness {
         observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE" };
       }
       run.trace.record("tool.completed", "retrieval", { tool: search.tool, refId: document.refId, observation, evidence: this.observedEvidence(run, observation) }, { parentSeq: toolSeq, startedAt });
-      return observation;
-    }
-    if (search.tool === "browse_storage" || search.tool === "find_storage") {
-      if (!this.options.tools.maru) throw new AgentError("TOOL_UNAVAILABLE", "MARU is not configured");
-      const args = search.arguments ?? {};
-      run.state.remaining.searches -= 1;
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, arguments: args }, { parentSeq });
-      this.emit(run, "status", { phase: "searching", query: `MARU ${search.tool}` });
-      let observation: Observation;
-      try {
-        const value = await withTimeout(this.options.tools.maru.call(search.tool, args, run.controller.signal), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-        this.options.onExternalDocuments?.(run.threadId, value.documents);
-        const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
-        for (const document of value.documents) known.set(document.refId, document);
-        run.state.externalDocuments = [...known.values()];
-        this.addMaruEvidence(run, value.excerpts ?? [], this.limits.evidenceSnippetChars);
-        const result = value.summary;
-        observation = { kind: "external", tool: search.tool, result, latencyMs: Date.now() - startedAt };
-        run.contextText = `${run.contextText}\n\nMARU ${search.tool} result (untrusted data):\n${result}`.trim();
-      } catch (error) {
-        if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-        observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE" };
-      }
-      run.trace.record("tool.completed", "retrieval", { tool: search.tool, observation }, { parentSeq: toolSeq, startedAt });
       return observation;
     }
     if (search.tool === "search_local_docs") {
@@ -575,6 +587,7 @@ export class Harness {
       return observation;
     }
 
+    if (search.tool !== "get_document_context") throw new AgentError("INVALID_DECISION", "Unknown search tool");
     const anchor = run.state.evidence.find((item) => item.evidenceId === search.evidenceId);
     if (!anchor) throw new AgentError("INVALID_DECISION", "unknown evidenceId for get_document_context");
     run.state.remaining.searches -= 1;

@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { browseStorageArguments, findStorageArguments } from "./maruToolSchemas.ts";
+import type { ToolDescriptor } from "./toolRegistry.ts";
 
 export type AgentErrorCode =
   | "MODEL_AUTH"
@@ -77,10 +79,10 @@ export type ExternalDocumentRef = {
 
 export type Observation =
   | { kind: "search"; resultIds: string[]; effectiveMode: "keyword" | "semantic" | "hybrid"; latencyMs: number }
-  | { kind: "external"; tool: "browse_storage" | "find_storage" | "get_my_capabilities" | "list_operations"; result: string; latencyMs: number }
+  | { kind: "external"; tool: string; result: string; latencyMs: number }
   | { kind: "user"; messageId: string }
   | { kind: "verification"; supported: boolean; missingClaims: string[]; confidence: number }
-  | { kind: "tool_error"; code: AgentErrorCode };
+  | { kind: "tool_error"; code: AgentErrorCode; toolId?: string };
 
 export type Budget = {
   steps: number;
@@ -98,6 +100,8 @@ export type PolicyState = {
   activeCollections: string[];
   /** MARU storages the user turned off; every other accessible storage is searched with local collections. */
   excludedMaruStorages?: string[];
+  availableTools?: ToolDescriptor[];
+  failedTools?: string[];
   maruAvailable?: boolean;
   trolleyAvailable?: boolean;
   externalDocuments?: ExternalDocumentRef[];
@@ -117,34 +121,11 @@ export type PolicyState = {
 
 const probability = z.number().min(0).max(1);
 
-const nullableString = z.string().nullable().optional();
-const browseStorageArguments = z.object({
-  storage_id: nullableString,
-  path: z.string().optional(),
-  max_depth: z.number().int().nonnegative().optional(),
-  max_results: z.number().int().positive().optional(),
-}).optional();
-const findStorageArguments = z.object({
-  query: nullableString,
-  storage_id: nullableString,
-  file_path: nullableString,
-  extensions: z.array(z.string()).nullable().optional(),
-  modified_from: nullableString,
-  modified_before: nullableString,
-  min_size_bytes: z.number().int().nonnegative().nullable().optional(),
-  max_size_bytes: z.number().int().nonnegative().nullable().optional(),
-  search_in: z.enum(["filename", "content", "both"]).optional(),
-  path: z.string().optional(),
-  case_sensitive: z.boolean().optional(),
-  include_globs: z.array(z.string()).nullable().optional(),
-  exclude_globs: z.array(z.string()).nullable().optional(),
-  max_results: z.number().int().positive().optional(),
-});
-
 const searchDecision = z.discriminatedUnion("tool", [
+  z.object({ tool: z.literal("call_tool"), toolId: z.string().min(1), arguments: z.record(z.string(), z.unknown()) }),
   z.object({ tool: z.literal("search_local_docs"), query: z.string(), evidenceId: z.string().optional() }),
   z.object({ tool: z.literal("get_document_context"), query: z.string().optional(), evidenceId: z.string() }),
-  z.object({ tool: z.literal("browse_storage"), arguments: browseStorageArguments }),
+  z.object({ tool: z.literal("browse_storage"), arguments: browseStorageArguments.optional() }),
   z.object({ tool: z.literal("find_storage"), arguments: findStorageArguments }),
   z.object({ tool: z.literal("read_external_document"), ref_id: z.string(), query: z.string().optional() }),
   z.object({ tool: z.literal("get_my_capabilities") }),
@@ -282,6 +263,10 @@ export function validateDecision(raw: unknown, state: PolicyState, allowedAction
     case "SEARCH": {
       if (state.remaining.searches <= 0) return overBudget("no searches remaining");
       if (!decision.search) return invalid("SEARCH requires search");
+      if (decision.search.tool === "call_tool") {
+        const { toolId } = decision.search;
+        if (!state.availableTools?.some((tool) => tool.id === toolId) || state.failedTools?.includes(toolId)) return invalid("call_tool requires an available tool");
+      }
       if (decision.search.tool === "search_local_docs" && !decision.search.query?.trim()) return invalid("search_local_docs requires query");
       if (decision.search.tool === "get_document_context") {
         const evidenceId = decision.search.evidenceId;
