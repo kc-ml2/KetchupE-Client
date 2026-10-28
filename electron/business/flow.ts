@@ -138,7 +138,7 @@ export class BusinessFlow {
           const value = await sources.read(file);
           totalBytes += value.bytes.length;
           if (totalBytes > 100 * 1024 * 1024) throw new Error("원천 자료 합계는 100MB 이하여야 합니다.");
-          files[key].push({ ...value, name: file.name });
+          files[key].push({ ...value, name: file.name.normalize("NFC") });
         }
         const fingerprints = files[key].map((value) => value.fingerprint);
         if (new Set(fingerprints).size !== fingerprints.length) throw new Error("같은 파일이 두 번 지정되었습니다. 중복 파일을 빼고 다시 실행해 주세요.");

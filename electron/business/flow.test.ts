@@ -300,3 +300,14 @@ it.each(["../escape.png", "invalid.png"])("publishes neither artifact when an im
   const runId = start(); await flow.submit(runId, getRunAction(db, runId)!.id, input);
   expect(getRun(db, runId).status).toBe("waiting_user"); expect(flow.artifacts(threadId)).toEqual([]);
 });
+
+it("passes Korean file names to tools in composed (NFC) form even when the file system reports NFD", async () => {
+  const nfd = "케찹이_데모.xlsx".normalize("NFD");
+  // Different bytes from source.xlsx so registration does not resolve to the existing source.
+  const book = new ExcelJS.Workbook(); book.addWorksheet("자료").addRows([["금액"], [200]]);
+  const path = join(folder, nfd); await writeFile(path, Buffer.from(await book.xlsx.writeBuffer()));
+  const sources = new WorkSources(db); const source = (await sources.register([path], "file")).find(item => item.name !== "source.xlsx")!; const [file] = await sources.files(source.id);
+  const runId = start(); await flow.submit(runId, getRunAction(db, runId)!.id, { ...input, files: { source: [file] } });
+  const name = vi.mocked(tool.execute).mock.calls[0][0].files.source[0].name;
+  expect(name).toBe("케찹이_데모.xlsx".normalize("NFC")); expect(name).not.toBe(nfd);
+});
