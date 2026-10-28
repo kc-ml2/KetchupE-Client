@@ -235,7 +235,7 @@ function setupAutoUpdater() {
     updaterLog("error", ["update failed:", error]);
   });
 
-  autoUpdater.on("update-downloaded", async (info) => {
+  autoUpdater.on("update-downloaded", async () => {
     isDownloadingUpdate = false;
     hasDownloadedUpdate = true;
     if (hasShownUpdateDialog) return;
