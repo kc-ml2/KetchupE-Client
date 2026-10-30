@@ -50,6 +50,8 @@ export type RunKind = string;
 export type RunAction = { id: string; type: "work_sources"; title: string; question: string } | BusinessAction;
 export type StartRunResult = { runId: string; kind: RunKind; action?: RunAction; status?: RunStatus };
 
+export type MaruStorageSummary = { storageId: string; name: string; active: boolean };
+
 export type CollectionSummary = {
   name: string;
   path: string;
@@ -121,6 +123,8 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   syncCollection(name: string): Promise<SyncSummary>;
   listCollections(workspaceId: string): Promise<CollectionSummary[]>;
   setCollectionActive(workspaceId: string, name: string, active: boolean): Promise<void>;
+  listMaruStorages(workspaceId: string): Promise<MaruStorageSummary[]>;
+  setMaruStorageActive(workspaceId: string, storageId: string, active: boolean): Promise<void>;
   onCollectionsChanged(listener: () => void): () => void;
 
   listMemories(workspaceId: string): Promise<Memory[]>;
@@ -131,7 +135,7 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   deleteMemory(id: string): Promise<void>;
 
   getModelSettings(): Promise<{ baseURL: string; modelAlias: string; hasApiKey: boolean; configurable: boolean }>;
-  setModelSettings(settings: { baseURL: string; modelAlias: string; apiKey?: string }): Promise<void>;
+  setModelSettings(settings: { modelAlias: string }): Promise<void>;
   listModels(): Promise<string[]>;
   testModelConnection(): Promise<{ ok: boolean; models: string[]; resolvedAlias: string }>;
 

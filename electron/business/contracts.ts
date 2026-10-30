@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
-import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import type { WorkflowRoute } from "../agent/router.ts";
 
 const MAX_FILES_PER_FIELD = 50;
@@ -10,22 +9,30 @@ export const businessInputSchema = z.object({
 }).strict();
 export type ToolResult =
   | { status: "needs_input"; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
-  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
+  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
   | { status: "failed"; message: string };
 export type BusinessTool = WorkflowRoute & {
   version: string;
   title: string;
   fields: BusinessField[];
   unavailableReason?: string;
+  initialQuestion?: string;
+  executionTimeoutMs?: number;
+  editable?: boolean;
+  /** Required for non-XLSX outputs; only app-shipped validators can opt in. */
+  validateOutput?: (file: { name: string; bytes: Uint8Array }, signal: AbortSignal) => Promise<void>;
   /** Replace this selected XLSX after a successful, validated run. */
   updateSource?: string;
-  /** Prefills the input form from the connected work folders (today = Asia/Seoul YYYY-MM-DD). The user still sees and can change every pick. */
-  suggest?: (files: WorkFile[], today: string) => BusinessInput;
+  /** Editable default values for a new run (today = Asia/Seoul YYYY-MM-DD). */
+  defaults?: (today: string) => Record<string, string>;
+  /** Files come only from the picker for each run, never from connected folders, and are not remembered as sources. */
+  uploadOnly?: boolean;
   execute: (input: {
     values: Record<string, string>;
     /** Files in the order the user chose them; single-file fields hold one entry. */
     files: Record<string, { bytes: Buffer; fingerprint: string; name: string }[]>;
     checkpoint: Record<string, unknown>;
     signal: AbortSignal;
+    onProgress?: (phase: string) => void;
   }) => Promise<ToolResult>;
 };

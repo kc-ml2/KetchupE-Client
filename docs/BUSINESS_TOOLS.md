@@ -4,7 +4,7 @@ Current implementation, 2026-10-16. `BusinessFlow` is the shared executor; `dail
 
 ## Shared contract
 
-[BusinessTool](../electron/business/contracts.ts) declares an ID, version, routing description, input fields, optional `suggest(files, today)`, and `execute`. Register it once in [registry.ts](../electron/business/registry.ts); runtime and the worker use the same registry. Do not also register a duplicate workflow.
+[BusinessTool](../electron/business/contracts.ts) declares an ID, version, routing description, input fields, optional `defaults(today)` and `uploadOnly`, and `execute`. Register it once in [registry.ts](../electron/business/registry.ts); runtime and the worker use the same registry. Do not also register a duplicate workflow.
 
 `execute` receives:
 
@@ -52,7 +52,7 @@ Entry point: [dailyCash.ts](../electron/business/dailyCash.ts). The tool prepare
 
 Report date = work date minus one calendar day. For work date 2026-10-15, use the 2026-10-14 KC closing balances and the latest report sheet before 2026-10-14. Reject a prior sheet more than seven days old; ask before carrying across a date gap. Never overwrite an existing report-date sheet.
 
-Connected search folders also supply business files. `suggest` prefills candidates by filename; users confirm or replace them in the input card. The KC filename date must match the report date; ask if absent and reject if different. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
+Daily Cash is `uploadOnly`: files come only from the picker, are never prefilled from connected folders, and are kept for the current app session only (not registered as sources; a restart requires a new task). Only the work date defaults to today. The KC date must match the report date; ask if absent and reject if different. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
 
 ### Business rules
 

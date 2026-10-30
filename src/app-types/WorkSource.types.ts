@@ -32,7 +32,8 @@ export interface WorkSourceAPI {
   submitWorkSelection(runId: string, actionId: string, selection: WorkSelection): Promise<void>;
   pickWorkSources(kind: "file" | "folder"): Promise<WorkSource[]>;
   /** Opens the native file dialog, connects the chosen XLSX files and returns only those. */
-  pickWorkFiles(multiple: boolean): Promise<WorkFile[]>;
+  /** `upload` keeps the picked files for this app session only instead of registering them as connected sources. */
+  pickWorkFiles(multiple: boolean, upload?: boolean): Promise<WorkFile[]>;
   listWorkSources(): Promise<WorkSource[]>;
   removeWorkSource(id: string): Promise<void>;
   listWorkFiles(sourceId: string): Promise<WorkFile[]>;

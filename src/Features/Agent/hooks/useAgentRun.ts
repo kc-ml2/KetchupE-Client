@@ -59,13 +59,13 @@ export const reduceRunEvent = (current: RunView, event: AgentStreamEvent): RunVi
 };
 
 /** Owns one thread's live run: attach/resume/cancel and the runId+seq-filtered event stream (LiteLLM SSE → text_delta). */
-export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | null, onSettled: () => void) => {
+export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | null, onMessagesChanged: () => void) => {
   const [view, setView] = useState<RunView>(initial);
   // Event bookkeeping lives in refs mutated by the listener (never inside a state updater).
   const runIdRef = useRef<string | null>(null);
   const lastSeq = useRef(0);
-  const settled = useRef(onSettled);
-  settled.current = onSettled;
+  const messagesChanged = useRef(onMessagesChanged);
+  messagesChanged.current = onMessagesChanged;
 
   const bind = useCallback((runId: string | null) => {
     runIdRef.current = runId;
@@ -95,7 +95,8 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
       if (event.runId !== runIdRef.current || event.seq <= lastSeq.current) return;
       lastSeq.current = event.seq;
       setView((current) => reduceRunEvent(current, event));
-      if (SETTLING_EVENTS.has(event.type)) settled.current();
+      // Accepted form answers are persisted before execution; don't wait for the submission IPC to finish.
+      if (SETTLING_EVENTS.has(event.type) || (event.type === "status" && (event.payload as Record<string, unknown>).messagesChanged === true)) messagesChanged.current();
     });
   }, [api]);
 

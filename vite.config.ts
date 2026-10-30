@@ -12,8 +12,6 @@ export default defineConfig(({ mode }) => {
     "KETCHUPE_ENVIRONMENT",
     "KETCHUPE_TENANT_ID",
     "KETCHUPE_VARIANT",
-    "LITELLM_BASE_URL",
-    "LITELLM_API_KEY",
     "LITELLM_MODEL_ALIAS",
     "LITELLM_ROUTER_MODEL_ALIAS",
   ].map((key) => [`process.env.${key}`, JSON.stringify(env[key] ?? "")]));
@@ -63,6 +61,15 @@ export default defineConfig(({ mode }) => {
           build: {
             outDir: "dist-electron",
             rollupOptions: { external: ["electron", "exceljs", "sharp", "jszip", "@xmldom/xmldom"], output: { format: "es" } },
+          },
+        },
+      },
+      {
+        entry: "electron/workers/excel.worker.ts",
+        vite: {
+          build: {
+            outDir: "dist-electron",
+            rollupOptions: { external: ["electron", "exceljs", "sharp", "quickjs-emscripten", "jszip", "@xmldom/xmldom"], output: { format: "es" } },
           },
         },
       },

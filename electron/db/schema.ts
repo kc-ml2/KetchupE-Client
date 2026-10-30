@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS threads (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS threads_workspace_updated ON threads(workspace_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS maru_documents (
+  thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  ref_id TEXT NOT NULL,
+  document TEXT NOT NULL,
+  local_path TEXT,
+  PRIMARY KEY (thread_id, ref_id)
+);
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,

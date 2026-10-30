@@ -13,6 +13,11 @@ const WORKFLOW_SHORTCUTS: readonly WorkflowShortcut[] = [
     label: "계약서 초안 작성하기",
     description: "등록된 문서를 근거로 계약서·공문 등의 초안을 씁니다.",
   },
+  {
+    mode: "excel_work",
+    label: "엑셀 작업하기",
+    description: "실험 · 여러 엑셀을 비교·분석하고 PDF·HTML·엑셀로 만듭니다.",
+  },
 ];
 
 const WorkflowLauncher = ({

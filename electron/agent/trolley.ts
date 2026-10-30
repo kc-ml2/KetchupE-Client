@@ -23,7 +23,7 @@ export class TrolleyClient {
     const capabilities = await this.read("get_my_capabilities", signal);
     const payload = tool === "get_my_capabilities" ? capabilities
       : { capabilities, operations: await this.read("list_operations", signal) };
-    return { summary: JSON.stringify(sanitizeMcpResult(payload)), documents: [] };
+    return { data: payload, summary: JSON.stringify(sanitizeMcpResult(payload)), documents: [] };
   }
 
   close(): Promise<void> {

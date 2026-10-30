@@ -1,8 +1,11 @@
-// Loads .env into process.env before anything reads LITELLM_*/LANGFUSE_* — Vite's own env loading only
+// Loads optional model aliases and service settings; LiteLLM/MARU credentials come from login.
+// Vite's own env loading only
 // exposes VITE_-prefixed vars to the renderer bundle, it never touches process.env for the main process.
 import "dotenv/config";
 import {
   app,
+  ipcMain,
+  type IpcMainInvokeEvent,
   BrowserWindow,
   Tray,
   Menu,
@@ -11,6 +14,11 @@ import {
   Notification,
   type MessageBoxOptions,
 } from "electron";
+import { randomUUID } from "node:crypto";
+import { AuthSession } from "./auth/session.ts";
+import { CredentialBroker } from "./auth/broker.ts";
+import { CredentialStore, accountDirectory } from "./auth/storage.ts";
+import { SessionScope } from "./ipc/sessionScope.ts";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -32,6 +40,9 @@ app.setName(PRODUCT_NAME);
 
 let mainWindow: BrowserWindow | null = null;
 let agentRuntime: AgentRuntime | null = null;
+let stoppingRuntime: Promise<void> | undefined;
+let scope: SessionScope | null = null;
+let auth: AuthSession | null = null;
 let tray: Tray | null = null;
 let appIconPath: string | undefined;
 let isQuitting = false;
@@ -82,7 +93,7 @@ function createWindow() {
       preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false,
+      webSecurity: true,
     },
   });
 
@@ -224,7 +235,7 @@ function setupAutoUpdater() {
     updaterLog("error", ["update failed:", error]);
   });
 
-  autoUpdater.on("update-downloaded", async (info) => {
+  autoUpdater.on("update-downloaded", async () => {
     isDownloadingUpdate = false;
     hasDownloadedUpdate = true;
     if (hasShownUpdateDialog) return;
@@ -287,15 +298,22 @@ function stopPeriodicUpdateChecks() {
   updateCheckInterval = undefined;
 }
 
+// One process per userData: two instances would share login.enc, SQLite and the Tomato index files.
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.exit(0);
+app.on("second-instance", () => { if (app.isReady()) createWindow(); });
+
 app.whenReady().then(() => {
+  if (!primaryInstance) return;
   appIconPath = resolveIconPath();
   if (process.platform === "darwin" && appIconPath) {
     app.dock?.setIcon(appIconPath);
   }
 
+  setupAuth();
   createWindow();
   createTray();
-  startLocalAgent();
+  void auth?.restore();
   setupAutoUpdater();
 
   app.on("activate", () => {
@@ -313,36 +331,91 @@ const broadcast = (channel: string, payload?: unknown) => {
   }
 };
 
-function startLocalAgent() {
+function trustedSender(event: IpcMainInvokeEvent): boolean {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) return false;
+  const url = event.senderFrame?.url ?? "";
   try {
-    agentRuntime = startAgentRuntime({
-      userData: app.getPath("userData"),
-      workerPath: path.join(__dirname, "tomato.worker.js"),
-      appVersion: app.getVersion(),
-      emitAgentEvent: (event) => broadcast("agent:event", event),
-      emitCollectionsChanged: () => broadcast("collection:changed"),
+    const parsed = new URL(url);
+    return isDev ? parsed.origin === "http://localhost:5173" : parsed.protocol === "file:" && parsed.pathname === new URL(pathToFileURL(path.join(__dirname, "../dist/index.html")).href).pathname;
+  } catch { return false; }
+}
+
+function stopLocalAgent(): Promise<void> {
+  if (stoppingRuntime) return stoppingRuntime;
+  const runtime = agentRuntime;
+  const previousScope = scope;
+  previousScope?.block();
+  runtime?.quiesce();
+  stoppingRuntime = (async () => {
+    await previousScope?.close();
+    await runtime?.stop();
+    agentRuntime = null;
+    scope = null;
+    stoppingRuntime = undefined;
+  })();
+  return stoppingRuntime;
+}
+
+function setupAuth() {
+  const root = app.getPath("userData");
+  auth = new AuthSession(new CredentialBroker(), new CredentialStore(root), {
+    activate: async (account) => {
+      if (agentRuntime || scope) throw new Error("Previous account is still active");
+      const sessionId = randomUUID();
+      const currentScope = new SessionScope(sessionId, trustedSender);
+      scope = currentScope;
+      agentRuntime = startAgentRuntime({
+        account,
+        privateRoot: root,
+        userData: accountDirectory(root, account.email),
+        workerPath: path.join(__dirname, "tomato.worker.js"),
+        appVersion: app.getVersion(),
+        modelSelectable: isDev,
+        emitAgentEvent: (event) => {
+          if (auth?.getState().sessionId === sessionId) broadcast("agent:event", { sessionId, event });
+        },
+        emitCollectionsChanged: () => {
+          if (auth?.getState().sessionId === sessionId) broadcast("collection:changed", { sessionId });
+        },
+      });
+      registerAgentHandlers(agentRuntime, currentScope.handle, currentScope.assertActive);
+      registerCollectionHandlers(agentRuntime, currentScope.handle, currentScope.assertActive);
+      registerWorkSourceHandlers(agentRuntime, path.join(__dirname, "workbook.worker.js"), currentScope.handle, currentScope.assertActive);
+      return sessionId;
+    },
+    deactivate: stopLocalAgent,
+  }, (state) => {
+    if (state.phase === "signing_out") scope?.block();
+    broadcast("auth:changed", state);
+  });
+  const handle = (channel: string, listener: (...args: unknown[]) => unknown) => {
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      if (!trustedSender(event)) throw new Error("허용되지 않은 요청입니다.");
+      return listener(...args);
     });
-    registerAgentHandlers(agentRuntime);
-    registerCollectionHandlers(agentRuntime);
-    registerWorkSourceHandlers(agentRuntime, path.join(__dirname, "workbook.worker.js"));
-  } catch (error) {
-    console.error("[agent] failed to start local agent runtime:", error);
-  }
+  };
+  handle("auth:getState", () => auth!.getState());
+  handle("auth:requestCode", (email) => auth!.requestCode(typeof email === "string" ? email : ""));
+  handle("auth:verifyCode", (code) => auth!.verifyCode(typeof code === "string" ? code : ""));
+  handle("auth:retry", () => auth!.retry());
+  handle("auth:logout", () => auth!.logout());
 }
 
 app.on("window-all-closed", () => {
   // Keep running in tray
 });
 
+let shutdownStarted = false;
 app.on("before-quit", (event) => {
   isQuitting = true;
   stopPeriodicUpdateChecks();
-  if (agentRuntime) {
-    // Flush queued telemetry once, then leave for real. exit(), not quit(): a second quit() can still be cancelled
-    // while windows close (e.g. the renderer was killed first), which left the app in the tray with a closed database.
-    event.preventDefault();
-    const runtime = agentRuntime;
-    agentRuntime = null;
-    void runtime.stop().finally(() => app.exit());
-  }
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  // App exit preserves the encrypted login; explicit logout removes it.
+  scope?.block();
+  // An open native dialog can block the drain; never let it keep the app from quitting.
+  // SQLite and the telemetry outbox are durable across an abrupt exit.
+  void Promise.race([auth ? auth.shutdown() : stopLocalAgent(), new Promise((resolve) => setTimeout(resolve, 10_000))])
+    .finally(() => app.exit());
 });

@@ -2,7 +2,12 @@ import { AgentError, EVIDENCE_SNIPPET_MAX_CHARS, type AgentErrorCode, type Evide
 import type { ChunkRecord, IngestedSource, SearchMode, SearchResult, Tomato, TomatoSearch } from "../tomato/tomato.ts";
 import type { TrolleyDiscoveryTool } from "./trolley.ts";
 
-export type ExternalCallResult = { summary: string; documents: ExternalDocumentRef[] };
+export type ExternalCallResult = {
+  data?: unknown;
+  summary: string;
+  documents: ExternalDocumentRef[];
+  excerpts?: Array<{ document: ExternalDocumentRef; text: string }>;
+};
 
 /** Retrieval surface the harness depends on; backed by an in-process Tomato or the utility-process client. */
 export interface SearchTools {
@@ -13,6 +18,7 @@ export interface SearchTools {
   maru?: {
     call(tool: "browse_storage" | "find_storage", args: Record<string, unknown>, signal: AbortSignal): Promise<ExternalCallResult>;
     readDocument(document: ExternalDocumentRef, signal: AbortSignal): Promise<IngestedSource>;
+    searchExcerpts?(question: string, excludedStorageIds: string[], signal: AbortSignal): Promise<Array<{ document: ExternalDocumentRef; text: string }>>;
   };
 }
 

@@ -17,6 +17,15 @@ const state: PolicyState = {
 const base = { taskDifficulty: 1, predictedSuccess: 0.8, evidenceSufficiency: 0.2, reasonCode: "MISSING_EVIDENCE", policyVersion: "orchestration-1" } as const;
 
 describe("validateDecision", () => {
+  it("accepts only catalog tools that have not failed and still have budget", () => {
+    const enabled = { ...state, availableTools: [{ id: "catalog/find", description: "Find products", inputSchema: { type: "object" as const } }] };
+    const decision = { ...base, action: "SEARCH", search: { tool: "call_tool", toolId: "catalog/find", arguments: {} } };
+    expect(validateDecision(decision, enabled).ok).toBe(true);
+    expect(validateDecision(decision, state).ok).toBe(false);
+    expect(validateDecision(decision, { ...enabled, failedTools: ["catalog/find"] }).ok).toBe(false);
+    expect(validateDecision(decision, { ...enabled, remaining: { ...state.remaining, searches: 0 } })).toMatchObject({ code: "BUDGET_EXCEEDED" });
+  });
+
   it("allows Trolley discovery only when configured and rejects execution tools", () => {
     const decision = { ...base, action: "SEARCH", search: { tool: "get_my_capabilities" } };
     expect(validateDecision(decision, state)).toMatchObject({ ok: false, code: "INVALID_DECISION" });

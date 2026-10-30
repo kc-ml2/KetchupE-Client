@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import type { TomatoClient } from "../tomato/tomatoClient.ts";
 import { McpConnection } from "./mcp.ts";
-import { MaruClient, normalizeMaruFindResult, sanitizeMaruResult } from "./maru.ts";
+import { excerptAround, MARU_EXCERPT_CHARS, MaruClient, maruKeywords, normalizeMaruFindResult, sanitizeMaruResult } from "./maru.ts";
 
 it("removes credentials and download URLs from connection diagnostics", () => {
   expect(sanitizeMaruResult({
@@ -78,4 +78,41 @@ it("does not echo an unrecognized MARU result that may contain a URL", () => {
   expect(normalized.documents).toEqual([]);
   expect(normalized.summary).toContain("unsupported");
   expect(normalized.summary).not.toContain("token=secret");
+});
+
+it("reduces a chat question to literal MARU keywords", () => {
+  const keywords = maruKeywords("MARU에서 연차수당 정산 규정을 찾아줘");
+  expect(keywords).toEqual(["연차수당", "정산", "규정"]);
+  expect(maruKeywords("결혼하면 KC에서 휴가 보내줘?")).toEqual(["결혼", "kc", "휴가"]);
+});
+
+it("cuts about 1000 characters starting shortly before the first keyword hit", () => {
+  const text = `${"가".repeat(2000)}연차 정산${"나".repeat(2000)}`;
+  const excerpt = excerptAround(text, ["정산"]);
+  expect(excerpt).toHaveLength(MARU_EXCERPT_CHARS);
+  expect(excerpt).toContain("연차 정산");
+  expect(excerptAround("짧은 본문", ["없음"])).toBe("짧은 본문");
+});
+
+it("fans keywords out per storage, ranks files by keyword hits and skips files without complete text", async () => {
+  const file = (path: string, content?: { status: string; text?: string }) => ({ path, type: "file", storage_id: "s1", storage_name: "인사팀", ...(content ? { content } : {}) });
+  const calls: Array<Record<string, unknown>> = [];
+  const lookup = vi.spyOn(McpConnection.prototype, "callTool").mockImplementation(async (tool, args) => {
+    if (tool === "browse_storage") return { content: [], structuredContent: { results: [{ storage_id: "s1" }, { storage_id: "s-off" }] } };
+    calls.push(args);
+    if (args.query === "규정") throw new Error("one keyword failing must not drop the others");
+    const results = args.query === "연차수당"
+      ? [file("a.hwp", { status: "complete", text: "서문. 연차수당은 정산한다." }), file("big.pdf", { status: "too_large" })]
+      : [file("a.hwp", { status: "complete", text: "서문. 연차수당은 정산한다." }), file("b.docx", { status: "complete", text: "정산 절차" })];
+    return { content: [], structuredContent: { results } };
+  });
+  const client = new MaruClient("synthetic-token", "test", "/unused", {} as TomatoClient);
+  try {
+    const excerpts = await client.searchExcerpts("연차수당 정산 규정", ["s-off"], new AbortController().signal);
+    expect(calls).toEqual(["연차수당", "정산", "규정"].map((query) => ({ query, storage_id: "s1", include_content: true, max_results: 5 })));
+    expect(excerpts.map((item) => item.document.path)).toEqual(["a.hwp", "b.docx"]);
+    expect(excerpts[0]).toMatchObject({ document: { provider: "maru", storageId: "s1", storageName: "인사팀" }, text: "서문. 연차수당은 정산한다." });
+  } finally {
+    lookup.mockRestore();
+  }
 });

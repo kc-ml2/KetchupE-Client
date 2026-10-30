@@ -110,9 +110,10 @@ export function buildRunTrace(
 
   const transitions = events.filter((event) => event.type === "policy.decided" && event.payload.transition);
   const decisions = transitions.map((event) => (event.payload.transition as PolicyTransition).decision);
-  const usedExternal = transitions.some((event) => {
+  const usedExternal = Boolean(db.prepare("SELECT 1 FROM maru_documents WHERE thread_id = ? LIMIT 1").get(run.thread_id)) || transitions.some((event) => {
     const transition = event.payload.transition as PolicyTransition;
     return transition.observation?.kind === "external"
+      || transition.decision.search?.tool === "call_tool"
       || transition.decision.search?.tool === "browse_storage"
       || transition.decision.search?.tool === "find_storage"
       || transition.decision.search?.tool === "read_external_document";
@@ -164,7 +165,7 @@ export function buildRunTrace(
     score: item.score,
   }));
   const exportObservation = (observation: PolicyTransition["observation"]) => observation?.kind === "external"
-    ? { kind: observation.kind, tool: observation.tool, latencyMs: observation.latencyMs, result: observation.tool === "get_my_capabilities" || observation.tool === "list_operations" ? "[TROLLEY_RESULT_OMITTED]" : "[MARU_RESULT_OMITTED]" }
+    ? { kind: observation.kind, tool: observation.tool, latencyMs: observation.latencyMs, result: observation.tool === "get_my_capabilities" || observation.tool === "list_operations" || observation.tool.startsWith("trolley/") ? "[TROLLEY_RESULT_OMITTED]" : "[TOOL_RESULT_OMITTED]" }
     : observation?.kind === "verification"
       ? { ...observation, missingClaims: observation.missingClaims.map((claim) => text(claim)) }
       : observation?.kind === "user"
@@ -187,6 +188,8 @@ export function buildRunTrace(
     ...decision,
     search: !decision.search
       ? undefined
+      : decision.search.tool === "call_tool"
+        ? { tool: decision.search.tool, toolId: decision.search.toolId, arguments: "[TOOL_ARGUMENTS_OMITTED]" }
       : decision.search.tool === "browse_storage" || decision.search.tool === "find_storage"
         ? { tool: decision.search.tool, arguments: "[MARU_ARGUMENTS_OMITTED]" }
         : decision.search.tool === "read_external_document"
@@ -478,7 +481,7 @@ function scoreTrace(score: Score, resource: Record<string, string>, environment:
   }] }] }] };
 }
 
-export type TelemetryIdentity = { installId: string; appVersion: string; os: string };
+export type TelemetryIdentity = { installId: string; accountId?: string; appVersion: string; os: string };
 type OutboxRow = { id: string; kind: "run" | "trace" | "score"; run_id: string | null; payload: string | null; attempts: number };
 type FlushResult = { traces: number; scores: number; error?: string };
 
@@ -504,7 +507,7 @@ export class LangfuseExporter {
   }
 
   userId(): string {
-    return `install:${hmac(this.identity.installId, "ketchupe-user")}`;
+    return this.identity.accountId ? `account:${this.identity.accountId}` : `install:${hmac(this.identity.installId, "ketchupe-user")}`;
   }
 
   resource(): Record<string, string> {

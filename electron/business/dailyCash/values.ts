@@ -33,6 +33,17 @@ export function date(value: unknown): string {
   return value;
 }
 export const shiftDate = (value: string, days: number) => new Date(new Date(`${date(value)}T00:00:00Z`).getTime() + days * 86400000).toISOString().slice(0, 10);
+// 평일에 걸린 관공서 공휴일(대체공휴일·선거일·노동절 포함). 주말은 previousBusinessDay가 따로 건너뛴다.
+// ponytail: 연도별 수동 표. 표에 없는 연도는 주말만 건너뛰므로 매년 말 다음 해를 추가한다(누락 시 KC 기준일 검증에서 멈춘다).
+const HOLIDAYS = new Set([
+  "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-02", "2026-05-01", "2026-05-05", "2026-05-25", "2026-06-03", "2026-07-17", "2026-08-17", "2026-09-24", "2026-09-25", "2026-10-05", "2026-10-09", "2026-12-25",
+  "2027-01-01", "2027-02-08", "2027-02-09", "2027-03-01", "2027-05-03", "2027-05-05", "2027-05-13", "2027-07-19", "2027-08-16", "2027-09-14", "2027-09-15", "2027-09-16", "2027-10-04", "2027-10-11", "2027-12-27",
+]);
+export function previousBusinessDay(value: string) {
+  let day = shiftDate(value, -1);
+  while ([0, 6].includes(new Date(`${day}T00:00:00Z`).getUTCDay()) || HOLIDAYS.has(day)) day = shiftDate(day, -1);
+  return day;
+}
 export const sheetDate = (value: string) => date(value).slice(2).replaceAll("-", "");
 export const isoSheetDate = (value: string) => date(`20${value.slice(0, 2)}-${value.slice(2, 4)}-${value.slice(4, 6)}`);
 export function numeric(cell: ExcelJS.Cell, value: Decimal.Value) { cell.value = decimal(value instanceof Money ? value.toString() : value, cell.address).toNumber(); }

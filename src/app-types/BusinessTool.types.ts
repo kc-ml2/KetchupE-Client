@@ -8,11 +8,13 @@ export type MovementEdits = { changes: { index: number; amount: string }[]; add:
  * `multiple` lets a file field take several files (e.g. one bank statement per account). `rows` seeds a `movements` table.
  * `confirm` turns a text field into a one-click acknowledgement: the card submits exactly this string instead of asking the user to type it.
  */
-export type BusinessField = { key: string; label: string; type: "file" | "date" | "text" | "number" | "movements"; required: boolean; multiple?: boolean; rows?: PlannedMovement[]; confirm?: string };
+export type BusinessField = { key: string; label: string; type: "file" | "date" | "text" | "number" | "movements" | "select"; options?: { value: string; label: string }[]; required: boolean; multiple?: boolean; rows?: PlannedMovement[]; confirm?: string };
 export type BusinessInput = { values: Record<string, string>; files: Record<string, WorkFile[]> };
 export type BusinessAction = {
   id: string; type: "business_tool"; title: string; question: string;
   fields: BusinessField[]; input: BusinessInput; lockedKeys?: string[];
+  /** Files come only from the file picker and are not remembered as connected sources. */
+  uploadOnly?: boolean;
 };
 export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string };
 export interface BusinessToolAPI {
@@ -21,3 +23,5 @@ export interface BusinessToolAPI {
   openBusinessArtifact(id: string): Promise<void>;
   saveBusinessArtifact(id: string): Promise<boolean>;
 }
+/** Chat text sent by the "edit previous result" button: reopens the form instead of re-running with this text as a revision. */
+export const REVISE_REQUEST_TEXT = "이전 엑셀 결과를 수정하고 싶어. 추가 요청을 입력할게.";

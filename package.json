@@ -114,6 +114,7 @@
     "exceljs": "4.4.0",
     "jszip": "3.10.1",
     "kordoc": "^4.18.3",
+    "quickjs-emscripten": "0.32.0",
     "react": "^19.0.0",
     "react-device-detect": "^2.2.3",
     "react-dom": "^19.0.0",
@@ -126,6 +127,7 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "sharp": "^0.35.0",
+    "ssf": "0.11.2",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -133,6 +135,7 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
+    "@types/jsdom": "21.1.7",
     "@types/node": "^22.15.2",
     "@types/react": "^19.1.4",
     "@types/react-dom": "^19.1.5",

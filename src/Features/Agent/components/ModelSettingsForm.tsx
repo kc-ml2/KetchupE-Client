@@ -1,48 +1,29 @@
 import { useEffect, useState } from "react";
 import type { KetchupEAgentAPI } from "@app-types/Agent.types";
 
+/** Development-only model picker; the gateway and key come from the logged-in account. */
 const ModelSettingsForm = ({
   api,
 }: {
   api: KetchupEAgentAPI;
 }): React.JSX.Element => {
-  const [baseURL, setBaseURL] = useState("");
   const [modelAlias, setModelAlias] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [hasApiKey, setHasApiKey] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    void api.getModelSettings().then((settings) => {
-      setBaseURL(settings.baseURL);
-      setModelAlias(settings.modelAlias);
-      setHasApiKey(settings.hasApiKey);
-      if (settings.hasApiKey)
-        void api
-          .listModels()
-          .then(setModels)
-          .catch(() => setModels([]));
-    });
+    void api.getModelSettings().then((settings) => setModelAlias(settings.modelAlias));
+    void api
+      .listModels()
+      .then(setModels)
+      .catch((cause) => setMessage(cause instanceof Error ? cause.message : String(cause)));
   }, [api]);
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     try {
-      await api.setModelSettings({
-        baseURL,
-        modelAlias,
-        apiKey: apiKey || undefined,
-      });
-      setApiKey("");
-      setHasApiKey(hasApiKey || apiKey.length > 0);
-      const result = await api.testModelConnection();
-      setModels(result.models);
-      setMessage(
-        result.ok
-          ? `연결 확인. 사용 모델: ${result.resolvedAlias}`
-          : "저장했지만 모델 목록을 받지 못했습니다. 도메인과 키를 확인하세요.",
-      );
+      await api.setModelSettings({ modelAlias });
+      setMessage(`사용 모델: ${modelAlias}`);
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : String(cause));
     }
@@ -53,48 +34,31 @@ const ModelSettingsForm = ({
   return (
     <form onSubmit={save} className="flex flex-col gap-3 text-sm">
       <label className="flex flex-col gap-1">
-        <span className="text-xs text-[#71717A]">LiteLLM 도메인</span>
-        <input value={baseURL} onChange={(event) => setBaseURL(event.target.value)} placeholder="centinels.ml2-alpha.com" className={field} />
-      </label>
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[#71717A]">API key {hasApiKey ? "(저장됨, 변경 시에만 입력)" : "(필수)"}</span>
-        <input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} className={field} autoComplete="off" />
-      </label>
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[#71717A]">
-          모델 (기본: loki)
-        </span>
-        {models.length ? (
-          <select
-            value={modelAlias}
-            onChange={(event) => setModelAlias(event.target.value)}
-            className={field}
-          >
-            {models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <input
-            value={modelAlias}
-            onChange={(event) => setModelAlias(event.target.value)}
-            placeholder="loki"
-            className={field}
-          />
-        )}
+        <span className="text-xs text-[#71717A]">모델 (LiteLLM에 연결된 모델)</span>
+        <select
+          value={modelAlias}
+          onChange={(event) => setModelAlias(event.target.value)}
+          className={field}
+          disabled={!models.length}
+        >
+          {!models.includes(modelAlias) && <option value={modelAlias}>{modelAlias || "선택"}</option>}
+          {models.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
       </label>
       <button
         type="submit"
-        className="self-start px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#0066FF] text-white"
+        disabled={!modelAlias}
+        className="self-start px-3 py-1.5 rounded-lg text-sm font-semibold bg-[#0066FF] text-white disabled:opacity-50"
       >
-        저장 및 연결 확인
+        적용
       </button>
       {message && <p className="text-xs text-[#71717A]">{message}</p>}
       <p className="text-[11px] text-[#71717A]">
-        키는 OS 보안 저장소로 암호화되며 화면, trace, export에 노출되지
-        않습니다.
+        개발 모드 전용입니다. 앱을 다시 시작하면 기본 모델로 돌아갑니다.
       </p>
     </form>
   );

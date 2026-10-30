@@ -150,7 +150,7 @@ describe("telemetry", () => {
   it("never exports MARU content, even in internal mode", () => {
     const built = buildRunTrace(db, maruRunId, { userId: "u", identityKey: "key", contentMode: "internal_full", environment: "test", tenantId: "test", resource: {} });
     const payload = JSON.stringify(built!.payload);
-    expect(payload).toContain("[MARU_RESULT_OMITTED]");
+    expect(payload).toContain("[TOOL_RESULT_OMITTED]");
     expect(payload).toContain("browse_storage");
     expect(payload).not.toContain("공유문서 비밀");
     expect(payload).not.toContain("MARU 비밀 답변");

@@ -39,6 +39,13 @@ export function inactiveCollections(db: DatabaseSync, workspaceId: string): Set<
   return new Set(rows.map((row) => row.collection));
 }
 
+/** MARU storages are stored as `maru:<storage id>` rows and, like local folders, default to on. */
+export const MARU_STORAGE_PREFIX = "maru:";
+export function excludedMaruStorages(db: DatabaseSync, workspaceId: string): string[] {
+  const rows = db.prepare("SELECT collection FROM workspace_collections WHERE workspace_id = ? AND active = 0 AND collection LIKE 'maru:%'").all(workspaceId) as Array<{ collection: string }>;
+  return rows.map((row) => row.collection.slice(MARU_STORAGE_PREFIX.length));
+}
+
 function toThread(row: Record<string, unknown>): ThreadSummary {
   return {
     id: String(row.id),

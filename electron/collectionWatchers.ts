@@ -90,6 +90,7 @@ export class CollectionWatchers {
   }
 
   private openWatcher(entry: Entry): void {
+    if (this.entries.get(entry.collection.name) !== entry) return;
     entry.watcher?.close();
     try {
       // Symlinks are not followed; app data lives under userData, outside any collection root.

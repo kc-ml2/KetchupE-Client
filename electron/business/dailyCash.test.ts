@@ -10,7 +10,7 @@ import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
-import { Money } from "./dailyCash/values.ts";
+import { Money, previousBusinessDay } from "./dailyCash/values.ts";
 import type { BusinessTool } from "./contracts.ts";
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 async function setup() {
@@ -82,15 +82,11 @@ it("carries sub-won interest fractions forward and reconciles them against whole
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
   expect(s.getCell("D10").value).toBe(100000.27878); expect(s.getCell("H10").result).toBe(109000.27878);
 }, artifactTestTimeout);
-it("prefills today, the previous report, the weekly plan and the report-date KC file from connected folders", () => {
-  const wf = (name: string) => ({ sourceId: "s", relativePath: name, name });
-  const files = ["261013_일일자금일보 .xlsx", "261014_일일자금일보.xlsx", "일일자금일보 샘플.xlsx", "일일자금일보 업무흐름.xlsx", "주간자금계획서_1002.xlsx", "주간자금계획서_1009.xlsx", "주간자금계획서_1016.xlsx", "261014_자금현황표[KC].xlsx", "261013_자금현황표[KC].xlsx"].map(wf);
-  const suggested = dailyCashTool.suggest!(files, "2026-10-15");
-  expect(suggested.values.workDate).toBe("2026-10-15");
-  expect(suggested.files.previousReport.map((f) => f.name)).toEqual(["261013_일일자금일보 .xlsx"]);
-  expect(suggested.files.weeklyPlans.map((f) => f.name)).toEqual(["주간자금계획서_1009.xlsx"]);
-  expect(suggested.files.cashStatus.map((f) => f.name)).toEqual(["261014_자금현황표[KC].xlsx"]);
-  expect(dailyCashTool.suggest!(files, "2026-10-19").files.weeklyPlans.map((f) => f.name)).toEqual(["주간자금계획서_1016.xlsx"]);
+it("defaults the work date to today and computes the report date as the previous business day", () => {
+  expect(dailyCashTool.defaults!("2026-10-15")).toEqual({ workDate: "2026-10-15" });
+  expect(["2026-10-19", "2026-10-18", "2026-10-17", "2026-10-14"].map(previousBusinessDay)).toEqual(["2026-10-16", "2026-10-16", "2026-10-16", "2026-10-13"]);
+  // 공휴일: 한글날(10/9 금) 다음 월요일은 10/8, 추석 연휴(9/24~26) 다음 월요일은 9/23, 대체공휴일(10/5 월) 다음 날은 10/2.
+  expect(["2026-10-12", "2026-09-28", "2026-10-06"].map(previousBusinessDay)).toEqual(["2026-10-08", "2026-09-23", "2026-10-02"]);
 });
 it("reads a truly empty cell as 0 but still asks for a formula without a saved result", async () => {
   const { input, books, file } = await setup(); const s = books.report.getWorksheet("261012")!;

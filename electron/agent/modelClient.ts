@@ -40,18 +40,19 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
-  if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM API key가 거부되었습니다.");
+  if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요.");
   if (!response.ok) throw new AgentError("MODEL_PROTOCOL", `GET /models failed: ${response.status}`);
   const body = (await response.json()) as { data?: Array<{ id?: string }> };
   return (body.data ?? []).map((item) => item.id ?? "").filter(Boolean);
 }
 
-/** Explicit alias wins; otherwise the first model the gateway exposes. */
+/** Explicit alias wins; otherwise loki when the gateway exposes it, else the first exposed model. */
 export async function resolveModelAlias(baseURL: string, apiKey: string, explicit?: string): Promise<string> {
   if (explicit?.trim()) return explicit.trim();
-  const [first] = await listModels(baseURL, apiKey);
-  if (!first) throw new AgentError("MODEL_PROTOCOL", "LiteLLM이 노출하는 모델이 없습니다.");
-  return first;
+  const models = await listModels(baseURL, apiKey);
+  const alias = models.includes(DEFAULT_LITELLM_MODEL_ALIAS) ? DEFAULT_LITELLM_MODEL_ALIAS : models[0];
+  if (!alias) throw new AgentError("MODEL_PROTOCOL", "LiteLLM이 노출하는 모델이 없습니다.");
+  return alias;
 }
 
 export interface ModelClient {
@@ -63,10 +64,10 @@ export interface ModelClient {
   verify(input: VerifyInput, profile: PolicyProfile, signal: AbortSignal): Promise<VerificationResult>;
   streamAnswer(input: AnswerInput, profile: PolicyProfile, signal: AbortSignal): AsyncIterable<AnswerEvent>;
   /** Plain text completion (canvas classify/draft/edit). */
-  complete(input: { system?: string; prompt: string; purpose?: ModelCallPurpose }, profile: PolicyProfile, signal: AbortSignal): Promise<string>;
+  complete(input: { system?: string; prompt: string; purpose?: ModelCallPurpose; maxOutputTokens?: number }, profile: PolicyProfile, signal: AbortSignal): Promise<string>;
 }
 
-export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas";
+export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas" | "excel";
 
 export type ModelCallInfo = {
   purpose: ModelCallPurpose;
@@ -101,10 +102,14 @@ export function toAgentError(error: unknown): AgentError {
       const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
       return new AgentError("MODEL_PROTOCOL", `모델 응답 스트림이 중간에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
     }
+    if (error.statusCode === undefined) {
+      const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
+      return new AgentError("MODEL_PROTOCOL", `모델 서버 연결이 응답 전에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
+    }
     const code: AgentErrorCode = error.statusCode === 401 || error.statusCode === 403 ? "MODEL_AUTH" : "MODEL_PROTOCOL";
-    return new AgentError(code, `${error.statusCode ?? ""} ${error.message}`.trim());
+    return new AgentError(code, error.statusCode === 401 ? "LiteLLM 인증이 만료되었거나 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요." : error.statusCode === 403 ? "이 모델에 접근할 권한이 없습니다. 운영자에게 확인해 주세요." : `모델 요청이 실패했습니다 (HTTP ${error.statusCode ?? "unknown"}).`);
   }
-  return new AgentError("MODEL_PROTOCOL", error instanceof Error ? error.message : String(error));
+  return new AgentError("MODEL_PROTOCOL", "모델에 연결하지 못했거나 응답을 처리하지 못했습니다.");
 }
 
 /** Some gateways answer a forced tool call with JSON text instead. Accept that once. */
@@ -119,6 +124,26 @@ function extractJsonObject(text: string): unknown {
   }
 }
 
+/**
+ * The gateway can close a pooled keep-alive socket right after a response; the next request then fails instantly with
+ * no HTTP status. Resend once on a fresh connection. Any HTTP response (including 5xx) is returned as is, never retried.
+ */
+export async function fetchWithConnectionRetry(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    if (init?.signal?.aborted || !(error instanceof TypeError)) throw error;
+    return fetch(input, init);
+  }
+}
+
+const PROVIDER_NAME = "ketchupe-litellm";
+/**
+ * Turns off thinking on the vLLM-served Qwen behind LiteLLM (passed through as `chat_template_kwargs`).
+ * With thinking on, a one-sentence answer took 17s/563 tokens vs 1s/34 off, and long answers hit MODEL_TIMEOUT.
+ */
+const NO_THINKING = { [PROVIDER_NAME]: { chat_template_kwargs: { enable_thinking: false } } };
+
 export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient {
   const self: ModelClient = {} as ModelClient;
   const report = (info: ModelCallInfo) => {
@@ -126,10 +151,11 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     options.onCall?.(info);
   };
   const provider = createOpenAICompatible({
-    name: "ketchupe-litellm",
+    name: PROVIDER_NAME,
     baseURL: normalizeBaseURL(options.baseURL),
     apiKey: options.apiKey,
     includeUsage: true,
+    fetch: fetchWithConnectionRetry,
   });
 
   async function structuredCall<T>(
@@ -156,8 +182,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
         maxRetries: 0,
         tools: { [toolName]: tool({ description, inputSchema: schema }) },
         toolChoice: { type: "tool", toolName },
-        // Gateway reasoning models default to xhigh; a short structured decision took ~48s at that effort.
-        providerOptions: { openaiCompatible: { reasoningEffort: "low" } },
+        providerOptions: NO_THINKING,
         onLanguageModelCallEnd: ({ usage, finishReason }) => report({
           purpose,
           modelAlias: profile.modelAlias,
@@ -206,8 +231,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
       const startedAt = Date.now();
       try {
         // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
-        // medium, not the gateway's xhigh default: a full contract draft at xhigh takes several minutes.
-        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, abortSignal: signal, maxRetries: 0, providerOptions: { openaiCompatible: { reasoningEffort: "medium" } }, onError: () => undefined });
+        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, maxOutputTokens: input.maxOutputTokens, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
         let text = "";
         for await (const part of result.fullStream) {
           if (part.type === "text-delta") text += part.text;
@@ -230,6 +254,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
           prompt: messages.prompt,
           abortSignal: signal,
           maxRetries: 0,
+          providerOptions: NO_THINKING,
         });
         let ttftMs: number | undefined;
         for await (const text of result.textStream) {

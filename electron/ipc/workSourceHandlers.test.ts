@@ -37,7 +37,7 @@ beforeEach(async () => {
     return job.action.kind !== "extract" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.kind === "inspect" ? job.action.headerRow : undefined) : extractRows(book, job.fingerprint, job.action.mapping);
   });
   flow = new WorkSourcesFlow(db, () => undefined);
-  registerWorkSourceHandlers({ db, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
+  registerWorkSourceHandlers({ db, assertSourcePaths: async () => undefined, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
 });
 afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); mock.networkPath = false; await rm(folder, { recursive: true, force: true }); });
 
@@ -142,4 +142,10 @@ it("returns only the files chosen in the dialog, even when others are already co
   mock.paths = [join(folder, "source.xlsx"), other];
   expect((await invoke("pickFiles", true)).map((file: { name: string }) => file.name)).toEqual(["source.xlsx", "other.xlsx"]);
   expect(invoke("listSources")).toHaveLength(2);
+});
+it("uploads picked files for this session without registering them as connected sources", async () => {
+  const [file] = await invoke("pickFiles", false, true);
+  expect(file).toMatchObject({ name: "source.xlsx", relativePath: "", sourceId: expect.stringMatching(/^upload:/) });
+  expect(invoke("listSources")).toHaveLength(0);
+  expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료" });
 });

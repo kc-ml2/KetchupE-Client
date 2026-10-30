@@ -130,6 +130,8 @@ function anchorContext(refs: CanvasReference[], anchorOnly: boolean): string {
 export class CanvasFlow {
   private readonly options: CanvasFlowOptions;
   private readonly controllers = new Map<string, AbortController>();
+  private stopped = false;
+  private readonly pending = new Set<Promise<void>>();
   private readonly seqs = new Map<string, number>();
 
   constructor(options: CanvasFlowOptions) {
@@ -265,6 +267,12 @@ export class CanvasFlow {
     return { runId, done };
   }
 
+  async stop(): Promise<void> {
+    this.stopped = true;
+    for (const controller of this.controllers.values()) controller.abort();
+    await Promise.allSettled([...this.pending]);
+  }
+
   cancel(runId: string): void {
     const controller = this.controllers.get(runId);
     if (controller) {
@@ -295,9 +303,10 @@ export class CanvasFlow {
   // ---- internals ----
 
   private guard(runId: string, work: (signal: AbortSignal) => Promise<void>): Promise<void> {
+    if (this.stopped) throw new AgentError("CANCELLED", "signed out");
     const controller = new AbortController();
     this.controllers.set(runId, controller);
-    return work(controller.signal)
+    const done = work(controller.signal)
       .catch((error: unknown) => {
         const failure = error instanceof AgentError ? error : new AgentError("INTERNAL", error instanceof Error ? error.message : String(error));
         const status: RunStatus = failure.code === "CANCELLED" ? "cancelled" : "failed";
@@ -306,7 +315,9 @@ export class CanvasFlow {
         this.emit(runId, "failed", { code: failure.code, message: failure.message });
         this.settle(runId, status);
       })
-      .finally(() => this.controllers.delete(runId));
+      .finally(() => { this.controllers.delete(runId); this.pending.delete(done); });
+    this.pending.add(done);
+    return done;
   }
 
   private settle(runId: string, status: RunStatus): void {

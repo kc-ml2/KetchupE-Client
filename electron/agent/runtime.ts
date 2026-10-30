@@ -1,13 +1,22 @@
+import { createExcelTool } from "../excel/tool.ts";
+import { createExcelWorker, executeExcelJob } from "../excel/workerClient.ts";
+import type { ExcelJob } from "../excel/workerClient.ts";
+import type { ExcelJobs } from "../excel/tool.ts";
+import { printReportPdf } from "../excel/pdf.ts";
 import { BusinessFlow } from "../business/flow.ts";
 import { businessTools } from "../business/registry.ts";
 import { executeBusinessJob } from "../business/workerClient.ts";
 import { readWorkbookJob } from "../work/reader.ts";
 import { createHash } from "node:crypto";
+import type { AccountCredentials } from "../auth/storage.ts";
+import { accountId } from "../auth/storage.ts";
+import { assertPublicSources } from "../auth/sourcePaths.ts";
+import { AgentError } from "./contracts.ts";
 import { dirname } from "node:path";
 import { WorkSourcesFlow, WORK_SOURCES_ROUTE } from "./workSourcesFlow.ts";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentStreamEvent, CollectionSummary } from "../../src/app-types/Agent.types.ts";
+import type { AgentStreamEvent, CollectionSummary, MaruStorageSummary } from "../../src/app-types/Agent.types.ts";
 import { CollectionWatchers } from "../collectionWatchers.ts";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { PIPELINE_PROFILE, type Collection } from "../tomato/tomato.ts";
@@ -21,12 +30,15 @@ import { tomatoTools } from "./tools.ts";
 import { settingsBackedModelClient } from "./liveModelClient.ts";
 import { listModels, resolveModelAlias } from "./modelClient.ts";
 import { ANSWER_PROMPT_VERSION, assignVariant, POLICY_VARIANTS } from "./policy.ts";
-import { loadModelSettings, loadTelemetrySettings, saveModelSettings, type ModelSettings } from "./settings.ts";
+import { accountModelSettings, loadTelemetrySettings, type ModelSettings } from "./settings.ts";
 import { interactionScore, LangfuseExporter, loadInstallId } from "./telemetry.ts";
 import type { InteractionKind } from "../../src/app-types/Agent.types.ts";
-import { ensureWorkspace, inactiveCollections, recentMessages, getRunAction } from "./store.ts";
-import { DEFAULT_MARU_ENDPOINT, MaruClient } from "./maru.ts";
+import { excludedMaruStorages, ensureWorkspace, inactiveCollections, recentMessages, getRunAction } from "./store.ts";
+import { MaruClient } from "./maru.ts";
+import { MaruAccess } from "./maruAccess.ts";
 import { DEFAULT_TROLLEY_ENDPOINT, TrolleyClient } from "./trolley.ts";
+import { McpConnection, type McpServerConfig } from "./mcp.ts";
+import { ToolRegistry } from "./toolRegistry.ts";
 
 export const DEFAULT_RETRIEVAL = { mode: "hybrid", topK: 8 } as const;
 
@@ -44,36 +56,52 @@ export type AgentRuntime = {
   collections: () => Collection[];
   refreshCollections: () => Promise<Collection[]>;
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
+  /** MARU storages the account can read, with this workspace's on/off state (default on). */
+  maruStorages: (workspaceId: string) => Promise<MaruStorageSummary[]>;
   settings: () => ModelSettings;
-  updateSettings: (settings: ModelSettings) => void;
+  /** Development builds may switch the generation model; credentials always come from the account. */
+  modelSelectable: boolean;
+  updateSettings: (settings: { modelAlias: string }) => void;
   listModels: () => Promise<string[]>;
   resolvedModelAlias: () => Promise<string>;
   telemetry: LangfuseExporter;
   variant: string;
   variants: string[];
   recordInteractionScore: (runId: string, kind: InteractionKind) => void;
+  quiesce: () => void;
+  authorizeThread: (threadId: string) => Promise<void>;
+  sourcePath: (path: string) => Promise<string>;
+  assertSourcePaths: (paths: string[]) => Promise<void>;
   stop: () => Promise<void>;
 };
 
 export type RuntimeOptions = {
+  account: AccountCredentials;
+  privateRoot: string;
   userData: string;
   workerPath: string;
   appVersion: string;
   emitAgentEvent: (event: AgentStreamEvent) => void;
   emitCollectionsChanged: () => void;
+  modelSelectable?: boolean;
+  /** Account-scoped connections supplied by the application; every allowed tool must be reviewed as read-only. */
+  readOnlyMcpServers?: Array<McpServerConfig & { allowedTools: readonly string[] }>;
 };
 
 export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   const db = openAgentDb(join(options.userData, "agent.sqlite"));
   ensureWorkspace(db);
   const tomato = new TomatoClient(options.workerPath, join(options.userData, "tomato"));
-  let current = loadModelSettings(options.userData);
+  const lifetime = new AbortController();
+  let stopped = false;
+  let draining: Promise<unknown> | undefined;
+  let current = accountModelSettings(options.account.keys);
   const telemetrySettings = loadTelemetrySettings();
   const installId = loadInstallId(options.userData);
   // Variant is fixed for the process lifetime so every run in a session lands in one arm.
   const variant = assignVariant(installId, telemetrySettings.variant);
   const policyProfile = POLICY_VARIANTS[variant];
-  const telemetry = new LangfuseExporter(db, () => telemetrySettings, { installId, appVersion: options.appVersion, os: process.platform });
+  const telemetry = new LangfuseExporter(db, () => telemetrySettings, { installId, accountId: accountId(options.account.email), appVersion: options.appVersion, os: process.platform });
   let collections: Collection[] = [];
   let aliasCache: { key: string; alias: string } | undefined;
   const resolvedModelAlias = async () => {
@@ -92,32 +120,48 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     }
   };
   const watchers = new CollectionWatchers(tomato, () => options.emitCollectionsChanged(), (result) => {
+    if (stopped) return;
     telemetry.indexSync(result);
     void refreshFingerprint(result.collection);
   });
   const harnessModel = settingsBackedModelClient(() => current, resolvedModelAlias);
   const activeCollections = (workspaceId: string) => {
     const inactive = inactiveCollections(db, workspaceId);
-    return collections.map((collection) => collection.name).filter((name) => !inactive.has(name));
+    return collections.map((collection) => collection.name).filter((name) => !name.startsWith("maru_") && !inactive.has(name));
   };
   const onRunSettled = (runId: string) => telemetry.exportRun(db, runId);
-  const maruToken = process.env.MARU_API_TOKEN?.trim();
+  const maruToken = options.account.keys.maru.api_key;
   const trolleyKey = process.env.TROLLEY_API_KEY?.trim();
   const trolley = trolleyKey ? new TrolleyClient(
     trolleyKey,
     options.appVersion,
     new URL(process.env.TROLLEY_MCP_ENDPOINT?.trim() || DEFAULT_TROLLEY_ENDPOINT.href),
   ) : undefined;
-  const maru = maruToken ? new MaruClient(
+  const maru = new MaruClient(
     maruToken,
     options.appVersion,
     join(options.userData, "mcp-cache", "maru"),
     tomato,
-    new URL(process.env.MARU_MCP_ENDPOINT?.trim() || DEFAULT_MARU_ENDPOINT.href),
-  ) : undefined;
+    new URL(options.account.keys.maru.base_url),
+    (document, localPath) => {
+      lifetime.signal.throwIfAborted();
+      db.prepare("UPDATE maru_documents SET local_path = ? WHERE ref_id = ?").run(localPath, document.refId);
+    },
+  );
+  const maruAccess = new MaruAccess(db, maru, join(options.userData, "mcp-cache", "maru"));
+  const accessSignal = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(30_000)]);
+  const authorizeThread = (threadId: string) => maruAccess.authorizeThread(threadId, accessSignal());
+  const toolRegistry = new ToolRegistry();
+  const additionalServers = (options.readOnlyMcpServers ?? []).map((config) => ({ config, connection: new McpConnection(config) }));
+  const toolsReady = Promise.all(additionalServers.map(async ({ config, connection }) => {
+    try { await toolRegistry.registerMcp(connection, config.allowedTools, accessSignal()); }
+    catch { console.warn(`[agent] MCP tool discovery unavailable: ${config.id}`); }
+  }));
   const harness = new Harness({
     db,
     model: harnessModel,
+    toolRegistry,
+    toolsReady,
     tools: {
       ...tomatoTools(tomato, DEFAULT_RETRIEVAL),
       ...(maru ? { maru } : {}),
@@ -129,6 +173,9 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       answer: { modelAlias: current.modelAlias || "gateway-default", promptVersion: ANSWER_PROMPT_VERSION },
     },
     activeCollections,
+    excludedMaruStorages: (workspaceId) => excludedMaruStorages(db, workspaceId),
+    authorizeContext: (threadId, signal) => maruAccess.authorizeThread(threadId, AbortSignal.any([signal, accessSignal()])),
+    onExternalDocuments: (threadId, documents) => maruAccess.record(threadId, documents),
     emit: options.emitAgentEvent,
     runMetadata: () => ({ variant, appVersion: options.appVersion, installId, corpusFingerprints: { ...corpusFingerprints } }),
     onRunSettled,
@@ -151,7 +198,19 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   });
 
   const workSourcesFlow = new WorkSourcesFlow(db, options.emitAgentEvent);
-  const businessFlow = new BusinessFlow(db, businessTools.map((tool) => ({ ...tool, execute: ({ signal, ...input }) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input }, signal) })), join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
+  const excelWorkerPath = join(dirname(options.workerPath), "excel.worker.js");
+  const excelJobs = (run: <J extends ExcelJob>(job: J, signal: AbortSignal) => Promise<unknown>): ExcelJobs => ({
+    profile: (bytes, signal, query, inspection) => run({ kind: "profile", bytes, query, inspection }, signal) as ReturnType<ExcelJobs["profile"]>,
+    analyze: (files, plan, signal) => run({ kind: "analyze", files, plan }, signal) as ReturnType<ExcelJobs["analyze"]>,
+    export: (report, format, signal) => run({ kind: "export", report, format }, signal) as ReturnType<ExcelJobs["export"]>,
+  });
+  const excelTool = createExcelTool({
+    complete: (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "excel", maxOutputTokens: 10000 }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal),
+    ...excelJobs((job, signal) => executeExcelJob(excelWorkerPath, job, signal)),
+    session: () => { const worker = createExcelWorker(excelWorkerPath); return { ...excelJobs(worker.run), close: worker.close }; },
+    pdf: printReportPdf,
+  });
+  const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
     await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
   });
   const workflows = new WorkflowDispatcher(db, [
@@ -182,13 +241,13 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   ], (text, routes, input) => routeMessage(
     { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" },
     text,
-    AbortSignal.timeout(policyProfile.runTimeoutMs),
+    AbortSignal.any([lifetime.signal, AbortSignal.timeout(policyProfile.runTimeoutMs)]),
     routes,
     { recentUserMessages: recentMessages(db, input.threadId, 6).filter((message) => message.role === "user").map((message) => message.content.slice(0, 2000)) },
-  ), onRunSettled);
+  ).then((route) => { lifetime.signal.throwIfAborted(); return route; }), onRunSettled);
 
   const refreshCollections = async () => {
-    collections = await tomato.call("listCollections", []);
+    collections = (await tomato.call("listCollections", [])).filter((collection) => !collection.name.startsWith("maru_"));
     const names = new Set(collections.map((collection) => collection.name));
     for (const name of Object.keys(corpusFingerprints)) if (!names.has(name)) delete corpusFingerprints[name];
     await Promise.all(collections.filter((collection) => !corpusFingerprints[collection.name]).map((collection) => refreshFingerprint(collection.name)));
@@ -197,10 +256,19 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
 
   void refreshCollections()
     .then((list) => {
+      if (stopped) return;
       watchers.start(list);
       for (const collection of list) watchers.requestSync(collection.name);
     })
-    .catch((error) => console.warn("[agent] tomato unavailable at startup:", error));
+    .catch(() => { if (!stopped) console.warn("[agent] tomato unavailable at startup"); });
+
+  const quiesce = () => {
+    if (stopped) return;
+    stopped = true;
+    lifetime.abort();
+    watchers.stop();
+    draining = Promise.allSettled([tomato.stop(), harness.stop(), canvas.stop(), businessFlow.stop()]);
+  };
 
   return {
     db,
@@ -209,16 +277,16 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     canvas,
     workSourcesFlow,
     businessFlow,
-    startMessage: (input) => workflows.start(input),
+    startMessage: async (input) => { await authorizeThread(input.threadId); lifetime.signal.throwIfAborted(); return workflows.start(input); },
     resumeRun: (runId, text) => { workflows.resume(runId, text); },
     cancelRun: (runId) => workflows.cancel(runId),
     collections: () => collections,
     refreshCollections,
     settings: () => current,
-    updateSettings: (settings) => {
-      saveModelSettings(options.userData, settings);
-      current = loadModelSettings(options.userData);
-      aliasCache = undefined;
+    modelSelectable: Boolean(options.modelSelectable),
+    updateSettings: ({ modelAlias }) => {
+      if (!options.modelSelectable) throw new AgentError("MODEL_AUTH", "연결 정보는 로그인 계정에서 관리합니다.");
+      current = { ...current, modelAlias: modelAlias.trim() };
     },
     listModels: () => (current.apiKey ? listModels(current.baseURL, current.apiKey) : Promise.resolve([])),
     resolvedModelAlias,
@@ -229,7 +297,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     async collectionSummaries(workspaceId) {
       const inactive = inactiveCollections(db, workspaceId);
       const status = await tomato.call("status", []);
-      return status.map((item) => {
+      return status.filter((item) => !item.name.startsWith("maru_")).map((item) => {
         const state = watchers.state(item.name);
         return {
           name: item.name,
@@ -243,12 +311,21 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
         };
       });
     },
+    async maruStorages(workspaceId) {
+      const excluded = new Set(excludedMaruStorages(db, workspaceId));
+      return (await maru.listStorages(accessSignal())).map((storage) => ({ ...storage, active: !excluded.has(storage.storageId) }));
+    },
+    quiesce,
+    authorizeThread,
+    sourcePath: (path) => maruAccess.sourcePath(path, accessSignal()),
+    assertSourcePaths: (paths) => assertPublicSources(options.privateRoot, paths),
     stop: async () => {
-      await businessFlow.stop();
-      watchers.stop();
+      quiesce();
+      await draining;
+      await toolsReady;
+      await Promise.all(additionalServers.map(({ connection }) => connection.close()));
       await maru?.close();
       await trolley?.close();
-      tomato.stop();
       await telemetry.stop();
       db.close();
     },

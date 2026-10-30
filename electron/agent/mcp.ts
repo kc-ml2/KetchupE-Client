@@ -1,6 +1,8 @@
 import {
   Client,
   StreamableHTTPClientTransport,
+  UnauthorizedError,
+  InsufficientScopeError,
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/client";
@@ -38,6 +40,13 @@ export class McpConnection {
 
   constructor(private readonly config: McpServerConfig) {}
 
+  get id(): string { return this.config.id; }
+
+  async listTools(signal: AbortSignal): Promise<Tool[]> {
+    await this.connect(signal);
+    return [...this.tools.values()].filter((tool) => !this.config.allowedTools || this.config.allowedTools.includes(tool.name));
+  }
+
   async callTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<CallToolResult> {
     if (this.config.allowedTools && !this.config.allowedTools.includes(name)) {
       throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} tool is not allowed: ${name}`);
@@ -51,6 +60,8 @@ export class McpConnection {
       if (signal.aborted) throw new AgentError("CANCELLED", "cancelled");
       if (error instanceof AgentError) throw error;
       await this.reset();
+      if (error instanceof UnauthorizedError) throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} 인증이 거부되었습니다. 로그아웃 후 다시 인증해 주세요.`);
+      if (error instanceof InsufficientScopeError) throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} 접근 권한이 없습니다. 운영자에게 확인해 주세요.`);
       throw new AgentError("TOOL_UNAVAILABLE", `${this.config.id} ${name} call failed`);
     }
   }
@@ -78,8 +89,17 @@ export class McpConnection {
     });
     try {
       await client.connect(transport, { signal });
-      const listed = await client.listTools(undefined, { signal, cacheMode: "refresh" });
-      this.tools = new Map(listed.tools.map((tool) => [tool.name, tool]));
+      const tools = new Map<string, Tool>();
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const listed = await client.listTools(cursor ? { cursor } : undefined, { signal, cacheMode: "refresh" });
+        for (const tool of listed.tools) tools.set(tool.name, tool);
+        cursor = listed.nextCursor;
+        if (cursor && cursors.has(cursor)) throw new AgentError("TOOL_UNAVAILABLE", "MCP returned a repeated tool cursor");
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
+      this.tools = tools;
       this.transport = transport;
       return client;
     } catch (error) {

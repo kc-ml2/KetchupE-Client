@@ -1,4 +1,5 @@
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { z } from "zod";
 import type { ExtractionPreview, SourceMapping, SourceValueType, WorkbookOverview } from "../../src/app-types/WorkSource.types.ts";
 
@@ -15,9 +16,43 @@ export const mappingSchema = z.object({
   if (value.filters.some((filter) => !fields.has(filter.field))) ctx.addIssue({ code: "custom", message: "행 조건의 항목을 먼저 연결해 주세요." });
 });
 
+const SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+/**
+ * Rewrites valid OOXML that ExcelJS misreads, without touching the source file:
+ * - SpreadsheetML bound to a prefix (`<x:workbook>`, e.g. .NET OpenXML SDK); ExcelJS only reads unprefixed tags.
+ * - ISO date cells (`t="d"`); ExcelJS parses "2026-10-19T09:00Z" as the number 2026. They become Excel date serials.
+ */
+async function normalizeForExcelJS(bytes: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(bytes);
+  let changed = false, date1904 = false;
+  // workbook.xml first so the date system is known before worksheets are converted.
+  const files = Object.values(zip.files).filter(file => !file.dir && file.name.endsWith(".xml")).sort((a, b) => Number(b.name === "xl/workbook.xml") - Number(a.name === "xl/workbook.xml"));
+  for (const file of files) {
+    const original = await file.async("string");
+    let xml = original;
+    const prefix = xml.match(new RegExp(`xmlns:([A-Za-z_][\\w.-]*)="${SPREADSHEET_NS}"`))?.[1];
+    // A default namespace already in use would collide with the unprefixed names.
+    if (prefix && !/\sxmlns="/.test(xml)) xml = xml
+      .replace(new RegExp(`<(/?)${prefix}:`, "g"), "<$1")
+      .replace(new RegExp(`xmlns:${prefix}="${SPREADSHEET_NS}"`, "g"), `xmlns="${SPREADSHEET_NS}"`);
+    if (file.name === "xl/workbook.xml") date1904 = /\sdate1904="(?:1|true)"/.test(xml);
+    if (file.name.startsWith("xl/worksheets/")) xml = xml.replace(/<c\b([^>]*?)\st="d"([^>]*?)(?<!\/)>([\s\S]*?)<\/c>/g, (cell, before: string, after: string, body: string) => {
+      const iso = body.match(/<v>([^<]*)<\/v>/)?.[1]?.trim();
+      // Excel stores wall-clock time; read an ISO value without offset as UTC so the serial keeps its clock time.
+      const time = iso ? Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) || !iso.includes("T") ? iso : `${iso}Z`) : NaN;
+      if (!Number.isFinite(time)) return cell;
+      const serial = time / 86400000 + 25569 - (date1904 ? 1462 : 0);
+      return `<c${before}${after}>${body.replace(/<v>[^<]*<\/v>/, `<v>${serial}</v>`)}</c>`;
+    });
+    if (xml !== original) { zip.file(file.name, xml); changed = true; }
+  }
+  return changed ? zip.generateAsync({ type: "uint8array" }) : bytes;
+}
+
 export async function loadWorkbook(bytes: Uint8Array): Promise<ExcelJS.Workbook> {
   const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(Buffer.from(bytes) as unknown as ExcelJS.Buffer);
+  await workbook.xlsx.load(Buffer.from(await normalizeForExcelJS(bytes)) as unknown as ExcelJS.Buffer);
   // Historical sheets and distant formatted cells are valid; file size and worker budgets bound parsing.
   return workbook;
 }

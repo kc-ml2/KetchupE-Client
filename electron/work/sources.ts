@@ -7,6 +7,8 @@ import type { WorkFile, WorkSource } from "../../src/app-types/WorkSource.types.
 import { realpath } from "./paths.ts";
 
 export const MAX_WORKBOOK_BYTES = 20 * 1024 * 1024;
+// Uploaded files live only in this process for the account's database: never persisted, listed or offered as connected sources.
+const uploads = new WeakMap<DatabaseSync, Map<string, WorkSource>>();
 export class WorkSources {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -32,10 +34,25 @@ export class WorkSources {
     return this.list();
   }
 
+  /** Registers dialog-picked XLSX files for this app session only; the returned references stop resolving after restart. */
+  async upload(paths: string[]): Promise<WorkFile[]> {
+    let session = uploads.get(this.db);
+    if (!session) uploads.set(this.db, session = new Map());
+    const picked = await Promise.all(paths.map(async (path) => {
+      const canonical = await realpath(path);
+      if (!(await lstat(canonical)).isFile() || extname(canonical).toLowerCase() !== ".xlsx") throw new Error("XLSX 파일을 선택해 주세요.");
+      return { id: `upload:${randomUUID()}`, name: basename(canonical), displayPath: canonical, kind: "file" as const };
+    }));
+    for (const source of picked) session.set(source.id, source);
+    return picked.map((source) => ({ sourceId: source.id, relativePath: "", name: source.name }));
+  }
+
+  has(id: string): boolean { return Boolean(uploads.get(this.db)?.has(id)) || this.list().some((source) => source.id === id); }
+
   remove(id: string): void { this.db.prepare("DELETE FROM work_sources WHERE id = ?").run(id); }
 
   private source(id: string): WorkSource {
-    const item = this.list().find((source) => source.id === id);
+    const item = uploads.get(this.db)?.get(id) ?? this.list().find((source) => source.id === id);
     if (!item) throw new Error("연결이 해제된 업무 자료입니다. 파일이나 폴더를 다시 선택해 주세요.");
     return item;
   }

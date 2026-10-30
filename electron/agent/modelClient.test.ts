@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from "vitest";
-import { createLiteLLMClient, listModels } from "./modelClient.ts";
+import { createLiteLLMClient, listModels, resolveModelAlias } from "./modelClient.ts";
 import { DEFAULT_POLICY_PROFILE } from "./policy.ts";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -20,7 +20,21 @@ it("omits temperature from LiteLLM requests", async () => {
   await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
   expect(body).not.toHaveProperty("temperature");
   // Canvas drafts stream so a long generation is not cut by the proxy idle timeout (HTTP 524).
-  expect(body).toMatchObject({ stream: true, reasoning_effort: "medium" });
+  expect(body).toMatchObject({ stream: true, chat_template_kwargs: { enable_thinking: false } });
+});
+
+it("resends once when the connection drops before any HTTP response", async () => {
+  const fetch = vi.fn()
+    .mockRejectedValueOnce(new TypeError("fetch failed", { cause: new Error("other side closed") }))
+    .mockResolvedValueOnce(new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } }));
+  vi.stubGlobal("fetch", fetch);
+  const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
+  await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).resolves.toBe("ok");
+  expect(fetch).toHaveBeenCalledTimes(2);
+
+  fetch.mockReset().mockRejectedValue(new TypeError("fetch failed", { cause: new Error("other side closed") }));
+  await expect(client.complete({ prompt: "hello" }, DEFAULT_POLICY_PROFILE, new AbortController().signal)).rejects.toMatchObject({ code: "MODEL_PROTOCOL", message: expect.stringContaining("other side closed") });
+  expect(fetch).toHaveBeenCalledTimes(2);
 });
 
 it("does not hide HTTP retries outside the harness budget", async () => {
@@ -60,7 +74,16 @@ it("bounds model discovery even when no caller signal is provided", async () => 
   expect(requestSignal?.aborted).toBe(true);
 });
 
-it("asks for low reasoning effort on policy decisions", async () => {
+it("uses loki only when the account's gateway exposes it", async () => {
+  const gateway = (ids: string[]) => vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }))));
+  gateway(["gpt-x", "loki"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("loki");
+  gateway(["gpt-x"]);
+  expect(await resolveModelAlias("https://g.example", "k")).toBe("gpt-x");
+  expect(await resolveModelAlias("https://g.example", "k", "chosen")).toBe("chosen");
+});
+
+it("turns thinking off on policy decisions", async () => {
   let body: Record<string, unknown> | undefined;
   vi.stubGlobal("fetch", vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -69,5 +92,6 @@ it("asks for low reasoning effort on policy decisions", async () => {
 
   const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
   await client.decide({ runId: "r", step: 1, userGoal: "안녕?", selectedMemories: [], activeCollections: [], recentMessages: [], evidence: [], previousDecisions: [], remaining: { steps: 1, modelCalls: 1, searchCalls: 1, verifyCalls: 1 } } as never, DEFAULT_POLICY_PROFILE, new AbortController().signal).catch(() => undefined);
-  expect(body).toMatchObject({ reasoning_effort: "low" });
+  expect(body).toMatchObject({ chat_template_kwargs: { enable_thinking: false } });
+  expect(body).not.toHaveProperty("reasoning_effort");
 });

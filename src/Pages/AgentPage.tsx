@@ -16,6 +16,7 @@ import Sidebar from "@Features/Sidebar/components/Sidebar";
 import NavRail from "@Features/Sidebar/components/NavRail";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
+import { REVISE_REQUEST_TEXT } from "@app-types/BusinessTool.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
 import { useThreadMessages } from "@Features/Agent/hooks/useThreadMessages";
 import {
@@ -37,6 +38,7 @@ import AnchorChoicePrompt from "@Features/Agent/components/AnchorChoicePrompt";
 import CollectionPanel from "@Features/Agent/components/CollectionPanel";
 import MemoryPanel from "@Features/Agent/components/MemoryPanel";
 import ModelSettingsForm from "@Features/Agent/components/ModelSettingsForm";
+import MaruStoragePanel from "@Features/Agent/components/MaruStoragePanel";
 import WorkSourcePanel from "@Features/Agent/components/WorkSourcePanel";
 // import { guideCopy } from "@config/guideCopy";
 
@@ -55,7 +57,7 @@ const AgentPage = (): React.JSX.Element => {
   const { threadId } = useParams<{ threadId: string }>();
   const selectedId = threadId ?? null;
   const { createThread } = useContext(ThreadsContext) as ThreadsContextType;
-  const { messages, hasMore, reload, loadOlder } = useThreadMessages(
+  const { messages, hasMore, reload, loadOlder, error: historyError } = useThreadMessages(
     api,
     selectedId,
   );
@@ -264,7 +266,7 @@ const AgentPage = (): React.JSX.Element => {
       return "에이전트의 질문에 답해 주세요...";
     return "무엇을 도와드릴까요? 예: 계약서 초안 작성, 일일자금일보 작성";
   })();
-  const errorText = startError ?? view.error ?? canvas.error ?? null;
+  const errorText = startError ?? historyError ?? view.error ?? canvas.error ?? null;
   const responsePersisted = Boolean(
     !view.isRunning &&
     view.runId &&
@@ -348,8 +350,7 @@ const AgentPage = (): React.JSX.Element => {
                   </h3>
                   <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
                     활성화한 폴더만 검색하며, 답변에는 실제 인용한 문서가
-                    표시됩니다. 일일자금일보 같은 Excel 업무도 이 폴더에서 전일
-                    일보·주간계획·자금현황표를 파일명으로 찾아 미리 채웁니다.
+                    표시됩니다.
                   </p>
                   <CollectionPanel
                     collections={collectionsState.collections}
@@ -361,6 +362,7 @@ const AgentPage = (): React.JSX.Element => {
                       void collectionsState.setActive(name, active)
                     }
                   />
+                  {api && <MaruStoragePanel api={api} workspaceId={WORKSPACE_ID} />}
                 </>
               )}
               {tab === "context" && (
@@ -410,14 +412,14 @@ const AgentPage = (): React.JSX.Element => {
                   {modelConfigurable ? (
                     <>
                       <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                        LiteLLM 게이트웨이와 사용할 모델을 지정합니다. 기본
-                        모델은 loki입니다.
+                        로그인한 계정의 LiteLLM 게이트웨이에서 사용할 모델을
+                        선택합니다.
                       </p>
                       <ModelSettingsForm api={api} />
                     </>
                   ) : (
                     <p className="text-xs text-[#71717A]">
-                      이 배포판은 모델 연결이 고정되어 있어 변경할 수 없습니다.
+                      로그인한 계정의 LiteLLM·MARU 키를 사용합니다. 연결 정보는 이메일 인증을 통해 자동으로 설정됩니다.
                     </p>
                   )}
                 </>
@@ -447,7 +449,7 @@ const AgentPage = (): React.JSX.Element => {
                   hasMore={hasMore}
                   onLoadOlder={() => void loadOlder()}
                   onOpenCitation={(runId, evidenceId) =>
-                    void api.openCitation(runId, evidenceId)
+                    void api.openCitation(runId, evidenceId).catch(() => setStartError("원문을 열지 못했습니다. 문서 접근 권한과 연결 상태를 확인해 주세요."))
                   }
                 />
                 {view.action?.type === "business_tool" && view.runId && (
@@ -533,6 +535,7 @@ const AgentPage = (): React.JSX.Element => {
                     api={api}
                     threadId={selectedId}
                     running={view.isRunning}
+                    onRevise={() => void startRequest(REVISE_REQUEST_TEXT, "excel_work", selectedId)}
                   />
                 )}
                 <div

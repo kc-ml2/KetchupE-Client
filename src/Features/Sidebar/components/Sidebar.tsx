@@ -1,9 +1,10 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { isMobile as isMobileDevice } from "react-device-detect";
-import { LuPlus, LuSun, LuMoon, LuFolderSearch } from "react-icons/lu";
+import { LuLogOut, LuSun, LuMoon, LuFolderSearch } from "react-icons/lu";
 import { ThemeContext, ThemeContextType } from "@Contexts/ThemeContext";
 import { ThreadsContext, ThreadsContextType } from "@Contexts/ThreadsContext";
+import { AccountContext } from "@Contexts/AccountContext";
 import ThreadHistory from "./ThreadHistory";
 
 const SIDEBAR_MIN_WIDTH = 220;
@@ -16,7 +17,8 @@ const clampSidebarWidth = (width: number): number => {
 };
 
 const Sidebar = (): React.JSX.Element => {
-  const { threads, createThread, renameThread, deleteThread } = useContext(ThreadsContext) as ThreadsContextType;
+  const { threads, renameThread, deleteThread } = useContext(ThreadsContext) as ThreadsContextType;
+  const account = useContext(AccountContext);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
     const saved = Number(
@@ -41,9 +43,12 @@ const Sidebar = (): React.JSX.Element => {
     ? decodeURIComponent(location.pathname.slice("/agent/".length))
     : null;
 
-  const handleCreateThread = async () => {
-    const thread = await createThread();
-    if (thread) navigate(`/agent/${thread.id}`);
+  const handleLogout = async () => {
+    try {
+      await account?.logout();
+    } catch {
+      window.alert("로그아웃하지 못했습니다. 다시 시도해 주세요.");
+    }
   };
 
   const handleDeleteThread = async (id: string) => {
@@ -161,13 +166,18 @@ const Sidebar = (): React.JSX.Element => {
           {/* Divider */}
           <div className="h-px w-full bg-[#27272A]" />
 
-          {/* New conversation */}
+          {/* Account */}
+          {account && (
+            <p className="mt-3 mb-2 px-1 truncate text-xs text-[#A1A1AA]" title={account.email}>
+              {account.email}
+            </p>
+          )}
           <button
-            onClick={() => void handleCreateThread()}
+            onClick={() => void handleLogout()}
             className="flex items-center justify-center gap-2 h-10 rounded-lg border border-[#ffffff] w-full cursor-pointer text-[#ffffff] hover:border-[#0066FF] hover:bg-[#0066FF] transition-colors"
           >
-            <LuPlus className="w-[18px] h-[18px]" />
-            <span className="text-sm font-medium">새 대화</span>
+            <LuLogOut className="w-[18px] h-[18px]" />
+            <span className="text-sm font-medium">로그아웃</span>
           </button>
 
           {/* Divider */}
