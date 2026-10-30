@@ -13,7 +13,8 @@ const fileButton = "inline-flex min-h-9 items-center justify-center gap-2 rounde
 const sameFile = (a: WorkFile, b: WorkFile) => a.sourceId === b.sourceId && a.relativePath === b.relativePath;
 async function availableFiles(api: KetchupEAgentAPI, sources: WorkSource[]) {
   const results = await Promise.allSettled(sources.map((source) => api.listWorkFiles(source.id)));
-  return { files: results.flatMap((result) => result.status === "fulfilled" ? result.value : []), missing: results.some((result) => result.status === "rejected") };
+  // A source that cannot be listed (moved, unplugged) simply drops out of the picker; the file dialog still works.
+  return results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
 }
 /** Short read-only rendering of a confirmed field for the "확정된 입력" summary. */
 const confirmedValue = (field: BusinessField, input: BusinessInput): string => {
@@ -49,11 +50,11 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
   const confirmed = action.fields.filter((field) => locked.has(field.key) && confirmedValue(field, input));
   const needsFiles = open.some((field) => field.type === "file");
   useEffect(() => {
-    if (!needsFiles) return;
+    if (!needsFiles || action.uploadOnly) return;
     let alive = true;
-    void api.listWorkSources().then((sources) => availableFiles(api, sources)).then((result) => { if (alive) { setFiles(result.files); if (result.missing) setError("일부 연결된 자료를 찾을 수 없습니다. 파일 탭의 검색 폴더를 확인하거나 파일을 다시 선택해 주세요."); } }).catch((cause) => { if (alive) setError(String(cause)); });
+    void api.listWorkSources().then((sources) => availableFiles(api, sources)).then((result) => { if (alive) setFiles(result); }).catch(() => undefined);
     return () => { alive = false; };
-  }, [api, needsFiles]);
+  }, [api, needsFiles, action.uploadOnly]);
   const perform = async (fn: () => Promise<void>) => {
     setBusy(true); setError("");
     try { await fn(); } catch (cause) { setError(String(cause)); } finally { setBusy(false); }
@@ -101,7 +102,7 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
               {chosen.map((file) => <li key={`${file.sourceId}:${file.relativePath}`} className="flex max-w-full items-center gap-2 rounded-xl border border-[#E4E4E7] bg-white py-1 pl-3 pr-1 dark:border-[#3F3F46] dark:bg-[#27272A]"><LuFile aria-hidden className="h-4 w-4 shrink-0 text-[#71717A] dark:text-[#A1A1AA]" /><span title={file.relativePath || file.name} className="min-w-0 truncate text-xs">{file.relativePath || file.name}</span><button type="button" onClick={() => remove(file)} aria-label={`${file.name} 빼기`} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#71717A] hover:bg-[#F4F4F5] hover:text-[#18181B] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#71717A] dark:text-[#A1A1AA] dark:hover:bg-[#3F3F46] dark:hover:text-white"><LuX aria-hidden className="h-3.5 w-3.5" /></button></li>)}
             </ul>
             <div className="flex flex-wrap gap-2">
-              <button className={fileButton} type="button" onClick={() => void perform(async () => choose(await api.pickWorkFiles(Boolean(field.multiple))))}><LuPaperclip aria-hidden className="h-3.5 w-3.5" />{field.multiple ? "파일 추가…" : "파일 선택…"}</button>
+              <button className={fileButton} type="button" onClick={() => void perform(async () => choose(await api.pickWorkFiles(Boolean(field.multiple), action.uploadOnly)))}><LuPaperclip aria-hidden className="h-3.5 w-3.5" />{field.multiple ? "파일 추가…" : "파일 선택…"}</button>
               {files.length > 0 && <span className="relative min-w-0 max-w-full"><select aria-label={`${field.label} 연결된 자료에서 고르기`} className={`${fileButton} w-full appearance-none pr-9 dark:[color-scheme:dark]`} value="" onChange={(event) => { const file = files.find((item) => JSON.stringify(item) === event.target.value); if (file) choose([file]); }}>
                 <option value="">연결된 자료에서 고르기</option>
                 {files.filter((file) => !chosen.some((item) => sameFile(item, file))).map((file) => <option key={`${file.sourceId}:${file.relativePath}`} value={JSON.stringify(file)}>{file.relativePath || file.name}</option>)}

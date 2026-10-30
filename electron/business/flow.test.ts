@@ -248,7 +248,7 @@ it("starts daily cash by asking for the three real sources without producing an 
 
 it("prefills Seoul's today as an editable date even without a connected folder, locking it only after the first run", async () => {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" });
-  tool.suggest = (_files, day) => ({ values: { businessDate: day }, files: {} });
+  tool.defaults = (day) => ({ businessDate: day });
   const { runId, done } = flow.workflows()[0].start({ threadId, workspaceId: "default", text: "테스트" }); await done;
   expect(getRunAction(db, runId)).toMatchObject({ input: { values: { businessDate: today }, files: {} }, lockedKeys: [], question: "기준 정보와 원천 파일을 지정해 주세요." });
   vi.mocked(tool.execute).mockResolvedValueOnce({ status: "needs_input", question: "계좌?", fields: [{ key: "account", type: "text", label: "계좌", required: true }] });

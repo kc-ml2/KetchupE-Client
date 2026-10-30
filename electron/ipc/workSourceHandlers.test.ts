@@ -143,3 +143,9 @@ it("returns only the files chosen in the dialog, even when others are already co
   expect((await invoke("pickFiles", true)).map((file: { name: string }) => file.name)).toEqual(["source.xlsx", "other.xlsx"]);
   expect(invoke("listSources")).toHaveLength(2);
 });
+it("uploads picked files for this session without registering them as connected sources", async () => {
+  const [file] = await invoke("pickFiles", false, true);
+  expect(file).toMatchObject({ name: "source.xlsx", relativePath: "", sourceId: expect.stringMatching(/^upload:/) });
+  expect(invoke("listSources")).toHaveLength(0);
+  expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료" });
+});

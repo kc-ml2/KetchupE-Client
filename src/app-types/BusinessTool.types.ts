@@ -13,6 +13,8 @@ export type BusinessInput = { values: Record<string, string>; files: Record<stri
 export type BusinessAction = {
   id: string; type: "business_tool"; title: string; question: string;
   fields: BusinessField[]; input: BusinessInput; lockedKeys?: string[];
+  /** Files come only from the file picker and are not remembered as connected sources. */
+  uploadOnly?: boolean;
 };
 export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string };
 export interface BusinessToolAPI {

@@ -58,7 +58,7 @@ it("adds several picked files to a multi-file field and lets one be removed", as
   render(<BusinessToolCard api={api} runId="run" action={multi} />);
   fireEvent.click(await screen.findByRole("button", { name: "파일 추가…" }));
   await screen.findByText("국민.xlsx");
-  expect(api.pickWorkFiles).toHaveBeenCalledWith(true);
+  expect(api.pickWorkFiles).toHaveBeenCalledWith(true, undefined);
   fireEvent.click(screen.getByRole("button", { name: "source.xlsx 빼기" }));
   fireEvent.click(screen.getByRole("button", { name: "이 자료로 실행" }));
   await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledWith("run", "action", { values: {}, files: { source: [second] } }));
@@ -124,13 +124,20 @@ it.each([true, false, "저장할 수 없습니다"])("downloads a PNG by artifac
   else expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-it("still offers available files when an older source no longer exists", async () => {
+it("still offers available files without a warning when an older source no longer exists", async () => {
   const api = apiFixture();
   vi.mocked(api.listWorkSources).mockResolvedValue([{ id: "gone", name: "gone", kind: "file", displayPath: "/gone" }, { id: "local", name: "local", kind: "file", displayPath: "/local" }]);
   vi.mocked(api.listWorkFiles).mockImplementation(async (id) => { if (id === "gone") throw new Error("missing"); return [file]; });
   render(<BusinessToolCard api={api} runId="run" action={action} />);
   await screen.findByRole("option", { name: "source.xlsx" });
-  expect(screen.getByRole("alert")).toHaveTextContent("일부 연결된 자료");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("lets an upload-only card use just the file picker without reading connected folders", async () => {
+  const api = apiFixture();
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, uploadOnly: true }} />);
+  expect(screen.queryByRole("combobox", { name: /연결된 자료/ })).toBeNull();
+  expect(api.listWorkSources).not.toHaveBeenCalled();
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 it("submits an untouched movements table as 확인 so a day executed exactly as planned needs no edits", async () => {
   const api = apiFixture();

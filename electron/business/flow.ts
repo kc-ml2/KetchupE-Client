@@ -51,28 +51,12 @@ export class BusinessFlow {
         checkpoint = job.checkpoint ? { excelState: job.checkpoint.excelState, clarifications: job.checkpoint.clarifications } : undefined;
       } else initial.values.request = input.text;
     }
+    if (tool.defaults) initial.values = { ...initial.values, ...tool.defaults(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) };
     this.save(runId, { toolId: tool.id, version: tool.version, input: initial, fingerprints: {}, fields: tool.fields, checkpoint });
     if (tool.unavailableReason) { this.finish(runId, tool.unavailableReason, "abstained"); return { runId, done: Promise.resolve() }; }
-    if (!tool.suggest) {
-      this.ask(runId, tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
-      if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial) };
-      return { runId, done: Promise.resolve() };
-    }
-    const done = this.suggest(tool).then(({ input, foundFiles }) => {
-      this.save(runId, { ...this.job(runId), input });
-      this.ask(runId, foundFiles ? "연결된 폴더에서 찾은 파일을 미리 채웠습니다. 확인하거나 바꾼 뒤 실행해 주세요." : "기준 정보와 원천 파일을 지정해 주세요.");
-    });
-    return { runId, done };
-  }
-
-  /** Lists every connected source; a source that cannot be read is skipped so the form still opens. Defaults (e.g. Seoul's today) apply even when no file matched. */
-  private async suggest(tool: BusinessTool): Promise<{ input: BusinessInput; foundFiles: boolean }> {
-    if (!tool.suggest) return { input: emptyInput(), foundFiles: false };
-    const sources = new WorkSources(this.db);
-    const listed = await Promise.allSettled(sources.list().map((source) => sources.files(source.id)));
-    const files = listed.flatMap((result) => result.status === "fulfilled" ? result.value : []);
-    const input = tool.suggest(files, new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" }));
-    return { input, foundFiles: Object.values(input.files).some((list) => list.length) };
+    this.ask(runId, tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
+    if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial) };
+    return { runId, done: Promise.resolve() };
   }
 
   private resume(runId: string, text: string) {
@@ -157,7 +141,7 @@ export class BusinessFlow {
         if (!controller.signal.aborted && getRun(this.db, runId).status === "running") this.event(runId, "status", { phase });
       } }), controller.signal);
       controller.signal.throwIfAborted();
-      if (Object.values(input.files).flat().some((file) => !sources.list().some((source) => source.id === file.sourceId))) throw new Error("실행 중 자료 연결이 해제되었습니다.");
+      if (Object.values(input.files).flat().some((file) => !sources.has(file.sourceId))) throw new Error("실행 중 자료 연결이 해제되었습니다.");
       if (result.status === "needs_input") {
         this.validateFields(result.fields);
         const merged = new Map(job.fields.map((field) => [field.key, field]));
@@ -276,7 +260,7 @@ export class BusinessFlow {
   }
   private ask(runId: string, question: string) {
     const job = this.job(runId);
-    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job) };
+    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly };
     this.db.prepare("INSERT INTO run_actions (run_id, action) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET action = excluded.action").run(runId, JSON.stringify(action));
     setRunStatus(this.db, runId, "waiting_user");
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: question });

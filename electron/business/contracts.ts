@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
-import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import type { WorkflowRoute } from "../agent/router.ts";
 
 const MAX_FILES_PER_FIELD = 50;
@@ -24,8 +23,10 @@ export type BusinessTool = WorkflowRoute & {
   validateOutput?: (file: { name: string; bytes: Uint8Array }, signal: AbortSignal) => Promise<void>;
   /** Replace this selected XLSX after a successful, validated run. */
   updateSource?: string;
-  /** Prefills the input form from the connected work folders (today = Asia/Seoul YYYY-MM-DD). The user still sees and can change every pick. */
-  suggest?: (files: WorkFile[], today: string) => BusinessInput;
+  /** Editable default values for a new run (today = Asia/Seoul YYYY-MM-DD). */
+  defaults?: (today: string) => Record<string, string>;
+  /** Files come only from the picker for each run, never from connected folders, and are not remembered as sources. */
+  uploadOnly?: boolean;
   execute: (input: {
     values: Record<string, string>;
     /** Files in the order the user chose them; single-file fields hold one entry. */

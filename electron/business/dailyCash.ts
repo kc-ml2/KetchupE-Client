@@ -58,20 +58,8 @@ export const dailyCashTool: BusinessTool = {
     { key: "weeklyPlans", label: "주간자금계획 (주 경계에서는 해당 두 주)", type: "file", multiple: true, required: true },
     { key: "cashStatus", label: "기준일 자금현황표(KC) (작업일 직전 영업일 파일)", type: "file", required: true },
   ],
-  suggest(files, today) {
-    const reportDate = previousBusinessDay(today);
-    const named = files.map((file) => ({ file, name: file.name.normalize("NFC"), stamp: file.name.normalize("NFC").match(/\d{4,6}/)?.[0] ?? "" }));
-    const latest = (items: typeof named) => [...items].sort((a, b) => b.stamp.localeCompare(a.stamp))[0]?.file;
-    // 일보 파일명의 YYMMDD는 마지막 시트 날짜이므로 기준일 전날 이하만 전일 일보 후보다. 연도 단위 파일(2026_일일자금일보_지주)은 4자리라 그대로 통과한다.
-    const reports = named.filter((f) => /일일자금일보/.test(f.name) && !/샘플|업무흐름|테스트|검증/.test(f.name) && (f.stamp.length !== 6 || f.stamp <= sheetDate(shiftDate(reportDate, -1))));
-    // ponytail: 주간계획 파일명 MMDD는 연도 경계를 무시한다. 기준일과 작업일이 다른 주에 걸치면 두 파일을 모두 채운다.
-    const weekly = named.filter((f) => /주간자금계획/.test(f.name) && f.stamp.length === 4);
-    const weekUpTo = (day: string) => latest(weekly.filter((f) => f.stamp <= sheetDate(day).slice(2)));
-    const plans = [weekUpTo(reportDate), weekUpTo(today)].filter((file, index, all): file is NonNullable<typeof file> => Boolean(file) && all.indexOf(file) === index);
-    const status = latest(named.filter((f) => f.name.startsWith(`${sheetDate(reportDate)}_`) && /자금현황표|KC/.test(f.name)));
-    const pick = (file?: typeof files[number]) => file ? [file] : [];
-    return { values: { workDate: today }, files: { previousReport: pick(latest(reports)), weeklyPlans: plans, cashStatus: pick(status) } };
-  },
+  defaults: (today) => ({ workDate: today }),
+  uploadOnly: true,
   async execute(input) {
     const { values, files, signal } = input; const checkpoint = { ...input.checkpoint };
     try {

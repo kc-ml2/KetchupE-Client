@@ -48,7 +48,7 @@ export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: st
       if (expected && fingerprint !== fingerprintSchema.parse(expected)) throw new Error("원본 파일이 변경되었습니다. 원본 다시 읽기로 내용을 확인한 뒤 다시 검증해 주세요.");
       const result = await readWorkbookJob(workerPath, { bytes, fingerprint, action });
       assertActive();
-      if (!sources.list().some((source) => source.id === file.sourceId)) throw new Error("자료 연결이 해제되었습니다.");
+      if (!sources.has(file.sourceId)) throw new Error("자료 연결이 해제되었습니다.");
       return result;
     } finally { reading = false; }
   };
@@ -77,8 +77,9 @@ export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: st
     assertActive();
     return sources.register(picked.filePaths, kind);
   });
-  handle("work:pickFiles", async (event, rawMultiple: unknown) => {
+  handle("work:pickFiles", async (event, rawMultiple: unknown, rawUpload: unknown) => {
     const multiple = z.boolean().parse(rawMultiple);
+    const upload = z.boolean().optional().parse(rawUpload);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: Electron.OpenDialogOptions = { properties: multiple ? ["openFile", "multiSelections"] : ["openFile"], filters: [{ name: "Excel", extensions: ["xlsx"] }], title: "업무 파일 선택" };
     const picked = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
@@ -86,6 +87,7 @@ export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: st
     if (picked.canceled) return [];
     await runtime.assertSourcePaths(picked.filePaths);
     assertActive();
+    if (upload) return sources.upload(picked.filePaths);
     const registered = await sources.register(picked.filePaths, "file");
     const paths = await Promise.all(picked.filePaths.map((path) => realpath(path)));
     return paths.flatMap((path) => registered.filter((source) => source.kind === "file" && source.displayPath === path)
