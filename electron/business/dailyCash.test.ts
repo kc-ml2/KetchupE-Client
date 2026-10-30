@@ -10,7 +10,7 @@ import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
-import { Money } from "./dailyCash/values.ts";
+import { Money, previousBusinessDay } from "./dailyCash/values.ts";
 import type { BusinessTool } from "./contracts.ts";
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 async function setup() {
@@ -91,6 +91,12 @@ it("prefills today, the previous report, the weekly plan and the report-date KC 
   expect(suggested.files.weeklyPlans.map((f) => f.name)).toEqual(["주간자금계획서_1009.xlsx"]);
   expect(suggested.files.cashStatus.map((f) => f.name)).toEqual(["261014_자금현황표[KC].xlsx"]);
   expect(dailyCashTool.suggest!(files, "2026-10-19").files.weeklyPlans.map((f) => f.name)).toEqual(["주간자금계획서_1016.xlsx"]);
+  // 월요일(10/19) 작업은 일요일이 아니라 직전 금요일(10/16) 기준이다.
+  const monday = dailyCashTool.suggest!([...files, wf("261016_자금현황표[KC].xlsx"), wf("261018_자금현황표[KC].xlsx")], "2026-10-19");
+  expect(monday.files.cashStatus.map((f) => f.name)).toEqual(["261016_자금현황표[KC].xlsx"]);
+  expect(["2026-10-19", "2026-10-18", "2026-10-17", "2026-10-14"].map(previousBusinessDay)).toEqual(["2026-10-16", "2026-10-16", "2026-10-16", "2026-10-13"]);
+  // 공휴일: 한글날(10/9 금) 다음 월요일은 10/8, 추석 연휴(9/24~26) 다음 월요일은 9/23, 대체공휴일(10/5 월) 다음 날은 10/2.
+  expect(["2026-10-12", "2026-09-28", "2026-10-06"].map(previousBusinessDay)).toEqual(["2026-10-08", "2026-09-23", "2026-10-02"]);
 });
 it("reads a truly empty cell as 0 but still asks for a formula without a saved result", async () => {
   const { input, books, file } = await setup(); const s = books.report.getWorksheet("261012")!;

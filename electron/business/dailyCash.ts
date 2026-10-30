@@ -8,7 +8,7 @@ import { readCashStatus, differences, parseOverrides } from "./dailyCash/cashSta
 import { fetchHana, type Rates } from "./dailyCash/hana.ts";
 import { renderSheet } from "./dailyCash/image.ts";
 import { bindAccounts, buildReport, cashRows, depositIssues, layout, maturity, priorAmounts } from "./dailyCash/report.ts";
-import { date, decimal, isoSheetDate, sameWon, sheetDate, shiftDate, sum, text, type Amount } from "./dailyCash/values.ts";
+import { date, decimal, isoSheetDate, sameWon, sheetDate, shiftDate, previousBusinessDay, sum, text, type Amount } from "./dailyCash/values.ts";
 import { depositKind, readWeekly, type Movement } from "./dailyCash/weekly.ts";
 
 const ask = (question: string, fields: (Partial<BusinessField> & { key: string; label: string })[], checkpoint?: Record<string, unknown>): ToolResult => ({ status: "needs_input", question, fields: fields.map((f) => ({ ...f, type: f.type ?? "text", required: f.required ?? true })), checkpoint });
@@ -49,17 +49,17 @@ const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계
 export const dailyCashTool: BusinessTool = {
   id: "daily_cash", version: "1.1.0", title: "일일자금일보",
   updateSource: "previousReport",
-  description: "전일 일보·주간계획·KC 자금현황표로 작업일 전날 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
+  description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
   examples: ["일일자금일보 작성해줘", "어제 기준 자금일보와 이미지 만들어줘"],
-  requiredInputs: ["작업일", "전일 일보가 있는 XLSX", "해당 주 주간자금계획", "기준일(작업일 전날)의 자금현황표(KC)"],
+  requiredInputs: ["작업일", "전일 일보가 있는 XLSX", "해당 주 주간자금계획", "기준일(작업일 직전 영업일)의 자금현황표(KC)"],
   fields: [
-    { key: "workDate", label: "작업일 (예: 29일 선택 → 28일 기준 일보)", type: "date", required: true },
+    { key: "workDate", label: "작업일 (예: 29일 선택 → 28일 기준 일보, 월요일·공휴일 다음 날은 직전 영업일)", type: "date", required: true },
     { key: "previousReport", label: "전일 일보가 있는 통합문서", type: "file", required: true },
     { key: "weeklyPlans", label: "주간자금계획 (주 경계에서는 해당 두 주)", type: "file", multiple: true, required: true },
-    { key: "cashStatus", label: "기준일 자금현황표(KC) (작업일 전날 파일)", type: "file", required: true },
+    { key: "cashStatus", label: "기준일 자금현황표(KC) (작업일 직전 영업일 파일)", type: "file", required: true },
   ],
   suggest(files, today) {
-    const reportDate = shiftDate(today, -1);
+    const reportDate = previousBusinessDay(today);
     const named = files.map((file) => ({ file, name: file.name.normalize("NFC"), stamp: file.name.normalize("NFC").match(/\d{4,6}/)?.[0] ?? "" }));
     const latest = (items: typeof named) => [...items].sort((a, b) => b.stamp.localeCompare(a.stamp))[0]?.file;
     // 일보 파일명의 YYMMDD는 마지막 시트 날짜이므로 기준일 전날 이하만 전일 일보 후보다. 연도 단위 파일(2026_일일자금일보_지주)은 4자리라 그대로 통과한다.
@@ -76,7 +76,7 @@ export const dailyCashTool: BusinessTool = {
     const { values, files, signal } = input; const checkpoint = { ...input.checkpoint };
     try {
       signal.throwIfAborted();
-      const workDate = date(values.workDate); const reportDate = shiftDate(workDate, -1);
+      const workDate = date(values.workDate); const reportDate = previousBusinessDay(workDate);
       if (workDate > new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) throw new Error("미래 작업일의 최종 환율과 실제 잔고는 확정할 수 없습니다.");
       for (const key of ["previousReport", "cashStatus"]) if (files[key]?.length !== 1) throw new Error(`${key}: 파일 하나를 지정하세요.`);
       if (!files.weeklyPlans?.length) throw new Error("주간계획 파일이 필요합니다.");
@@ -86,14 +86,14 @@ export const dailyCashTool: BusinessTool = {
       if (!priorName) throw new Error("기준일보다 앞선 날짜의 전일 일보 시트가 없습니다.");
       const priorDate = isoSheetDate(priorName);
       if (priorDate < shiftDate(reportDate, -7)) throw new Error(`전일 일보가 너무 오래되었습니다 (${priorDate}). ${reportDate} 직전 마감 일보가 포함된 파일로 새 작업을 시작하세요.`);
-      if (priorDate !== shiftDate(reportDate, -1) && values.carryConfirmation !== "확인") return ask(`${priorDate} 마감 금액을 ${reportDate}의 전일금액으로 이월합니다. 휴무일 동안 거래가 없고 마지막 마감 일보가 맞으면 확인하고 계속하세요.`, [{ key: "carryConfirmation", label: "휴무일 거래 없음 · 마지막 마감 일보 확인", confirm: "확인" }]);
+      if (priorDate !== previousBusinessDay(reportDate) && values.carryConfirmation !== "확인") return ask(`${priorDate} 마감 금액을 ${reportDate}의 전일금액으로 이월합니다. 휴무일 동안 거래가 없고 마지막 마감 일보가 맞으면 확인하고 계속하세요.`, [{ key: "carryConfirmation", label: "휴무일 거래 없음 · 마지막 마감 일보 확인", confirm: "확인" }]);
       const [book, statusBook, ...weeks] = await Promise.all([archive.loadSheet(priorName), ...[files.cashStatus[0], ...files.weeklyPlans].map((f) => loadWorkbook(f.bytes))]);
       const candidate = book.getWorksheet(priorName)!;
       const filenameDate = files.cashStatus[0].name.normalize("NFC").match(/^(\d{6})_/)?.[1];
       const statusDate = filenameDate ? isoSheetDate(filenameDate) : values.statusDate;
-      if (!statusDate) return ask("자금현황표 내부에 기준일이 없습니다. 이 자료의 계좌잔고 마감일(작업일 전날)을 확인하세요.", [{ key: "statusDate", label: "자금현황표 기준일 YYYY-MM-DD" }]);
+      if (!statusDate) return ask("자금현황표 내부에 기준일이 없습니다. 이 자료의 계좌잔고 마감일(작업일 직전 영업일)을 확인하세요.", [{ key: "statusDate", label: "자금현황표 기준일 YYYY-MM-DD" }]);
       // KC 파일명 YYMMDD는 계좌잔고 마감일(일보 기준일)이다. 작업일 15일이면 14일 자금현황표를 쓴다.
-      if (date(statusDate) !== reportDate) throw new Error(`자금현황표 기준일 ${statusDate}와 일보 기준일 ${reportDate}가 다릅니다. 작업일 전날(${reportDate}) 자금현황표를 지정하세요.`);
+      if (date(statusDate) !== reportDate) throw new Error(`자금현황표 기준일 ${statusDate}와 일보 기준일 ${reportDate}가 다릅니다. 작업일 직전 영업일(${reportDate}) 자금현황표를 지정하세요.`);
       const kc = readCashStatus(statusBook); const l = layout(candidate);
       const weekly = weeks.map((b, i) => readWeekly(b, files.weeklyPlans[i].name));
       for (const day of [reportDate, workDate]) {
