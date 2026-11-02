@@ -1,7 +1,7 @@
 import { WorkSourcesFlow } from "../agent/workSourcesFlow.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction } from "../agent/store.ts";
 // @vitest-environment node
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
@@ -30,7 +30,8 @@ let folder: string; let db: ReturnType<typeof openAgentDb>;
 const invoke = (name: string, ...args: unknown[]) => mock.handlers.get(`work:${name}`)!({ sender: {} }, ...args);
 const profile: SourceProfile = { id: "", name: "입출금", revision: 0, mapping: { sheet: "자료", headerRow: 1, firstDataRow: 2, columns: [{ field: "accountId", header: "계좌", type: "text", required: true }], filters: [] } };
 beforeEach(async () => {
-  folder = await mkdtemp(join(tmpdir(), "work-ipc-")); db = openAgentDb(":memory:");
+  // Windows tmpdir can use an 8.3 alias; canonicalize before simulating network-drive failures.
+  folder = await realpath(await mkdtemp(join(tmpdir(), "work-ipc-"))); db = openAgentDb(":memory:");
   const privateRoot = join(folder, "app"); await mkdir(privateRoot);
   const workbook = new ExcelJS.Workbook(); workbook.addWorksheet("자료").addRows([["계좌"], ["00123"]]);
   const path = join(folder, "source.xlsx"); await writeFile(path, Buffer.from(await workbook.xlsx.writeBuffer())); mock.paths = [path];
