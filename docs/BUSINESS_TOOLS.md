@@ -25,7 +25,7 @@ Fields support `file`, `date`, `text`, `number`, and `movements`. `multiple: tru
 
 ## Execution and storage
 
-- Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Windows network-drive `realpath` failures with `EISDIR` retry Node's non-native resolver, preserving canonical-path and symlink checks. Source files are modified only by tools declaring `updateSource`, after validation.
+- Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Windows network-drive `realpath` failures with `EISDIR` retry Node's non-native resolver, including in the private-account-data guard before upload or registration, preserving canonical-path and symlink checks. Source files are modified only by tools declaring `updateSource`, after validation.
 - Limits: 20 MiB per source file, 100 MiB total input, 30 fields, checkpoint JSON up to 1,000,000 characters, and 20 MiB per output file.
 - Workbook loading does not reject files based on total sheet count or worksheet dimensions: annual Daily Cash history and distant cells are preserved. File size, worker memory, and execution-time limits still apply.
 - The first accepted execution freezes initial values, file references, hashes, and tool version. Sources are re-read and hashes checked on subsequent submissions. Source or version changes require a new task.

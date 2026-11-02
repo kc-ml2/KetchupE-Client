@@ -1,12 +1,13 @@
 import { WorkSourcesFlow } from "../agent/workSourcesFlow.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction } from "../agent/store.ts";
 // @vitest-environment node
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ExcelJS from "exceljs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
+import { assertPublicSources } from "../auth/sourcePaths.ts";
 import { extractRows, inspectWorkbook, loadWorkbook } from "../work/mapping.ts";
 import type { WorkbookJob } from "../work/reader.ts";
 import type { AgentRuntime } from "../agent/runtime.ts";
@@ -16,7 +17,7 @@ const mock = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => a
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
   return { ...fs, realpath: (...args: Parameters<typeof fs.realpath>) => {
-    if (mock.networkPath) return Promise.reject(Object.assign(new Error("EISDIR"), { code: "EISDIR" }));
+    if (mock.networkPath && mock.paths.includes(String(args[0]))) return Promise.reject(Object.assign(new Error("EISDIR"), { code: "EISDIR" }));
     return fs.realpath(...args);
   } };
 });
@@ -30,6 +31,7 @@ const invoke = (name: string, ...args: unknown[]) => mock.handlers.get(`work:${n
 const profile: SourceProfile = { id: "", name: "입출금", revision: 0, mapping: { sheet: "자료", headerRow: 1, firstDataRow: 2, columns: [{ field: "accountId", header: "계좌", type: "text", required: true }], filters: [] } };
 beforeEach(async () => {
   folder = await mkdtemp(join(tmpdir(), "work-ipc-")); db = openAgentDb(":memory:");
+  const privateRoot = join(folder, "app"); await mkdir(privateRoot);
   const workbook = new ExcelJS.Workbook(); workbook.addWorksheet("자료").addRows([["계좌"], ["00123"]]);
   const path = join(folder, "source.xlsx"); await writeFile(path, Buffer.from(await workbook.xlsx.writeBuffer())); mock.paths = [path];
   mock.read.mockImplementation(async (_path: string, job: WorkbookJob) => {
@@ -37,15 +39,25 @@ beforeEach(async () => {
     return job.action.kind !== "extract" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.kind === "inspect" ? job.action.headerRow : undefined) : extractRows(book, job.fingerprint, job.action.mapping);
   });
   flow = new WorkSourcesFlow(db, () => undefined);
-  registerWorkSourceHandlers({ db, assertSourcePaths: async () => undefined, workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
+  registerWorkSourceHandlers({ db, assertSourcePaths: (paths: string[]) => assertPublicSources(privateRoot, paths), workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
 });
 afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); mock.networkPath = false; await rm(folder, { recursive: true, force: true }); });
 
-it("picks and reads a workbook when native realpath fails with the network-drive EISDIR error", async () => {
+it.each([false, true])("picks and reads a workbook through the source guard after EISDIR (upload=%s)", async (upload) => {
   mock.networkPath = true;
-  const [file] = await invoke("pickFiles", false);
+  const [file] = await invoke("pickFiles", false, upload);
   expect(file).toMatchObject({ name: "source.xlsx", relativePath: "" });
   expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료", rows: expect.any(Array) });
+});
+
+it.each(["file", "folder"])("connects a %s through the source guard after EISDIR", async (kind) => {
+  const selected = join(folder, "selected"); await mkdir(selected);
+  const path = join(selected, "source.xlsx"); await writeFile(path, await readFile(mock.paths[0]));
+  mock.paths = [kind === "file" ? path : selected];
+  mock.networkPath = true;
+  const [source] = await invoke("pickSources", kind);
+  const [file] = await invoke("listFiles", source.id);
+  expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료" });
 });
 
 const artifactId = "9b3bb758-a5cb-4eda-87b3-28bac9b487e2";
