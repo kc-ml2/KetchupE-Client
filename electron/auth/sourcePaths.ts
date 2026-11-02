@@ -1,5 +1,5 @@
-import { realpath } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
+import { realpath } from "../work/paths.ts";
 
 function contains(parent: string, child: string): boolean {
   const path = relative(parent, child);
