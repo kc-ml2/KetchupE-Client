@@ -3,7 +3,9 @@ import { createThread, ensureWorkspace, getRun, getRunAction } from "../agent/st
 // @vitest-environment node
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { realpath as legacyRealpath } from "node:fs";
+import { promisify } from "node:util";
 import ExcelJS from "exceljs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
@@ -57,6 +59,9 @@ it.each(["file", "folder"])("connects a %s through the source guard after EISDIR
   mock.networkPath = true;
   const [source] = await invoke("pickSources", kind);
   const [file] = await invoke("listFiles", source.id);
+  const nativeFs = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  const target = resolve(source.displayPath, file.relativePath);
+  console.log("Windows path comparison", { selected: mock.paths[0], stored: source.displayPath, target, native: await nativeFs.realpath(target), legacy: await promisify(legacyRealpath)(target) });
   expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료" });
 });
 
