@@ -11,6 +11,7 @@ export type MovementEdits = { changes: { index: number; amount: string }[]; add:
 export type BusinessField = { key: string; label: string; type: "file" | "date" | "text" | "number" | "movements" | "select"; options?: { value: string; label: string }[]; required: boolean; multiple?: boolean; rows?: PlannedMovement[]; confirm?: string;
   /** Presents an account-to-cell form while keeping the existing serialized text input contract. */
   accountRows?: { key: string; name: string; currency: string; balance: string; maturity?: string }[];
+  cashRows?: { key: string; name: string; currency: string; opening: string; balance: string }[];
 };
 export type BusinessInput = { values: Record<string, string>; files: Record<string, WorkFile[]> };
 export type BusinessAction = {

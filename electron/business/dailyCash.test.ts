@@ -329,3 +329,39 @@ it("calculates and saves the next daily cash report from 366 full report sheets 
     console.info(`Annual Daily Cash: 366 input → 367 output sheets; 1 prior sheet parsed per run; ${annual.length} input bytes; ${Math.round(performance.now() - started)} ms including review, save, validation and archive comparison`);
   } finally { spy.mockRestore(); }
 }, artifactTestTimeout);
+
+it("reconciles labeled cash totals and keeps invalid answers in the same form", async () => {
+  const { books, input, file } = await setup();
+  const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000;
+  input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")];
+  for (const value of [undefined, "invalid", '{"unknown:KRW":{"incoming":"0","outgoing":"0"}}', '{"140013557434:KRW":{"incoming":"-1","outgoing":"0"}}']) {
+    if (value === undefined) delete input.values.cashChanges; else input.values.cashChanges = value;
+    const result = await dailyCashTool.execute(input);
+    expect(result).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges", cashRows: expect.arrayContaining([expect.objectContaining({ key: "140013557434:KRW", opening: "100000", balance: "108000" })]) })]) });
+    if (result.status === "needs_input") expect(result.question).not.toMatch(/JSON|incoming|outgoing/);
+  }
+  input.values.cashChanges = '{"140013557434:KRW":{"incoming":"10000","outgoing":"2000"}}';
+  input.values.actualEdits = '{"changes":[{"index":2,"amount":"2000"}]}';
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
+});
+
+it("reasks invalid previous amounts as numeric fields and explicitly resets unreadable legacy answers", async () => {
+  const { input } = await setup();
+  for (const value of ["bad", ""]) {
+    input.values.cell_H21 = value;
+    expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: [{ key: "cell_H21", type: "number", required: true, label: expect.stringContaining("H21") }] });
+  }
+  delete input.values.cell_H21;
+  input.values.previousValues = "invalid";
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: [{ key: "previousValues", label: expect.any(String), confirm: "{}" }] });
+  input.values.previousValues = "{}";
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
+});
+
+it("asks for an Excel recalculation instead of bulk JSON when many cached amounts are missing", async () => {
+  const { books, input, file } = await setup();
+  const sheet = books.report.getWorksheet(1)!;
+  for (const row of [9, 10, 11, 12, 13, 15, 21, 23, 24, 26, 28, 30, ...layout(sheet).termRows]) sheet.getCell(`H${row}`).value = { formula: "0" };
+  input.files.previousReport = [await file(books.report, "전일.xlsx")];
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("Excel에서 열어 수식을 계산하고 저장") });
+});
