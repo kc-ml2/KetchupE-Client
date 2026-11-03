@@ -8,6 +8,48 @@ const file = { sourceId: "local", relativePath: "source.xlsx", name: "source.xls
 const action: BusinessAction = { id: "action", type: "business_tool", title: "일일자금일보", question: "자료를 지정하세요", fields: [{ key: "date", label: "기준일", type: "date", required: true }, { key: "source", label: "입출금 내역", type: "file", required: true }], input: { values: {}, files: {} } };
 const apiFixture = () => ({ listWorkSources: vi.fn().mockResolvedValue([{ id: "local" }]), listWorkFiles: vi.fn().mockResolvedValue([file]), submitBusinessInput: vi.fn().mockResolvedValue(undefined), pickWorkFiles: vi.fn().mockResolvedValue([]), listBusinessArtifacts: vi.fn().mockResolvedValue([]), openBusinessArtifact: vi.fn().mockResolvedValue(undefined), saveBusinessArtifact: vi.fn().mockResolvedValue(true) }) as unknown as KetchupEAgentAPI;
 
+const bindingField = { key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text" as const, required: true,
+  accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "7580100" }, { key: "001234:USD", name: "기업_외화", currency: "USD", balance: "10" }] };
+
+it("collects labeled account cells and preserves earlier mappings without exposing JSON", async () => {
+  const api = apiFixture();
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [bindingField], input: { files: {}, values: { accountBindings: '{"earlier:KRW":"H10"}' } } }} />);
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.getAllByText("001234")).toHaveLength(2);
+  const area = screen.getByLabelText("001234:KRW 일보 영역");
+  const row = screen.getByLabelText("001234:KRW 행 번호") as HTMLInputElement;
+  expect(row.checkValidity()).toBe(false);
+  fireEvent.change(row, { target: { value: "12" } });
+  fireEvent.change(area, { target: { value: "H" } });
+  fireEvent.change(screen.getByLabelText("001234:USD 일보 영역"), { target: { value: "P" } });
+  fireEvent.change(screen.getByLabelText("001234:USD 행 번호"), { target: { value: "239" } });
+  expect(screen.getByText("연결할 셀: H12")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
+  const submitted = vi.mocked(api.submitBusinessInput).mock.calls[0][2];
+  expect(JSON.parse(submitted.values.accountBindings)).toEqual({ "earlier:KRW": "H10", "001234:KRW": "H12", "001234:USD": "P239" });
+});
+
+it.each(["not valid", '{"001234:KRW":"H12"}'])("lets an account form replace a previous answer: %s", async (value) => {
+  const api = apiFixture();
+  vi.mocked(api.submitBusinessInput).mockRejectedValue(new Error("통화/정기예금 구분과 대상 셀이 다릅니다."));
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [{ ...bindingField, accountRows: bindingField.accountRows.slice(0, 1) }], input: { files: {}, values: { accountBindings: value } } }} />);
+  const row = screen.getByLabelText("001234:KRW 행 번호") as HTMLInputElement;
+  for (const invalid of ["0", "1000", "1.5"]) { fireEvent.change(row, { target: { value: invalid } }); expect(row.checkValidity()).toBe(false); }
+  fireEvent.change(screen.getByLabelText("001234:KRW 일보 영역"), { target: { value: "P" } });
+  fireEvent.change(row, { target: { value: "248" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("통화/정기예금");
+  expect(row).toHaveValue(248);
+  expect(screen.getByLabelText("001234:KRW 일보 영역")).toHaveValue("P");
+});
+
+it("summarizes confirmed account mappings without displaying their stored JSON", () => {
+  render(<BusinessToolCard api={apiFixture()} runId="run" action={{ ...action, fields: [bindingField], lockedKeys: [bindingField.key], input: { files: {}, values: { accountBindings: '{"001234:KRW":"H12"}' } } }} />);
+  expect(screen.getByText("계좌별 전일 일보 연결: 확인 완료")).toBeInTheDocument();
+  expect(screen.queryByText(/\{"001234/)).not.toBeInTheDocument();
+});
+
 it("submits an explicitly chosen Excel output format", async () => {
   const api = apiFixture();
   render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [{ key: "format", label: "결과 형식", type: "select", required: false, options: [{ value: "pdf", label: "PDF" }, { value: "html", label: "HTML" }, { value: "xlsx", label: "엑셀" }] }] }} />);

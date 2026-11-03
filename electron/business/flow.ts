@@ -253,6 +253,10 @@ export class BusinessFlow {
       if (field.type === "file") { const names = (input.files[field.key] ?? []).map((file) => file.name); return names.length ? `${field.label}: ${names.join(", ")}` : ""; }
       const value = input.values[field.key]?.trim() ?? "";
       if (!value) return "";
+      if (field.accountRows) {
+        try { return `${field.label}: ${Object.entries(JSON.parse(value)).map(([account, cell]) => `${account} → ${cell}`).join(", ")}`; }
+        catch { return `${field.label}: 연결 위치 확인 필요`; }
+      }
       if (field.type !== "movements") return `${field.label}: ${value}`;
       try { const edits = JSON.parse(value) as { changes?: unknown[]; add?: unknown[] }; return `${field.label}: 금액 수정 ${edits.changes?.length ?? 0}건, 추가 거래 ${edits.add?.length ?? 0}건`; }
       catch { return `${field.label}: ${value}`; }

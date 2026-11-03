@@ -23,6 +23,8 @@ After an answer, execution starts again from the beginning with accumulated valu
 
 Fields support `file`, `date`, `text`, `number`, and `movements`. `multiple: true` permits multiple files. `confirm` is a field property: the confirmation button submits its exact value. `movements` submits `{changes, add}` JSON. New field types require changes to [shared types](../src/app-types/BusinessTool.types.ts), `BusinessFlow.validateFields`, and [BusinessToolCard](../src/Features/Agent/components/BusinessToolCard.tsx).
 
+Daily Cash's account-binding text field carries `accountRows` to display the unresolved account codes, names, currencies, balances, and maturities. Users select the report area (H: main-table closing amount, P: business-unit balance) and enter a row number; the card serializes the existing account-to-cell mapping internally. Currency, deposit/maturity, allowed-cell and duplicate-cell checks still run in the business tool. A report balance with no matching KC account requires corrected source files, not a guessed mapping.
+
 ## Execution and storage
 
 - Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Windows network-drive `realpath` failures with `EISDIR` retry Node's non-native resolver, including in the private-account-data guard before upload or registration, preserving canonical-path and symlink checks. Source files are modified only by tools declaring `updateSource`, after validation.

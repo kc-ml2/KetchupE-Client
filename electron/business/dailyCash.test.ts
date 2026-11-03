@@ -20,6 +20,34 @@ async function setup() {
 }
 // Real XLSX/PNG generation needs more time on shared Windows CI runners.
 const artifactTestTimeout = 30_000;
+it("asks only for unresolved account locations and accepts the form's existing mapping contract", async () => {
+  const { input, books, file } = await setup();
+  const account = books.status.getWorksheet(1)!.getRow(2);
+  account.getCell(3).value = "001234"; account.getCell(4).value = "기업_입출금_원화";
+  input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")];
+  const result = await dailyCashTool.execute(input);
+  expect(result).toMatchObject({ status: "needs_input", fields: [{ key: "accountBindings", type: "text", accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "109000" }] }] });
+  if (result.status !== "needs_input") return;
+  expect(result.question).toContain("261012"); expect(result.question).toContain("행 번호"); expect(result.question).not.toContain("JSON");
+  input.values.accountBindings = '{"001234:KRW":"H10"}';
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
+  input.values.accountBindings = '{"001234:KRW":"H23"}';
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("통화/정기예금") });
+  input.values.accountBindings = '{"001234:KRW":"H10","TEST-TERM:KRW":"H10"}';
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("중복") });
+  input.values.accountBindings = "invalid";
+  const retry = await dailyCashTool.execute(input);
+  expect(retry).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ accountRows: expect.any(Array) })] });
+  if (retry.status === "needs_input") expect(retry.question).not.toContain("JSON");
+});
+
+it("asks for corrected source files when a report balance has no KC account to connect", async () => {
+  const { input, books, file } = await setup();
+  books.report.getWorksheet(1)!.getCell("H9").value = 100;
+  input.files.previousReport = [await file(books.report, "전일.xlsx")];
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("누락된 계좌") });
+});
+
 async function confirm(input: Parameters<BusinessTool["execute"]>[0]) {
   const review = await dailyCashTool.execute(input);
   expect(review.status, JSON.stringify(review)).toBe("needs_input");
