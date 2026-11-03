@@ -55,6 +55,18 @@ it("executes a registered tool using selected bytes and delivers only verified a
   expect(JSON.parse(String(db.prepare("SELECT audit FROM business_artifacts").get()!.audit)).externalData).toEqual({ rate: "fixture-only" });
 });
 
+it("persists the account form and records a readable submitted mapping", async () => {
+  const field = { key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text" as const, required: true, accountRows: [{ key: "001234:KRW", name: "기업 입출금", currency: "KRW", balance: "100" }] };
+  vi.mocked(tool.execute).mockResolvedValueOnce({ status: "needs_input", question: "연결할 위치를 확인하세요.", fields: [field] });
+  const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  await flow.stop(); flow = makeFlow();
+  expect((getRunAction(db, runId) as BusinessAction).fields).toContainEqual(field);
+  await flow.submit(runId, getRunAction(db, runId)!.id, { ...input, values: { ...input.values, accountBindings: '{"001234:KRW":"H12"}' } });
+  expect(loadThread(db, threadId).messages.filter((message) => message.role === "user").at(-1)?.content).toBe("계좌별 전일 일보 연결: 001234:KRW → H12");
+  expect(getRun(db, runId).status).toBe("completed");
+});
+
 it("allows opted-in request/file revisions but rejects changed bytes at a retained source path", async () => {
   tool.editable = true;
   tool.fields.push({ key: "request", type: "text", label: "요청", required: true }, { key: "revision", type: "text", label: "수정", required: false });

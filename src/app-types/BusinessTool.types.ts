@@ -8,7 +8,10 @@ export type MovementEdits = { changes: { index: number; amount: string }[]; add:
  * `multiple` lets a file field take several files (e.g. one bank statement per account). `rows` seeds a `movements` table.
  * `confirm` turns a text field into a one-click acknowledgement: the card submits exactly this string instead of asking the user to type it.
  */
-export type BusinessField = { key: string; label: string; type: "file" | "date" | "text" | "number" | "movements" | "select"; options?: { value: string; label: string }[]; required: boolean; multiple?: boolean; rows?: PlannedMovement[]; confirm?: string };
+export type BusinessField = { key: string; label: string; type: "file" | "date" | "text" | "number" | "movements" | "select"; options?: { value: string; label: string }[]; required: boolean; multiple?: boolean; rows?: PlannedMovement[]; confirm?: string;
+  /** Presents an account-to-cell form while keeping the existing serialized text input contract. */
+  accountRows?: { key: string; name: string; currency: string; balance: string; maturity?: string }[];
+};
 export type BusinessInput = { values: Record<string, string>; files: Record<string, WorkFile[]> };
 export type BusinessAction = {
   id: string; type: "business_tool"; title: string; question: string;
