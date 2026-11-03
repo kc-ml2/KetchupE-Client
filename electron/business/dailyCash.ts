@@ -102,9 +102,16 @@ export const dailyCashTool: BusinessTool = {
       }
       if (previous.missing.length) return ask(`전일 일보에서 수식의 저장 결과가 없는 셀이 있습니다. 전일 일보 ${candidate.name} 시트에서 확인한 금액을 셀별로 입력하세요. 0으로 추정하지 않습니다.`, previous.missing.map((cell) => ({ key: `cell_${cell}`, label: `${candidate.name}!${cell} ${cell.startsWith("I") ? "장부금액" : "금일금액"} (${text(candidate.getCell(`C${cell.slice(1)}`)) || "항목 없음"})`, type: "number" as const })));
       let explicit: Record<string, string>;
-      try { explicit = values.accountBindings ? z.record(z.string(), z.string().regex(/^[HP]\d{1,3}$/)).parse(JSON.parse(values.accountBindings)) : {}; } catch { return ask('계좌 연결은 {"계좌코드:KRW":"H10"} 형태입니다.', [{ key: "accountBindings", label: "확인한 계좌별 일보 셀 JSON" }]); }
+      const bindingField = (accounts = kc.accounts): BusinessField => ({ key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text", required: true,
+        accountRows: accounts.map((a) => ({ key: a.key, name: a.name, currency: a.currency, balance: a.balance.toFixed(), maturity: a.maturity })) });
+      try { explicit = values.accountBindings ? z.record(z.string(), z.string().regex(/^[HP]\d{1,3}$/)).parse(JSON.parse(values.accountBindings)) : {}; } catch { return ask("계좌 연결 위치를 읽을 수 없습니다. 아래 계좌별로 일보 영역과 행 번호를 다시 입력해 주세요.", [bindingField()]); }
       const { bindings, unresolved } = bindAccounts(candidate, kc.accounts, previous.values, explicit, reportDate);
-      if (unresolved.length) return ask(`다음 계좌를 전일 일보와 연결할 수 없습니다. 은행·통화·원금·만기일을 확인해 주세요. 예금 만기가 양쪽 자료에서 다르면 갱신된 전일 일보로 다시 시작해야 합니다.\n${unresolved.join("\n")}\n확실한 연결만 {"계좌코드:통화":"H행번호 또는 P행번호"}로 입력하세요.`, [{ key: "accountBindings", label: "확인한 계좌별 일보 셀 JSON" }]);
+      if (unresolved.length) {
+        const accounts = kc.accounts.filter((a) => !bindings.has(a.key));
+        const details = bullets(unresolved);
+        if (!accounts.length) throw new Error(`전일 일보에 대응하는 KC 계좌가 없는 금액이 있습니다. 누락된 계좌 또는 전일 일보를 확인하고 갱신된 파일로 새 작업을 시작하세요.\n${details}`);
+        return ask(`전일 일보 **${priorName}** 시트에서 아래 계좌가 기록된 위치를 확인해 주세요. 은행·통화·원금·만기일이 같은 계좌인지 확인한 뒤, **일보 영역**과 **행 번호**를 입력하세요. 예를 들어 H12 셀이면 H열과 12행을 선택합니다. H열은 본표의 금일금액, P열은 사업부문 자금현황표(KC)의 잔고입니다.\n\n${details}\n\n예금 만기가 양쪽 자료에서 다르면 갱신된 전일 일보로 새 작업을 시작해야 합니다.`, [bindingField(accounts)]);
+      }
       const planActual = weekly.flatMap((w) => w.movements).filter((m) => m.date === reportDate);
       const planNext = weekly.flatMap((w) => w.movements).filter((m) => m.date === workDate);
       const planDeposits = weekly.flatMap((w) => w.deposits).filter((m) => m.date === reportDate);
