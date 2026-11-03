@@ -89,18 +89,22 @@ export const dailyCashTool: BusinessTool = {
         if (selected.length > 1) throw new Error(`${day} 주간계획이 여러 파일에 중복됩니다. 사용할 버전 하나만 지정하세요.`);
         if (!selected.length && values.noPlanDates !== `${reportDate},${workDate}`) return ask(`주간계획에 ${day} 날짜가 없습니다. 파일의 내부 날짜를 확인하세요. 휴무일 등으로 해당 날짜 계획이 없다면 확인하고 계속하세요. 잘못된 주 파일이면 새 작업에서 교체하세요.`, [{ key: "noPlanDates", label: `${reportDate}·${workDate} 지주현금 계획 없음`, confirm: `${reportDate},${workDate}` }]);
       }
+      const cellField = (cell: string): BusinessField => ({ key: `cell_${cell}`, label: `${candidate.name}!${cell} ${cell.startsWith("I") ? "장부금액" : "금일금액"} (${text(candidate.getCell(`C${cell.slice(1)}`)) || "항목 없음"})`, type: "number", required: true });
       let overrides: Record<string, Amount>;
-      try {
-        // 셀별 숫자 입력란(cell_H9 등)이 기본이고, previousValues JSON은 호환용으로 남긴다.
-        overrides = parseOverrides(values.previousValues);
-        for (const [key, value] of Object.entries(values)) { const cell = key.match(/^cell_([HI]\d{1,3})$/)?.[1]; if (cell && value.trim()) overrides[cell] = decimal(value, cell); }
-      } catch (e) { return ask(`전일 금액 입력을 확인하세요: ${String(e)}`, [{ key: "previousValues", label: "전일 금액 확인 JSON" }]); }
+      try { overrides = parseOverrides(values.previousValues); }
+      catch { return ask("이전에 입력한 전일 금액을 읽을 수 없습니다. 아래 버튼으로 해당 보정값을 초기화한 뒤, 필요한 금액을 셀별 입력란에 다시 작성해 주세요.", [{ key: "previousValues", label: "이전 전일 금액 보정 초기화", confirm: "{}" }]); }
+      const invalidCells: string[] = [];
+      for (const [key, value] of Object.entries(values)) {
+        const cell = key.match(/^cell_([HI]\d{1,3})$/)?.[1];
+        if (!cell) continue;
+        try { overrides[cell] = decimal(value, cell); } catch { invalidCells.push(cell); }
+      }
+      if (invalidCells.length) return ask("전일 금액은 빈칸 없이 숫자로 입력해 주세요. 확인한 금액이 0이면 0을 입력하세요.", invalidCells.map(cellField));
       const previous = priorAmounts(candidate, overrides);
       if (previous.missing.length > MAX_CELL_INPUTS) {
-        // 수식 셀 대부분에 값이 없으면 라이브러리(openpyxl 등)로 저장돼 계산 결과가 빠진 파일이다. 셀별 입력보다 Excel 재저장이 답이다.
-        return ask(`전일 일보에서 수식의 저장 결과가 없는 셀이 ${previous.missing.length}개입니다 (${previous.missing.slice(0, 12).join(", ")} …). 수식의 계산 결과가 저장되지 않은 파일입니다(Excel이 아닌 프로그램으로 저장한 경우). Excel에서 열어 저장한 원본 파일로 새 작업을 시작하세요. 0으로 추정하지 않습니다.`, [{ key: "previousValues", label: "전일 금액 확인 JSON (예: {\"H9\":\"0\"})", required: false }]);
+        throw new Error(`전일 일보에서 수식의 저장 결과가 없는 셀이 ${previous.missing.length}개입니다 (${previous.missing.slice(0, 12).join(", ")} …). Excel에서 열어 수식을 계산하고 저장한 원본 파일로 새 작업을 시작하세요. 빈 금액을 0으로 추정하지 않습니다.`);
       }
-      if (previous.missing.length) return ask(`전일 일보에서 수식의 저장 결과가 없는 셀이 있습니다. 전일 일보 ${candidate.name} 시트에서 확인한 금액을 셀별로 입력하세요. 0으로 추정하지 않습니다.`, previous.missing.map((cell) => ({ key: `cell_${cell}`, label: `${candidate.name}!${cell} ${cell.startsWith("I") ? "장부금액" : "금일금액"} (${text(candidate.getCell(`C${cell.slice(1)}`)) || "항목 없음"})`, type: "number" as const })));
+      if (previous.missing.length) return ask(`전일 일보에서 수식의 저장 결과가 없는 셀이 있습니다. 전일 일보 ${candidate.name} 시트에서 확인한 금액을 셀별로 입력하세요. 0으로 추정하지 않습니다.`, previous.missing.map(cellField));
       let explicit: Record<string, string>;
       const bindingField = (accounts = kc.accounts): BusinessField => ({ key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text", required: true,
         accountRows: accounts.map((a) => ({ key: a.key, name: a.name, currency: a.currency, balance: a.balance.toFixed(), maturity: a.maturity })) });
@@ -121,14 +125,17 @@ export const dailyCashTool: BusinessTool = {
       try {
         actual = applyEdits(planActual, values.actualEdits, reportDate); nextPlan = applyEdits(planNext, values.planEdits, workDate); deposits = applyEdits(planDeposits, values.depositEdits, reportDate);
         if (deposits.some((m) => !depositKind(m))) throw new Error("정기예금 집행은 입금 '정기예금 만기 원금/이자', 지급 '정기예금 가입' 적요만 허용합니다.");
-      } catch (e) { return ask(`${String(e)}\n${correctionHelp}`, [movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), depositField()]); }
+      } catch (e) { return ask(`${e instanceof SyntaxError || e instanceof z.ZodError ? "거래 입력을 읽을 수 없습니다. 아래 표에서 실제 금액과 추가 거래를 다시 확인해 주세요." : String(e)}\n${correctionHelp}`, [movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), depositField()]); }
       const termIssues = depositIssues(candidate, previous.values, kc.accounts, bindings, [...actual, ...deposits], reportDate);
       if (termIssues.length) return ask(`### 정기예금 집행 확인\n\n정기예금 원금과 실제 집행 내역이 맞지 않습니다. **이자는 원금에 합산하지 않습니다.**\n\n${bullets(termIssues)}\n\n${correctionHelp}`, [depositField(), movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+      const cashAccounts = kc.accounts.filter((a) => bindings.get(a.key)?.startsWith("H") && cashRows.includes(Number(bindings.get(a.key)!.slice(1))));
+      const cashField: BusinessField = { key: "cashChanges", label: "계좌별 실제 입금·출금", type: "text", required: true,
+        cashRows: cashAccounts.map((a) => ({ key: a.key, name: a.name, currency: a.currency, opening: previous.values[bindings.get(a.key)!].toFixed(), balance: a.balance.toFixed() })) };
       const changes: Record<string, { incoming: Amount; outgoing: Amount }> = {};
       try {
         const parsed = values.cashChanges ? z.record(z.string(), z.object({ incoming: numberInput, outgoing: numberInput }).strict()).parse(JSON.parse(values.cashChanges)) : {};
         for (const [key, flow] of Object.entries(parsed)) { if (!bindings.get(key)?.startsWith("H") || !cashRows.includes(Number(bindings.get(key)!.slice(1)))) throw new Error("입출금 보정은 연결된 단기성 계좌만 허용합니다."); const incoming = decimal(flow.incoming, key); const outgoing = decimal(flow.outgoing, key); if (incoming.lt(0) || outgoing.lt(0)) throw new Error("입출금은 0 이상이어야 합니다."); changes[key] = { incoming, outgoing }; }
-      } catch (e) { return ask(String(e), [{ key: "cashChanges", label: "확인한 실제 계좌별 입출금 JSON" }]); }
+      } catch { if (!cashAccounts.length) throw new Error("입출금을 보정할 단기성 계좌가 없습니다. 원천 파일을 확인하고 새 작업을 시작하세요."); return ask("계좌별 실제 입금·출금 금액을 확인해 주세요. 연결된 단기성 계좌에 대해 0 이상의 숫자를 입력하세요. 거래가 없으면 0을 입력하고, 확인하지 못한 금액은 추정하지 마세요.", [cashField]); }
       const flowIssues: string[] = []; const matured = l.activeTerms.filter((row) => maturity(candidate, row) <= reportDate && !previous.values[`H${row}`].isZero()).map((row) => `일보 H${row}: ${previous.values[`H${row}`]} 감소, 만기 ${maturity(candidate, row)}`);
       for (const a of kc.accounts) {
         const target = bindings.get(a.key)!; if (target[0] !== "H") continue;
@@ -136,7 +143,11 @@ export const dailyCashTool: BusinessTool = {
         if (l.activeTerms.includes(row) && maturity(candidate, row) <= reportDate) { if (!a.balance.eq(0)) flowIssues.push(`${a.key}: 만기 도래했지만 계좌잔고가 ${a.balance}입니다. 만기 입금/연장 내역을 확인해 원천을 정정하세요.`); continue; }
         if (!sameWon(opening.plus(flow.incoming).minus(flow.outgoing), a.balance)) flowIssues.push(`${a.key}: 전일일보 ${opening} + 입금 ${flow.incoming} - 지급 ${flow.outgoing} ≠ 계좌잔고 ${a.balance} (장부잔액 ${a.ledger})`);
       }
-      if (flowIssues.length) return ask(`장부와 실제 잔고 차이/전일 이월을 확인하세요. 차이를 임의로 지급 처리하지 않습니다. 확인한 실제 입출금 총액을 입력하세요. 예: {"140013557434:KRW":{"incoming":"48200","outgoing":"1000000000"}}\n${flowIssues.join("\n")}`, [{ key: "cashChanges", label: "확인한 실제 계좌별 입출금 JSON" }, movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+      if (flowIssues.length) {
+        const message = `장부와 실제 잔고 차이/전일 이월을 확인하세요. 차이를 임의로 지급 처리하지 않습니다. 아래 계좌별로 확인한 실제 입금 총액과 출금 총액을 입력하세요. 거래가 없으면 0을 입력하세요.\n${flowIssues.join("\n")}`;
+        if (!cashAccounts.length) throw new Error(`입출금 보정으로 해결할 수 없는 예금 잔고입니다. 만기·가입 내역과 원천 파일을 확인하고 새 작업을 시작하세요.\n${flowIssues.join("\n")}`);
+        return ask(message, [cashField, movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+      }
       const holdingOpening = sum(cashRows.filter((r) => r < 20).map((r) => previous.values[`H${r}`]));
       const holdingClosing = sum(kc.accounts.filter((a) => bindings.get(a.key)?.startsWith("H") && cashRows.includes(Number(bindings.get(a.key)!.slice(1))) && a.currency === "KRW").map((a) => a.balance));
       const actualClosing = holdingOpening.plus(sum(actual.filter((m) => m.direction === "in").map((m) => m.amount))).minus(sum(actual.filter((m) => m.direction === "out").map((m) => m.amount)));
