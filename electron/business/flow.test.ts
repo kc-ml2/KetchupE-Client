@@ -323,3 +323,14 @@ it("passes Korean file names to tools in composed (NFC) form even when the file 
   const name = vi.mocked(tool.execute).mock.calls[0][0].files.source[0].name;
   expect(name).toBe("케찹이_데모.xlsx".normalize("NFC")); expect(name).not.toBe(nfd);
 });
+
+it("persists the cash form and records labeled totals instead of serialization", async () => {
+  const field = { key: "cashChanges", label: "실제 입출금", type: "text" as const, required: true, cashRows: [{ key: "001:KRW", name: "기업은행", currency: "KRW", opening: "100", balance: "110" }] };
+  vi.mocked(tool.execute).mockResolvedValueOnce({ status: "needs_input", question: "금액을 확인하세요.", fields: [field, { key: "reset", label: "보정 초기화", type: "text", required: true, confirm: "{}" }] });
+  const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  await flow.stop(); flow = makeFlow();
+  expect((getRunAction(db, runId) as BusinessAction).fields).toContainEqual(field);
+  await flow.submit(runId, getRunAction(db, runId)!.id, { ...input, values: { ...input.values, cashChanges: '{"001:KRW":{"incoming":"10","outgoing":"0"}}', reset: "{}" } });
+  expect(loadThread(db, threadId).messages.filter((message) => message.role === "user").at(-1)?.content).toBe("실제 입출금: 기업은행 (001:KRW) 입금 10, 출금 0\n보정 초기화: 확인 완료");
+});

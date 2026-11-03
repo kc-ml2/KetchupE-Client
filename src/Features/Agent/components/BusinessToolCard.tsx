@@ -6,6 +6,7 @@ import type { WorkFile, WorkSource } from "@app-types/WorkSource.types";
 import KetchupE from "@images/rag.png";
 import MovementsEditor from "./MovementsEditor";
 import AccountBindingsEditor from "./AccountBindingsEditor";
+import CashChangesEditor from "./CashChangesEditor";
 
 const control = "rounded border border-[#D4D4D8] dark:border-[#52525B] p-2 bg-white dark:bg-[#18181B] text-sm disabled:opacity-50";
 const fieldControl = "min-w-0 border border-[#D4D4D8] bg-white px-3 py-2 text-sm text-[#18181B] outline-none hover:border-[#A1A1AA] focus-visible:border-[#71717A] focus-visible:ring-1 focus-visible:ring-[#71717A] dark:border-[#52525B] dark:bg-[#27272A] dark:text-[#FAFAFA] dark:hover:border-[#71717A] dark:focus-visible:border-[#A1A1AA] dark:focus-visible:ring-[#A1A1AA] disabled:cursor-not-allowed disabled:opacity-50 dark:[color-scheme:dark]";
@@ -20,7 +21,7 @@ async function availableFiles(api: KetchupEAgentAPI, sources: WorkSource[]) {
 /** Short read-only rendering of a confirmed field for the "확정된 입력" summary. */
 const confirmedValue = (field: BusinessField, input: BusinessInput): string => {
   if (field.type === "file") return (input.files[field.key] ?? []).map((file) => file.relativePath || file.name).join(", ");
-  if (field.type === "movements" || field.accountRows) return "확인 완료";
+  if (field.confirm || field.type === "movements" || field.accountRows || field.cashRows) return "확인 완료";
   return input.values[field.key] ?? "";
 };
 
@@ -74,6 +75,9 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
         {open.map((field) => {
           const label = `${field.label}${field.required ? " *" : ""}`;
           if (field.confirm) return <p key={field.key} className="flex items-center gap-2 text-[#52525B] dark:text-[#A1A1AA]"><LuCheck aria-hidden className="shrink-0" />{field.label}</p>;
+          if (field.cashRows) return <fieldset key={field.key} className="grid min-w-0 gap-2"><legend className={`${fieldLabel} mb-2`}>{label}</legend>
+            <CashChangesEditor field={field} value={input.values[field.key]} disabled={busy} onChange={(value) => setValue(field.key, value)} />
+          </fieldset>;
           if (field.accountRows) return <fieldset key={field.key} className="grid min-w-0 gap-2"><legend className={`${fieldLabel} mb-2`}>{label}</legend>
             <AccountBindingsEditor field={field} value={input.values[field.key]} disabled={busy} onChange={(value) => setValue(field.key, value)} />
           </fieldset>;

@@ -246,3 +246,19 @@ it("adds a work-date plan separately from actuals and keeps it editable at final
   expect(final.values.actualEdits).toBe("확인");
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it.each(["invalid", "null", '{"unknown":{"incoming":"12","outgoing":"3"}}'])("collects cash totals through labels and recovers saved input %s", async (value) => {
+  const api = apiFixture();
+  const field = { key: "cashChanges", label: "계좌별 실제 입금·출금", type: "text" as const, required: true, cashRows: [{ key: "001:KRW", name: "기업은행", currency: "KRW", opening: "100", balance: "110" }, { key: "002:USD", name: "외화", currency: "USD", opening: "1", balance: "1" }] };
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [field], input: { files: {}, values: { cashChanges: value } } }} />);
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  const incoming = screen.getByLabelText("001:KRW 실제 입금 총액") as HTMLInputElement;
+  expect(incoming.checkValidity()).toBe(false);
+  fireEvent.change(incoming, { target: { value: "-1" } }); expect(incoming.checkValidity()).toBe(false);
+  fireEvent.change(incoming, { target: { value: "10.5" } }); expect(incoming.checkValidity()).toBe(true);
+  fireEvent.change(screen.getByLabelText("001:KRW 실제 출금 총액"), { target: { value: "0.5" } });
+  for (const label of ["입금", "출금"]) fireEvent.change(screen.getByLabelText(`002:USD 실제 ${label} 총액`), { target: { value: "0" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
+  expect(JSON.parse(vi.mocked(api.submitBusinessInput).mock.calls[0][2].values.cashChanges)).toEqual({ "001:KRW": { incoming: "10.5", outgoing: "0.5" }, "002:USD": { incoming: "0", outgoing: "0" } });
+});
