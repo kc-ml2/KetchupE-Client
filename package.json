@@ -1,7 +1,7 @@
 {
   "name": "KetchupE",
   "private": true,
-  "version": "3.0.13",
+  "version": "3.0.14",
   "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.js",
@@ -60,7 +60,9 @@
       "hardenedRuntime": true,
       "entitlements": "electron/assets/entitlements.mac.plist",
       "entitlementsInherit": "electron/assets/entitlements.mac.plist",
-      "extendInfo": { "NSAppleEventsUsageDescription": "일일자금일보를 재계산하고 이미지로 출력하기 위해 Microsoft Excel을 제어합니다." },
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "일일자금일보를 재계산하고 이미지로 출력하기 위해 Microsoft Excel을 제어합니다."
+      },
       "notarize": true,
       "target": [
         {
