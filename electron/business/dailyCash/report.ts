@@ -238,7 +238,7 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   let lastCol = 1;
   s.eachRow((row, r) => { if (r <= lastRow) row.eachCell((cell, c) => { if (cell.value !== null) lastCol = Math.max(lastCol, c); }); });
   s.pageSetup.printArea = `A1:${s.getCell(lastRow, lastCol).address}`; s.state = "visible";
-  Object.assign(s.pageSetup, { fitToPage: true, fitToWidth: 1, fitToHeight: 0 });
+  Object.assign(s.pageSetup, { fitToPage: true, fitToWidth: 1, fitToHeight: 1 });
   book.calcProperties.fullCalcOnLoad = true;
   return { sheet: s, totalKrw: totals[3][1], rolloverChecks, textFitRanges };
 }
