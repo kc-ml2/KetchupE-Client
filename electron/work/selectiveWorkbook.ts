@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import ExcelJS from "exceljs";
+import { textFitArea } from "./textFit.ts";
 import JSZip from "jszip";
 import { DOMParser, XMLSerializer, type Document, type Element } from "@xmldom/xmldom";
 
@@ -170,6 +171,94 @@ export class SelectiveWorkbook {
     this.zip.file("xl/workbook.xml", xml(this.workbook)); this.zip.file("xl/_rels/workbook.xml.rels", xml(this.relationships)); this.zip.file("[Content_Types].xml", xml(types));
     return this.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
   }
+
+  /** Import validated caches and measured text fits; archived sheets and unrelated styles stay untouched. */
+  async withCalculatedValues(calculated: ExcelJS.Worksheet, checks: string[], engine: "Excel" | "LibreOffice" = "Excel", fitted: string[] = []): Promise<Uint8Array> {
+    const expected = (await this.loadSheet(calculated.name)).getWorksheet(calculated.name)!;
+    const areas = fitted.map(range => ({ range, ...textFitArea(expected, range) }));
+    const part = this.sheet(calculated.name).path;
+    const sheet = await document(this.zip, part);
+    for (const cell of elements(sheet, "c")) {
+      const address = cell.getAttribute("r")!;
+      const before = expected.getCell(address), after = calculated.getCell(address);
+      if (before.isMerged && before.master.address !== address) continue;
+      if (before.value === null && after.isMerged && areas.some(area => after.master.address === area.start.address && Number(before.row) === area.row.number && Number(before.col) <= Number(area.end.col))) continue;
+      if (before.formula !== after.formula && !(engine === "LibreOffice" && before.formula && after.formula && singletonSum(before.formula) === singletonSum(after.formula))) throw new Error(`${address}: ${engine} 재계산 중 수식이 변경되었습니다.`);
+      if (!before.formula) {
+        // Office can split unchanged strings into font runs and stores numbers at 15 significant digits.
+        const strings = [ExcelJS.ValueType.String, ExcelJS.ValueType.RichText];
+        const unchanged = strings.includes(before.type) && strings.includes(after.type) ? before.text === after.text
+          : typeof before.value === "number" && typeof after.value === "number" ? before.value.toPrecision(15) === after.value.toPrecision(15)
+          : JSON.stringify(before.value) === JSON.stringify(after.value);
+        if (!unchanged) throw new Error(`${address}: ${engine} 재계산 중 입력값이 변경되었습니다.`);
+        continue;
+      }
+      const cached: unknown = after.result;
+      const result: unknown = cached instanceof Date ? cached.getTime() / 86400000 + 25569 - (calculated.workbook.properties.date1904 ? 1462 : 0)
+        : engine === "LibreOffice" && checks.includes(address) && cached === 1 ? true : cached;
+      if (result === undefined || result === null || (typeof result === "object") || (typeof result === "number" && !Number.isFinite(result))) throw new Error(`${address}: ${engine} 수식 계산 결과를 확인할 수 없습니다.`);
+      if (checks.includes(address) && result !== true) throw new Error(`${address}: 전일말 금액과 금일초 금액이 일치하지 않습니다.`);
+      for (const old of elements(cell, "v")) cell.removeChild(old);
+      cell.removeAttribute("t");
+      if (typeof result === "boolean") cell.setAttribute("t", "b");
+      else if (typeof result === "string") cell.setAttribute("t", "str");
+      const value = append(sheet, cell, MAIN, "v", {});
+      value.textContent = typeof result === "boolean" ? (result ? "1" : "0") : String(result);
+    }
+    for (const address of checks) {
+      const result: unknown = calculated.getCell(address).result;
+      if (!expected.getCell(address).formula || (result !== true && !(engine === "LibreOffice" && result === 1))) throw new Error(`${address}: 이월 검증 수식이 없거나 일치하지 않습니다.`);
+    }
+    if (areas.length) {
+      const styles = await document(this.zip, "xl/styles.xml");
+      const formats = elements(styles, "cellXfs")[0];
+      const wrapped = new Map<string, string>();
+      for (const area of areas) {
+        const after = calculated.getCell(area.start.address), afterRow = calculated.getRow(area.row.number);
+        const height = afterRow.height, originalHeight = area.row.height ?? expected.properties.defaultRowHeight ?? 15;
+        if (!height || !Number.isFinite(height) || height < originalHeight - 0.1 || height > 409.5) throw new Error(`${area.range}: 텍스트를 표시할 행 높이를 확인하세요.`);
+        if (area.start.alignment?.wrapText && !after.alignment?.wrapText) throw new Error(`${area.range}: 원본 줄바꿈 설정이 변경되었습니다.`);
+        if (after.alignment?.wrapText && !area.start.alignment?.wrapText) {
+          if (area.start.address !== area.end.address && !calculated.model.merges.includes(area.range)) throw new Error(`${area.range}: 줄바꿈이 설명 영역 전체에 적용되지 않았습니다.`);
+          const cell = elements(sheet, "c").find(cell => cell.getAttribute("r") === area.start.address)!;
+          const old = cell.getAttribute("s") ?? "0";
+          if (!wrapped.has(old)) {
+            const format = children(formats)[Number(old)].cloneNode(true) as Element;
+            const alignment = elements(format, "alignment")[0] ?? append(styles, format, MAIN, "alignment", {});
+            const protection = children(format).find(node => ["protection", "extLst"].includes(node.localName!));
+            if (protection) format.insertBefore(alignment, protection);
+            alignment.setAttribute("wrapText", "1");
+            format.setAttribute("applyAlignment", "1");
+            wrapped.set(old, String(children(formats).length)); formats.appendChild(format);
+          }
+          cell.setAttribute("s", wrapped.get(old)!);
+        }
+        if (calculated.model.merges.includes(area.range) && !expected.model.merges.includes(area.range)) {
+          let merges = elements(sheet, "mergeCells")[0];
+          if (!merges) {
+            merges = sheet.createElementNS(MAIN, "mergeCells");
+            const later = ["phoneticPr", "conditionalFormatting", "dataValidations", "hyperlinks", "printOptions", "pageMargins", "pageSetup", "headerFooter", "rowBreaks", "colBreaks", "drawing", "legacyDrawing", "extLst"];
+            sheet.documentElement!.insertBefore(merges, children(sheet.documentElement!).find(node => later.includes(node.localName!)) ?? null);
+          }
+          append(sheet, merges, MAIN, "mergeCell", { ref: area.range });
+          merges.setAttribute("count", String(children(merges).length));
+        }
+        if (height > originalHeight + 0.1) {
+          const row = elements(sheet, "row").find(row => row.getAttribute("r") === String(area.row.number))!;
+          row.setAttribute("ht", String(height)); row.setAttribute("customHeight", "1");
+        }
+      }
+      formats.setAttribute("count", String(children(formats).length));
+      this.zip.file("xl/styles.xml", xml(styles));
+    }
+    this.zip.file(part, xml(sheet));
+    return this.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  }
+}
+
+// Calc rewrites SUM(A1:A1) as SUM(A1); never normalize quoted text or sheet names.
+function singletonSum(formula: string) {
+  return formula.split(/("(?:[^"]|"")*"|'(?:[^']|'')*')/g).map((part, index) => index % 2 ? part : part.replace(/(?<![A-Za-z0-9_.])SUM\((\$?[A-Z]{1,3}\$?[1-9]\d*):\1\)/g, "SUM($1)")).join("");
 }
 
 /** Append/deduplicate style records; existing indexes must never move. */

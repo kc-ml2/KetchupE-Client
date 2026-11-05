@@ -1,7 +1,7 @@
 {
   "name": "KetchupE",
   "private": true,
-  "version": "3.0.11",
+  "version": "3.0.12",
   "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.js",
@@ -58,6 +58,9 @@
       "category": "public.app-category.productivity",
       "icon": "icon.icns",
       "hardenedRuntime": true,
+      "entitlements": "electron/assets/entitlements.mac.plist",
+      "entitlementsInherit": "electron/assets/entitlements.mac.plist",
+      "extendInfo": { "NSAppleEventsUsageDescription": "일일자금일보를 재계산하고 이미지로 출력하기 위해 Microsoft Excel을 제어합니다." },
       "notarize": true,
       "target": [
         {
@@ -97,12 +100,14 @@
       "node_modules/onnxruntime-node/**",
       "node_modules/@img/**",
       "node_modules/sharp/**",
-      "node_modules/kordoc/**"
+      "node_modules/kordoc/**",
+      "node_modules/@hyzyla/pdfium/**"
     ]
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.43",
     "@huggingface/transformers": "^4.2.0",
+    "@hyzyla/pdfium": "2.1.13",
     "@modelcontextprotocol/client": "^2.0.0",
     "@xmldom/xmldom": "0.9.12",
     "agentation": "^2.3.2",

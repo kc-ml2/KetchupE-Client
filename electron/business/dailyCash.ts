@@ -7,8 +7,8 @@ import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { readCashStatus, differences, parseOverrides } from "./dailyCash/cashStatus.ts";
 import { fetchHana, type Rates } from "./dailyCash/hana.ts";
 import { renderSheet } from "./dailyCash/image.ts";
-import { bindAccounts, buildReport, cashRows, depositIssues, layout, maturity, priorAmounts } from "./dailyCash/report.ts";
-import { date, decimal, isoSheetDate, sameWon, sheetDate, shiftDate, previousBusinessDay, sum, text, type Amount } from "./dailyCash/values.ts";
+import { bindAccounts, buildReport, cashRows, depositIssues, layout, maturity, priorAmounts, rolloverFormulas } from "./dailyCash/report.ts";
+import { date, decimal, isoSheetDate, money, sameWon, sheetDate, shiftDate, previousBusinessDay, sum, text, type Amount } from "./dailyCash/values.ts";
 import { depositKind, readWeekly, type Movement } from "./dailyCash/weekly.ts";
 
 const ask = (question: string, fields: (Partial<BusinessField> & { key: string; label: string })[], checkpoint?: Record<string, unknown>): ToolResult => ({ status: "needs_input", question, fields: fields.map((f) => ({ ...f, type: f.type ?? "text", required: f.required ?? true })), checkpoint });
@@ -47,7 +47,7 @@ const listing = (items: Movement[]) => items.length ? items.map((m) => `- **${m.
 const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계획에 없는 거래는 행을 추가하세요.';
 
 export const dailyCashTool: BusinessTool = {
-  id: "daily_cash", version: "1.1.0", title: "일일자금일보",
+  id: "daily_cash", version: "1.2.0", title: "일일자금일보",
   updateSource: "previousReport",
   description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
   examples: ["일일자금일보 작성해줘", "어제 기준 자금일보와 이미지 만들어줘"],
@@ -183,10 +183,16 @@ export const dailyCashTool: BusinessTool = {
         `### 원화 대사 및 환율\n\n- **원화 대사 대상: ${kc.total}원** (${markdownText(kc.totalSource)}, 계좌잔고)\n- 고시: ${rates.date} 최종 ${markdownText(rates.round)}회\n- USD ${rates.perUnit.USD}, JPY(1엔) ${rates.perUnit.JPY}, CNY ${rates.perUnit.CNY}`,
         "확정하려면 **확인하고 계속**을 누르세요. 표를 수정하면 새 확인 코드로 다시 확인합니다.",
       ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
-      const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes);
+      const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes, await rolloverFormulas(archive, candidate));
       if (!sameWon(built.totalKrw, kc.total)) throw new Error(`총 원화 대사 불일치: 일보 ${built.totalKrw}, KC ${kc.total}, 차이 ${built.totalKrw.minus(kc.total)}. 결과를 발행하지 않습니다.`);
-      signal.throwIfAborted(); const image = await renderSheet(built.sheet, built.lastRow); const bytes = await archive.appendSheet(book, built.sheet.name); signal.throwIfAborted();
-      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치.`, file: { name: files.previousReport[0].name, bytes }, validationSheet: built.sheet.name, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최종 환율·만기·계좌 연결 확인", passed: true }], externalData: audit };
+      signal.throwIfAborted();
+      const prepared = await archive.appendSheet(book, built.sheet.name);
+      const { bytes, image, sheet: calculated, engine, fallbackReason } = await renderSheet(prepared, built.sheet.name, built.rolloverChecks, signal, built.textFitRanges);
+      const calculatedLayout = layout(calculated);
+      if (!sameWon(money(calculated.getCell(`G${calculatedLayout.total}`)), kc.total) || !money(calculated.getCell(`D${calculatedLayout.closing}`)).eq(money(calculated.getCell("H17")))) throw new Error(`${engine} 재계산 후 총 원화 또는 주요 집행 마감잔액이 일치하지 않습니다.`);
+      for (const account of kc.accounts) if (!sameWon(money(calculated.getCell(bindings.get(account.key)!)), account.balance)) throw new Error(`${account.key}: ${engine} 재계산 후 계좌 잔고가 일치하지 않습니다.`);
+      signal.throwIfAborted();
+      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치. 출력 엔진: ${engine}${fallbackReason ? " (Excel 출력 실패로 자동 전환)" : ""}.`, file: { name: files.previousReport[0].name, bytes }, validationSheet: built.sheet.name, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최종 환율·만기·계좌 연결 확인", passed: true }], externalData: { ...audit, outputEngine: engine, fallbackReason: fallbackReason ?? null } };
     } catch (error) { signal.throwIfAborted(); return { status: "failed", message: error instanceof Error ? error.message : String(error) }; }
   },
 };

@@ -1,48 +1,90 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import sharp from "sharp";
-import type ExcelJS from "exceljs";
-import { raw } from "./values.ts";
-const escape = (v: string) => v.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-const colour = (argb?: string, fallback = "#ffffff") => argb && /^[A-Fa-f0-9]{6,8}$/.test(argb) ? `#${argb.slice(-6)}` : fallback;
-/** Render the visible report cells (including merges and hidden rows/columns), not a redesigned summary. */
-export async function renderSheet(sheet: ExcelJS.Worksheet, lastRow: number): Promise<Uint8Array> {
-  // The report body is A:M, but the 사업부문 자금현황표(KC) side table sits further right (O:P); include every column that holds a value.
-  let lastCol = 13;
-  sheet.eachRow((row, r) => { if (r <= lastRow) row.eachCell((cell, c) => { const value = raw(cell); if (value != null && value !== "" && c > lastCol) lastCol = c; }); });
-  const widths = Array.from({ length: lastCol }, (_, i) => sheet.getColumn(i + 1).hidden ? 0 : Math.round((sheet.getColumn(i + 1).width ?? 10) * 7 + 5));
-  const heights = Array.from({ length: lastRow }, (_, i) => sheet.getRow(i + 1).hidden ? 0 : Math.round((sheet.getRow(i + 1).height ?? 15) * 4 / 3));
-  const xs = [0], ys = [0]; widths.forEach((w) => xs.push(xs.at(-1)! + w)); heights.forEach((h) => ys.push(ys.at(-1)! + h));
-  const width = xs.at(-1)!, height = ys.at(-1)!;
-  if (width * height > 24000000 || !width || !height) throw new Error("일보 이미지 크기를 확인하세요.");
-  const merges = sheet.model.merges.map((range) => { const [a, b] = range.split(":").map((v) => sheet.getCell(v)); return { top: Number(a.row), bottom: Number(b.row), left: Number(a.col), right: Number(b.col) }; });
-  const parts: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="white"/>`];
-  for (let r = 1; r <= lastRow; r++) for (let c = 1; c <= lastCol; c++) {
-    if (!widths[c - 1] || !heights[r - 1]) continue;
-    const cell = sheet.getCell(r, c); if (cell.isMerged && cell.master.address !== cell.address) continue;
-    const merge = merges.find((m) => m.top === r && m.left === c);
-    const x = xs[c - 1], y = ys[r - 1], w = xs[Math.min(merge?.right ?? c, lastCol)] - x, h = ys[Math.min(merge?.bottom ?? r, lastRow)] - y;
-    const fill = cell.fill?.type === "pattern" ? colour(cell.fill.fgColor?.argb) : "#ffffff";
-    parts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"/>`);
-    for (const [side, coords] of Object.entries({ top: [x, y, x + w, y], bottom: [x, y + h, x + w, y + h], left: [x, y, x, y + h], right: [x + w, y, x + w, y + h] })) {
-      const edge = cell.border?.[side as "top" | "bottom" | "left" | "right"];
-      if (edge?.style) parts.push(`<line x1="${coords[0]}" y1="${coords[1]}" x2="${coords[2]}" y2="${coords[3]}" stroke="${colour(edge.color?.argb, "#777777")}" stroke-width="${edge.style === "medium" || edge.style === "thick" ? 2 : 1}"/>`);
+import JSZip from "jszip";
+import { PDFiumLibrary } from "@hyzyla/pdfium";
+import { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
+import { ExcelExportError, exportWithExcel } from "./nativeExcel.ts";
+import { exportWithLibreOffice } from "./libreOffice.ts";
+import { textFitArea } from "../../work/textFit.ts";
+
+export async function pdfImage(pdf: Uint8Array, signal: AbortSignal): Promise<Buffer> {
+  const library = await PDFiumLibrary.init();
+  try {
+    const document = await library.loadDocument(pdf);
+    try {
+      const pages: { input: Buffer; top: number; left: number }[] = [];
+      let width = 0, height = 0;
+      if (!document.getPageCount() || document.getPageCount() > 30) throw new Error("일보 PDF 페이지 수를 확인하세요.");
+      for (const page of document.pages()) {
+        signal.throwIfAborted();
+        const size = page.getOriginalSize();
+        const w = Math.ceil(size.originalWidth * 2), h = Math.ceil(size.originalHeight * 2);
+        if (Math.max(width, w) * (height + h) > 96000000) throw new Error("일보 이미지 크기를 확인하세요.");
+        const image = await page.render({ scale: 2, render: async ({ data, width, height }) => sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer() });
+        pages.push({ input: Buffer.from(image.data), top: height, left: 0 });
+        width = Math.max(width, image.width); height += image.height;
+      }
+      return await sharp({ create: { width, height, channels: 4, background: "white" } }).composite(pages).png().toBuffer();
+    } finally { document.destroy(); }
+  } finally { library.destroy(); }
+}
+
+/** Native engines own calculation and layout; only validated caches replace the preserved XLSX. */
+export async function renderSheet(bytes: Uint8Array, name: string, checks: string[], signal: AbortSignal, textFitRanges: string[] = []) {
+  signal.throwIfAborted();
+  const zip = await JSZip.loadAsync(bytes);
+  if (Object.keys(zip.files).some((path) => /(?:vbaProject\.bin|xl\/(?:macrosheets|queryTables|embeddings)\/|xl\/connections\.xml)/i.test(path))) throw new Error("매크로·자동 외부 연결이 있는 통합문서는 자동 출력할 수 없습니다.");
+  const archive = await SelectiveWorkbook.open(bytes);
+  const expected = (await archive.loadSheet(name)).getWorksheet(name)!;
+  for (const range of textFitRanges) textFitArea(expected, range);
+  expected.eachRow((row) => row.eachCell((cell) => {
+    if (cell.formula && /\[[^\]]+\][^!]*!/.test(cell.formula)) throw new Error(`${cell.address}: 외부 통합문서 참조를 확인하세요. 자동 출력 전에 내부 시트 참조로 연결해야 합니다.`);
+  }));
+  try {
+    return { ...await renderWithEngine(bytes, name, checks, signal, "Excel", textFitRanges), fallbackReason: undefined };
+  } catch (error) {
+    signal.throwIfAborted();
+    if (!(error instanceof ExcelExportError)) throw error;
+    try {
+      return { ...await renderWithEngine(bytes, name, checks, signal, "LibreOffice", textFitRanges), fallbackReason: error.message };
+    } catch (fallbackError) {
+      signal.throwIfAborted();
+      throw new Error(`${error.message}\nLibreOffice 대체 출력도 완료하지 못했습니다. ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
     }
-    const value = raw(cell); if (value == null || value === "") continue;
-    const number = typeof value === "number";
-    const decimals = number ? (cell.numFmt?.split(";")[0]?.match(/\.([0#]+)/)?.[1].length ?? 0) : 0;
-    const display = number ? value.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) : String(value);
-    const size = Math.min((cell.font?.size ?? 10) * 4 / 3, 24); const right = cell.alignment?.horizontal === "right" || (number && cell.alignment?.horizontal !== "center"); const center = cell.alignment?.horizontal === "center";
-    const tx = right ? x + w - 4 : center ? x + w / 2 : x + 4;
-    const lines: string[] = [];
-    for (const line of display.split("\n")) {
-      if (!cell.alignment?.wrapText || number) { lines.push(line); continue; }
-      let part = "", units = 0;
-      for (const char of line) { const step = /[^\x00-\x7f]/.test(char) ? 1 : 0.55; if (units + step > (w - 8) / size && part) { lines.push(part); part = ""; units = 0; } part += char; units += step; } lines.push(part);
-    }
-    const fit = number ? Math.min(size, (w - 8) / Math.max(display.length * 0.57, 1)) : size;
-    const clip = `c${r}_${c}`;
-    parts.push(`<clipPath id="${clip}"><rect x="${x + 2}" y="${y + 1}" width="${Math.max(0, w - 4)}" height="${Math.max(0, h - 2)}"/></clipPath><text clip-path="url(#${clip})" font-family="Noto Sans KR, Apple SD Gothic Neo, Malgun Gothic, sans-serif" font-size="${fit}" font-weight="${cell.font?.bold ? 700 : 400}" fill="${colour(cell.font?.color?.argb, "#222222")}" text-anchor="${right ? "end" : center ? "middle" : "start"}">`);
-    lines.forEach((line, i) => parts.push(`<tspan x="${tx}" y="${y + Math.max(size, (h - lines.length * size * 1.12) / 2 + size * 0.85) + i * size * 1.12}">${escape(line)}</tspan>`)); parts.push("</text>");
   }
-  parts.push("</svg>");
-  return sharp(Buffer.from(parts.join("")), { density: 144, limitInputPixels: 96000000 }).png().toBuffer();
+}
+
+async function renderWithEngine(bytes: Uint8Array, name: string, checks: string[], signal: AbortSignal, engine: "Excel" | "LibreOffice", textFitRanges: string[]) {
+  signal.throwIfAborted();
+  // Each attempt starts from the pristine prepared workbook, even if Excel failed after saving.
+  const archive = await SelectiveWorkbook.open(bytes);
+  const exportFile = engine === "Excel" ? exportWithExcel : exportWithLibreOffice;
+  // Excel for Mac cannot open arbitrary temporary paths without a per-file sandbox permission dialog.
+  const temporaryRoot = engine === "Excel" && process.platform === "darwin" ? join(homedir(), "Library", "Containers", "com.microsoft.Excel", "Data", "Library", "Caches", "KetchupE") : tmpdir();
+  let directory: string;
+  try {
+    await mkdir(temporaryRoot, { recursive: true, mode: 0o700 });
+    directory = await mkdtemp(join(temporaryRoot, "ketchupe-report-"));
+  } catch (error) {
+    if (engine === "Excel") throw new ExcelExportError(`Excel 임시 작업 폴더를 만들지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+  try {
+    const input = join(directory, `${basename(directory)}.xlsx`), pdf = join(directory, `${basename(directory)}.pdf`);
+    await writeFile(input, bytes, { mode: 0o600 });
+    await exportFile(input, name, pdf, signal, "calculate", textFitRanges);
+    const fitted = textFitRanges.length ? (await readFile(`${input}.fit`, "utf8")).split(/\s+/).filter(Boolean) : [];
+    if (fitted.some(range => !textFitRanges.includes(range))) throw new Error("출력 엔진이 요청하지 않은 셀의 배치를 변경했습니다.");
+    const calculated = (await (await SelectiveWorkbook.open(await readFile(input))).loadSheet(name)).getWorksheet(name)!;
+    const output = await archive.withCalculatedValues(calculated, checks, engine, fitted);
+    // Render the exact deliverable with calculation disabled; volatile formulas must not diverge from its caches.
+    await writeFile(input, output);
+    await exportFile(input, name, pdf, signal, "pdf");
+    if (!(await readFile(input)).equals(Buffer.from(output))) throw new Error("PDF 출력 중 최종 XLSX가 변경되었습니다.");
+    const image = await pdfImage(await readFile(pdf), signal);
+    signal.throwIfAborted();
+    return { bytes: output, image, sheet: calculated, engine };
+  } finally { await rm(directory, { recursive: true, force: true }); }
 }
