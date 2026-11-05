@@ -5,6 +5,8 @@ import { access } from "node:fs/promises";
 
 export class ExcelExportError extends Error {}
 
+const EXCEL_TIMEOUT_MS = 90_000, CLEANUP_TIMEOUT_MS = 10_000, OUTPUT_BUFFER_BYTES = 1024 * 1024;
+
 // Arguments are passed as data, never interpolated into either script.
 export const macExcelScript = `on fitDescriptions(targetSheet, fitRanges)
   set fitted to ""
@@ -227,15 +229,15 @@ export async function exportWithExcel(input: string, sheet: string, pdf: string,
   try {
     const execute = promisify(execFile);
     if (process.platform === "darwin") {
-      await execute("/usr/bin/osascript", ["-e", macExcelScript, input, sheet, pdf, operation, textFitRanges.join("\n")], { timeout: 90000, maxBuffer: 1024 * 1024 });
+      await execute("/usr/bin/osascript", ["-e", macExcelScript, input, sheet, pdf, operation, textFitRanges.join("\n")], { timeout: EXCEL_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES });
     } else if (process.platform === "win32") {
       const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
       const env = { ...process.env, KETCHUPE_EXCEL_INPUT: input, KETCHUPE_EXCEL_SHEET: sheet, KETCHUPE_EXCEL_PDF: pdf, KETCHUPE_EXCEL_PROCESS: `${input}.process`, KETCHUPE_EXCEL_OPERATION: operation, KETCHUPE_EXCEL_FIT: textFitRanges.join(",") };
       const args = (script: string) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
       try {
-        await execute(powershell, args(windowsExcelScript), { timeout: 90000, maxBuffer: 1024 * 1024, windowsHide: true, env });
+        await execute(powershell, args(windowsExcelScript), { timeout: EXCEL_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES, windowsHide: true, env });
       } finally {
-        await execute(powershell, args(windowsCleanupScript), { timeout: 10000, maxBuffer: 1024 * 1024, windowsHide: true, env });
+        await execute(powershell, args(windowsCleanupScript), { timeout: CLEANUP_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES, windowsHide: true, env });
       }
     } else throw new Error("Microsoft Excel 출력은 Windows와 macOS에서 지원합니다.");
     await access(operation === "calculate" ? input : pdf);

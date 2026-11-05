@@ -9,6 +9,8 @@ import { ExcelExportError, exportWithExcel } from "./nativeExcel.ts";
 import { exportWithLibreOffice } from "./libreOffice.ts";
 import { textFitArea } from "../../work/textFit.ts";
 
+const MAX_PDF_PAGES = 30, MAX_IMAGE_PIXELS = 96_000_000, RENDER_SCALE = 2;
+
 export async function pdfImage(pdf: Uint8Array, signal: AbortSignal): Promise<Buffer> {
   const library = await PDFiumLibrary.init();
   try {
@@ -16,13 +18,13 @@ export async function pdfImage(pdf: Uint8Array, signal: AbortSignal): Promise<Bu
     try {
       const pages: { input: Buffer; top: number; left: number }[] = [];
       let width = 0, height = 0;
-      if (!document.getPageCount() || document.getPageCount() > 30) throw new Error("일보 PDF 페이지 수를 확인하세요.");
+      if (!document.getPageCount() || document.getPageCount() > MAX_PDF_PAGES) throw new Error("일보 PDF 페이지 수를 확인하세요.");
       for (const page of document.pages()) {
         signal.throwIfAborted();
         const size = page.getOriginalSize();
-        const w = Math.ceil(size.originalWidth * 2), h = Math.ceil(size.originalHeight * 2);
-        if (Math.max(width, w) * (height + h) > 96000000) throw new Error("일보 이미지 크기를 확인하세요.");
-        const image = await page.render({ scale: 2, render: async ({ data, width, height }) => sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer() });
+        const w = Math.ceil(size.originalWidth * RENDER_SCALE), h = Math.ceil(size.originalHeight * RENDER_SCALE);
+        if (Math.max(width, w) * (height + h) > MAX_IMAGE_PIXELS) throw new Error("일보 이미지 크기를 확인하세요.");
+        const image = await page.render({ scale: RENDER_SCALE, render: async ({ data, width, height }) => sharp(data, { raw: { width, height, channels: 4 } }).png().toBuffer() });
         pages.push({ input: Buffer.from(image.data), top: height, left: 0 });
         width = Math.max(width, image.width); height += image.height;
       }

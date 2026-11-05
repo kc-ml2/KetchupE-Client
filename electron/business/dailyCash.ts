@@ -41,7 +41,7 @@ function manualRates(values: Record<string, string>, reportDate: string): Rates 
   const positive = (key: string) => { const amount = decimal(values[key], key); if (amount.lte(0)) throw new Error(`${key}는 양수여야 합니다.`); return amount; };
   return { date: date(values.manualRateDate), requestedDate: reportDate, round: values.manualRateRound?.trim() || "수동", publishedAt: "담당자 수동 입력", source: "담당자 수동 입력 (하나은행 고시환율 화면 확인)", fetchedAt: new Date().toISOString(), responseHash: "manual", perUnit: { USD: positive("manualUSD").toString(), JPY: positive("manualJPY100").div(100).toString(), CNY: positive("manualCNY").toString() } };
 }
-const markdownText = (value: string) => value.replace(/([\\`*_{}\[\]<>])/g, "\\$1").replace(/[\r\n]+/g, " ");
+const markdownText = (value: string) => value.replace(/([\\`*_{}[\]<>])/g, "\\$1").replace(/[\r\n]+/g, " ");
 const bullets = (items: string[]) => items.map((item) => `- ${markdownText(item)}`).join("\n");
 const listing = (items: Movement[]) => items.length ? items.map((m) => `- **${m.direction === "in" ? "입금" : "지급"} ${m.amount.toFixed()}원** · ${markdownText(m.description)}${m.party ? ` / ${markdownText(m.party)}` : ""}`).join("\n") : "해당일 지주현금 계획 없음";
 const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계획에 없는 거래는 행을 추가하세요.';

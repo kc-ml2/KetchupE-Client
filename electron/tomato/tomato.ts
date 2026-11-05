@@ -344,7 +344,7 @@ function isTableStart(lines: string[], index: number): boolean {
   return /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(lines[index + 1]);
 }
 
-const ARTICLE_HEADING = /^제\s*\d+\s*조(?:의\s*\d+)?\s*[(\[【]?/u;
+const ARTICLE_HEADING = /^제\s*\d+\s*조(?:의\s*\d+)?\s*[([【]?/u;
 
 /** kordoc emits "제N조 (…)" as bold paragraphs and 항 as list items, so breadcrumbs become body sentences.
  *  Promote articles to level-2 headings and turn 항 lists into "N. …" paragraphs so one article is one section. */

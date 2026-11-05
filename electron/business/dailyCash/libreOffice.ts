@@ -9,6 +9,8 @@ import { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
 
 export class LibreOfficeExportError extends Error {}
 
+const LIBREOFFICE_TIMEOUT_MS = 90_000, KILL_TIMEOUT_MS = 10_000;
+
 /** User-installed LibreOffice; no dependency on the development machine's bundled runtime. */
 export async function libreOfficeExecutable() {
   const filenames = process.platform === "win32" ? ["soffice.com", "soffice.exe"] : ["soffice"];
@@ -157,7 +159,7 @@ Failed:
 End Sub`;
 
 /** Stop only this private profile's process tree on cancellation or timeout. */
-async function run(executable: string, args: string[], env: NodeJS.ProcessEnv, signal: AbortSignal, timeout = 90000) {
+async function run(executable: string, args: string[], env: NodeJS.ProcessEnv, signal: AbortSignal, timeout = LIBREOFFICE_TIMEOUT_MS) {
   signal.throwIfAborted();
   await new Promise<void>((resolve, reject) => {
     const child = spawn(executable, args, { env, windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe"] });
@@ -170,7 +172,7 @@ async function run(executable: string, args: string[], env: NodeJS.ProcessEnv, s
       stopping = (async () => {
         if (!child.pid) return;
         if (process.platform === "win32") {
-          await promisify(execFile)(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { timeout: 10000, windowsHide: true });
+          await promisify(execFile)(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { timeout: KILL_TIMEOUT_MS, windowsHide: true });
         } else { try { process.kill(-child.pid, "SIGKILL"); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e; } }
       })();
       stopping.catch(() => child.kill());
