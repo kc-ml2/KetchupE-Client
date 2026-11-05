@@ -45,5 +45,10 @@ export function previousBusinessDay(value: string) {
   return day;
 }
 export const sheetDate = (value: string) => date(value).slice(2).replaceAll("-", "");
+export function nextBusinessDay(value: string) {
+  let day = shiftDate(value, 1);
+  while ([0, 6].includes(new Date(`${day}T00:00:00Z`).getUTCDay()) || HOLIDAYS.has(day)) day = shiftDate(day, 1);
+  return day;
+}
 export const isoSheetDate = (value: string) => date(`20${value.slice(0, 2)}-${value.slice(2, 4)}-${value.slice(4, 6)}`);
 export function numeric(cell: ExcelJS.Cell, value: Decimal.Value) { cell.value = decimal(value instanceof Money ? value.toString() : value, cell.address).toNumber(); }

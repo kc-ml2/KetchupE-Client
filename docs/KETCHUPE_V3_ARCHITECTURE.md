@@ -70,6 +70,7 @@ Answers stream provisionally before final citation validation. A valid citation 
 
 ## Remote services and observability
 
+- **CAPER ERP:** Daily Cash fetches KC cash status through the fixed read-only REST endpoint in `business/dailyCash/erp.ts`. Validated rows stay in the local job checkpoint across operator prompts; credentials stay in the main/worker environment. See [ERP integration](CAPER_ERP_INTEGRATION.md).
 - **MARU:** storage browsing/search and authorized document download. Every accessible storage except those turned off in the Files tab (on by default; turned-off ones too when the question mentions MARU) are searched in the same `search_local_docs` step as local collections: the question is reduced to up to three literal keywords, `find_storage` runs per keyword × storage with `include_content`, and about 1,000 characters around the first hit of the best-matching files become citable evidence. MARU matching is literal (ripgrep over files and pre-extracted PDF/Office/HWP text), not semantic. Opening a citation renews the exact document URL, checks HTTPS/origin/size, caches locally, and indexes through Tomato. Signed URLs stay out of prompts and trace.
 - **Trolley:** capability checks and Operation listing only. Listing an Operation does not enable its execution.
 - **LiteLLM:** configured model transport. It does not own local state or business calculations.

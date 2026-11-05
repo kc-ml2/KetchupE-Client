@@ -1,5 +1,6 @@
 import ExcelJS from "exceljs";
 import { cashRows } from "./report.ts";
+import { readCashStatus } from "./cashStatus.ts";
 /** 5월 샘플 배치. layout()이 라벨로 다시 찾으므로 report.ts와 공유하지 않는다. */
 const termRows = [...Array.from({ length: 47 }, (_, i) => i + 51), ...Array.from({ length: 18 }, (_, i) => i + 102)];
 const otherRows = [35, 36, 37, 38, 39, 40, 41, 46, 124, 125];
@@ -35,6 +36,17 @@ export function fixtureBooks() {
   k.addRow([2, "기업은행 테스트", "TEST-TERM", "원화정기예금_기업", "TEST-TERM", "KRW", 10000, 10000, 0, 0, 10000, 10000, 0, 0, 0, 0, "정기예금", "", new Date("2025-10-13T00:00:00Z"), new Date("2026-10-13T00:00:00Z")]);
   k.addRow([3, "", "", "", "환종별합계", "KRW", 110000, 110000, 10000, 10000, 11000, 11000, 109000, 109000, 109000]);
   return { report, weekly, status };
+}
+
+/** The same synthetic accounts through the ERP contract, for offline regressions and demos. */
+export function fixtureErpResponse(book: ExcelJS.Workbook) {
+  const rows = readCashStatus(book).accounts.map((a) => ({
+    FINPRODUCT_CD: a.key.slice(0, a.key.lastIndexOf(":")), FINPRODUCT_NM: a.name, PARTNER_NM: a.bank, NM_TP_DEPOSIT: a.product, EXCH_CD: a.currency,
+    JOIN_DT: a.start?.replaceAll("-", "") ?? null, END_DT: a.maturity?.replaceAll("-", "") ?? null,
+    AM_BASICS: a.opening.toString(), ACNT_IAMT_AMT: a.incoming.toString(), AM_WITHDRAW: a.outgoing.toString(), AM_FINAL: a.bookKrw.toString(),
+    AM_BASICS2: a.opening.toString(), ACNT_IAMT_AMT2: a.incoming.toString(), AM_WITHDRAW2: a.outgoing.toString(), AM_FINAL2: a.ledger.toString(), BLNC_AMT: a.balance.toString(),
+  }));
+  return { success: true, data: { rows, rowCount: rows.length, truncated: false } };
 }
 
 /** 366 real worksheet XML parts, each carrying the full report layout, formulas and styles. */

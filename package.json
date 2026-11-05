@@ -21,6 +21,7 @@
     "smoke:litellm": "vite-node scripts/litellm-smoke.ts",
     "probe:maru": "vite-node scripts/maru-probe.ts",
     "probe:trolley": "vite-node scripts/trolley-probe.ts",
+    "probe:caper": "vite-node scripts/caper-probe.ts",
     "telemetry:gateway": "vite-node scripts/telemetry-gateway.ts"
   },
   "build": {

@@ -2,6 +2,7 @@
 // Vite's own env loading only
 // exposes VITE_-prefixed vars to the renderer bundle, it never touches process.env for the main process.
 import "dotenv/config";
+import { config as loadEnvFile } from "dotenv";
 import {
   app,
   ipcMain,
@@ -33,6 +34,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const isDev = process.env.NODE_ENV === "development";
+// Local ERP credentials stay in the main/worker environment, never in Vite's bundle definitions.
+if (!app.isPackaged) loadEnvFile({ path: path.join(app.getAppPath(), ".env.caper.local") });
 const PRODUCT_NAME = "케찹이";
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 

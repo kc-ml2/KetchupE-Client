@@ -35,13 +35,13 @@ Daily Cash's account-binding text field carries `accountRows` to display the unr
 - Each execution runs in an Electron utility process with an eight-minute limit for Daily Cash and a 120-second limit for other tools and 1 GiB V8 heap cap, not an RSS cap. Workbook inspection/output validation uses a separate process with the same heap cap and a 30-second limit. Cancellation discards results and allows native Daily Cash engines to clean up before terminating the worker. Tool errors and timeouts normally return to input for correction.
 - Every business check must pass, and the XLSX must reopen successfully. Optional PNGs are also validated. File-format validation does not establish accounting correctness.
 - Artifacts are saved without overwriting under `userData/business-output/<artifact-id>/`. Only validated, DB-registered artifacts appear in chat; opening rechecks their hashes. Audit records retain checks and applied external data, excluding credentials.
-- Raw source workbooks are not sent to the routing model or telemetry. Requests and recent user messages do reach the routing model. Source snapshots, historical code replay, and automatic artifact cleanup are not implemented; deleting a conversation does not delete output files.
+- Raw source workbooks are not sent to the routing model or telemetry. Requests and recent user messages do reach the routing model. Local workbook snapshots, historical code replay, and automatic artifact cleanup are not implemented; deleting a conversation does not delete output files.
 
 For a new tool, implement parsing/calculation/checks, add golden-result tests, and register it. Bump the tool version when business rules change. [bankDaily.ts](../electron/business/bankDaily.ts) is a small test implementation; remove `bank_daily` from the registry before product release.
 
 ## Daily Cash
 
-Entry point: [dailyCash.ts](../electron/business/dailyCash.ts). The tool prepares a daily cash report from local workbooks, asks the operator to resolve ambiguity, and returns XLSX plus PNG. The LLM routes the request; code performs calculations.
+Entry point: [dailyCash.ts](../electron/business/dailyCash.ts). The tool prepares a daily cash report from the prior report, weekly plans and CAPER ERP cash status, asks the operator to resolve ambiguity, and returns XLSX plus PNG. The LLM routes the request; code performs calculations.
 
 ### Inputs and dates
 
@@ -50,18 +50,19 @@ Entry point: [dailyCash.ts](../electron/business/dailyCash.ts). The tool prepare
 | `workDate` | Work date, defaulting to today in Asia/Seoul; editable before first execution |
 | `previousReport` | One report workbook containing the preceding closing sheet |
 | `weeklyPlans` | One or more weekly plans covering the report and work dates |
-| `cashStatus` | One KC cash-status workbook for the report date |
 
-Report date = work date minus one calendar day. For work date 2026-10-15, use the 2026-10-14 KC closing balances and the latest report sheet before 2026-10-14. Reject a prior sheet more than seven days old; ask before carrying across a date gap. Never overwrite an existing report-date sheet.
+Report date = the previous business day, excluding weekends and the maintained Korean holiday calendar. For work date 2026-10-15, use the 2026-10-14 KC closing balances and the latest report sheet before 2026-10-14. Reject a prior sheet more than seven days old; ask before carrying across a date gap. Never overwrite an existing report-date sheet.
 
-Daily Cash is `uploadOnly`: files come only from the picker, are never prefilled from connected folders, and are kept for the current app session only (not registered as sources; a restart requires a new task). Only the work date defaults to today. The KC date must match the report date; ask if absent and reject if different. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
+Daily Cash is `uploadOnly`: files come only from the picker, are never prefilled from connected folders, and are kept for the current app session only (not registered as sources; a restart requires a new task). Only the work date defaults to today. KC cash status is fetched from ERP once per job and reused from its checkpoint during input/review. The query starts on the report date and ends the day before the next business day (Friday through Sunday). The checkpoint period must match the work date; a fresh ERP snapshot requires a new job. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
+
+Development reads `CAPER_API_KEY` from the ignored `.env.caper.local` into the main process; utility workers inherit it. Packaged apps require a provisioned runtime environment variable. Keys are never bundled or saved in job data. See [ERP integration and sample verification](CAPER_ERP_INTEGRATION.md) for mapping, setup and limits.
 
 ### Business rules
 
 | Area | Rule |
 | --- | --- |
 | Carry-forward | Copy prior H-column closing amounts to new D-column opening amounts, preserving fractional won. Missing formula caches are unknown, not zero. Truly empty non-formula cells are zero. Ask for up to 20 missing values; otherwise require an Excel-recalculated and saved source. |
-| KC balances | Use account balance column O, not book balance column M. Find headers and the `환종별합계 KRW` total by labels. Use report labels/formulas for moving sections rather than assuming fixed total rows. |
+| KC balances | Fetch `erp_cash_status_kc` through REST. Use `BLNC_AMT` for bank balances; use `AM_FINAL` / `AM_FINAL2` for book balances. Sum only KRW bank balances for the total. Require success, complete row count, no truncation, unique account/currency keys and consistent ledger arithmetic. Use report labels/formulas for moving sections. |
 | Reconciliation | Opening + actual inflow − actual outflow must match closing balance. Ask for actual totals when book movements disagree; never invent a balancing transaction. Use Decimal precision 30 and permit only differences strictly below one won while retaining fractional source values. |
 | Deposits | Match bank, currency, explicit maturity date, and principal; equal candidates bind in order and require operator review. Reconcile confirmed KRW maturity principal against prior deposits and subscription principal against KC inflows, including one pooled subscription covering several new accounts. Interest is reviewed separately and never added to principal. At maturity, reduce the full prior principal; a remaining KC balance needs clarification. New deposits require KC start date = report date, future maturity, zero opening, and inflow = closing with no outflow. Allocate unused same-currency template rows, show the bank and start/maturity dates, and unhide changed rows; expand the source template if no slots remain. Do not invent missing rates or receiving accounts. |
 | Business divisions | Bind account code + currency to the existing O/P auxiliary table. Read merged-cell master values only. |
@@ -92,7 +93,8 @@ LibreOffice runs with an isolated temporary profile, disabled document macros/li
 | Change | File |
 | --- | --- |
 | Questions, input suggestions, execution order, final review | [dailyCash.ts](../electron/business/dailyCash.ts) |
-| KC parsing and differences | [cashStatus.ts](../electron/business/dailyCash/cashStatus.ts) |
+| ERP retrieval, period and account normalization | [erp.ts](../electron/business/dailyCash/erp.ts) |
+| Reference XLSX parsing and differences | [cashStatus.ts](../electron/business/dailyCash/cashStatus.ts) |
 | Weekly-plan parsing | [weekly.ts](../electron/business/dailyCash/weekly.ts) |
 | Account binding, layout, calculations, workbook output | [report.ts](../electron/business/dailyCash/report.ts) |
 | Dates, Decimal arithmetic, cell values | [values.ts](../electron/business/dailyCash/values.ts) |
@@ -107,22 +109,23 @@ Account targets and some template positions remain hardcoded. Foreign-currency t
 
 ### Validation and demo
 
-Synthetic regression tests cover duplicate maturities, pooled subscriptions into new accounts, interest and division-summary exclusion, consecutive-day carry-forward, movements, reconciliation, workbook integrity, and PNG bounds. They do not establish correctness on a matched real-world source set. The October report/weekly-plan examples support targeted parsing and KRW deposit checks; a full real-world comparison still requires the matching KC cash-status workbook and confirmed actuals.
+Synthetic regression tests cover duplicate maturities, pooled subscriptions into new accounts, interest and division-summary exclusion, consecutive-day carry-forward, movements, reconciliation, workbook integrity, and PNG bounds. The 2026-10-15 work-date sample was also exercised against live ERP data: all 50 bank balances matched the provided KC workbook and all report reconciliations passed. Against the supplied 261014 reference, 606 of 609 numeric positions matched; the remaining three reflect a 7,500-won source-plan difference, documented in the [validation report](CAPER_ERP_INTEGRATION.md). The actual transaction used in this replay came from the reference sheet, not an unattended inference.
 
 ```sh
-npx vitest run electron/business/flow.test.ts electron/business/bankDaily.test.ts electron/business/dailyCash.test.ts
+npx vitest run electron/business/flow.test.ts electron/business/bankDaily.test.ts electron/business/dailyCash.test.ts electron/business/dailyCash/erp.test.ts
+npx vitest run electron/business/dailyCash/report.test.ts electron/business/dailyCash/image.test.ts electron/business/dailyCash/nativeExcel.test.ts electron/business/workerClient.test.ts electron/work/calculatedWorkbook.test.ts
 npx vite-node scripts/daily-cash-demo.ts fixtures/daily-cash
 npx vite-node scripts/bank-fixture.ts fixtures
 ```
 
-The demo generates synthetic inputs, review text, XLSX, and PNG with fixed test rates; activated desktop Excel or locally installed LibreOffice is required for native output. Expected cash: 100,000 + 10,000 − 1,000 = 109,000; after next-day plans, 107,000. Generated `fixtures/` files are ignored by Git; tests generate their own data in memory. App execution uses the live rate lookup and operator confirmation.
+The demo uses a synthetic ERP snapshot and fixed test rates, but requires activated desktop Excel or installed LibreOffice for XLSX/PDF/PNG output. Expected cash: 100,000 + 10,000 − 1,000 = 109,000; after next-day plans, 107,000. Generated `fixtures/` files are ignored by Git; tests generate their own data in memory. App execution uses live ERP/rate lookups and operator confirmation.
 
 Native-export regression tests mock the OS automation boundary and cover fallback from calculation/PDF failure, pristine-input retries, cancellation, missing engines and actual-engine metadata. PDF rasterization uses real multi-page PDF data. Tests compare every template cell's style and every row height after saving, including empty merged ranges with distinct child fonts/borders/alignment/number formats. They also cover varying historical row locations, ambiguous-reference rejection, exact equality between PDF input bytes and the delivered XLSX, cache validation, financial reconciliation and cleanup. The opt-in `KETCHUPE_TEST_LIBREOFFICE=1` integration test checks native calculation, sheet/range selection, frozen volatile/boolean/text results and unchanged source bytes on full LibreOffice; macOS LibreOffice 25.8.7 passed this test. The 2026-11-05 Mac Excel run was blocked by view-only licensing. Successful Mac Excel PDF export, Windows COM/LibreOffice execution and signed-installer automation permission still require validation on activated machines. New payment descriptions are measured by the selected native engine against their allocated description area, ending before the amount column. Only overflowing text gains wrapping and, when needed, a horizontal merge into empty adjacent description cells; rows only grow to the measured height. Already wrapped text uses its existing display width. Original fonts, alignment attributes, blank child-cell styles and unaffected rows are retained. No text-length threshold, fixed cell address or font shrinking is used. Populated neighbors, conflicting merges and descriptions exceeding Excel's maximum row height fail validation instead of being silently clipped. Tests exercise unmerged and merged descriptions, short/already-wrapped rows, exact source text and final-PDF rendering. Layout changes are imported before the final XLSX is printed, so XLSX and PNG share the fitted layout.
 
 
 ### Annual Daily Cash workbooks (v3.0.1)
 
-Daily Cash reads the workbook sheet-name index and parses only the latest dated report before the report date, regardless of tab order. Historical worksheet XML and its related parts remain in the original ZIP archive; the completed report is appended with its own strings and remapped styles. Output validation also loads only the new report sheet. The complete XLSX is still read/written on disk, and shared string/style metadata is loaded; this is selective worksheet parsing, not a partial file transfer. The existing 20 MiB per-file limit remains.
+Daily Cash reads the workbook sheet-name index and parses the latest dated report before the report date, regardless of tab order. When rollover formulas reference older reports, only those referenced sheets are additionally parsed to verify their balance locations. Historical worksheet XML and its related parts remain in the original ZIP archive; the completed report is appended with its own strings and remapped styles. Output validation also loads only the new report sheet. The complete XLSX is still read/written on disk, and shared string/style metadata is loaded; this is selective worksheet parsing, not a partial file transfer. The existing 20 MiB per-file limit remains.
 
 Regression fixtures cover 366 full report sheets → 367 sheets, byte-for-byte preservation of every old worksheet, repeated appends, formulas, shared strings, custom number formats, dates, hidden tabs, named ranges, print areas, comments, hyperlinks, and conditional formatting. Structured Excel tables in the new report template are rejected before saving to avoid duplicate workbook-global table names; historical tables and other archived parts are preserved.
 

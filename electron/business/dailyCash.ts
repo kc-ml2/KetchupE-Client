@@ -4,14 +4,14 @@ import type { BusinessTool, ToolResult } from "./contracts.ts";
 import type { BusinessField } from "../../src/app-types/BusinessTool.types.ts";
 import { loadWorkbook } from "../work/mapping.ts";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
-import { readCashStatus, differences, parseOverrides } from "./dailyCash/cashStatus.ts";
+import { differences, parseOverrides } from "./dailyCash/cashStatus.ts";
+import { CAPER_CASH_URL, fetchErpCashStatus, readErpCashStatus, type ErpCashSnapshot } from "./dailyCash/erp.ts";
 import { fetchHana, type Rates } from "./dailyCash/hana.ts";
 import { renderSheet } from "./dailyCash/image.ts";
 import { bindAccounts, buildReport, cashRows, depositIssues, layout, maturity, priorAmounts, rolloverFormulas } from "./dailyCash/report.ts";
 import { date, decimal, isoSheetDate, money, sameWon, sheetDate, shiftDate, previousBusinessDay, sum, text, type Amount } from "./dailyCash/values.ts";
 import { depositKind, readWeekly, type Movement } from "./dailyCash/weekly.ts";
 
-const ask = (question: string, fields: (Partial<BusinessField> & { key: string; label: string })[], checkpoint?: Record<string, unknown>): ToolResult => ({ status: "needs_input", question, fields: fields.map((f) => ({ ...f, type: f.type ?? "text", required: f.required ?? true })), checkpoint });
 /** The input card renders these as an editable table and submits the same {changes, add} JSON that applyEdits reads. */
 const movementField = (key: string, label: string, plan: Movement[]): Partial<BusinessField> & { key: string; label: string } => ({ key, label, type: "movements", rows: plan.map((m, i) => ({ index: i + 1, direction: m.direction, description: m.description, party: m.party, amount: m.amount.toFixed() })) });
 /** flow가 한 번에 받는 입력란 상한(30) 안에서 셀별 숫자 입력을 제공한다. 그보다 많으면 파일 자체가 계산값 없이 저장된 것이다. */
@@ -49,24 +49,25 @@ const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계
 export const dailyCashTool: BusinessTool = {
   id: "daily_cash", version: "1.2.0", title: "일일자금일보",
   updateSource: "previousReport",
-  description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
+  description: "전일 일보·주간계획과 ERP에서 조회한 KC 자금현황으로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
   examples: ["일일자금일보 작성해줘", "어제 기준 자금일보와 이미지 만들어줘"],
-  requiredInputs: ["작업일", "전일 일보가 있는 XLSX", "해당 주 주간자금계획", "기준일(작업일 직전 영업일)의 자금현황표(KC)"],
+  requiredInputs: ["작업일", "전일 일보가 있는 XLSX", "해당 주 주간자금계획"],
+  initialQuestion: "작업일과 전일 일보·주간자금계획을 지정해 주세요. KC 자금현황은 ERP에서 자동 조회합니다.",
   fields: [
     { key: "workDate", label: "작업일 (예: 29일 선택 → 28일 기준 일보, 월요일·공휴일 다음 날은 직전 영업일)", type: "date", required: true },
     { key: "previousReport", label: "전일 일보가 있는 통합문서", type: "file", required: true },
     { key: "weeklyPlans", label: "주간자금계획 (주 경계에서는 해당 두 주)", type: "file", multiple: true, required: true },
-    { key: "cashStatus", label: "기준일 자금현황표(KC) (작업일 직전 영업일 파일)", type: "file", required: true },
   ],
   defaults: (today) => ({ workDate: today }),
   uploadOnly: true,
   async execute(input) {
     const { values, files, signal } = input; const checkpoint = { ...input.checkpoint };
+    const ask = (question: string, fields: (Partial<BusinessField> & { key: string; label: string })[], state = checkpoint): ToolResult => ({ status: "needs_input", question, fields: fields.map((f) => ({ ...f, type: f.type ?? "text", required: f.required ?? true })), checkpoint: state });
     try {
       signal.throwIfAborted();
       const workDate = date(values.workDate); const reportDate = previousBusinessDay(workDate);
       if (workDate > new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) throw new Error("미래 작업일의 최종 환율과 실제 잔고는 확정할 수 없습니다.");
-      for (const key of ["previousReport", "cashStatus"]) if (files[key]?.length !== 1) throw new Error(`${key}: 파일 하나를 지정하세요.`);
+      if (files.previousReport?.length !== 1) throw new Error("전일 일보 파일 하나를 지정하세요.");
       if (!files.weeklyPlans?.length) throw new Error("주간계획 파일이 필요합니다.");
       const archive = await SelectiveWorkbook.open(files.previousReport[0].bytes);
       if (archive.sheetNames.includes(sheetDate(reportDate))) throw new Error(`${sheetDate(reportDate)} 시트가 이미 있습니다. 중복 생성하지 않습니다.`);
@@ -75,14 +76,12 @@ export const dailyCashTool: BusinessTool = {
       const priorDate = isoSheetDate(priorName);
       if (priorDate < shiftDate(reportDate, -7)) throw new Error(`전일 일보가 너무 오래되었습니다 (${priorDate}). ${reportDate} 직전 마감 일보가 포함된 파일로 새 작업을 시작하세요.`);
       if (priorDate !== previousBusinessDay(reportDate) && values.carryConfirmation !== "확인") return ask(`${priorDate} 마감 금액을 ${reportDate}의 전일금액으로 이월합니다. 휴무일 동안 거래가 없고 마지막 마감 일보가 맞으면 확인하고 계속하세요.`, [{ key: "carryConfirmation", label: "휴무일 거래 없음 · 마지막 마감 일보 확인", confirm: "확인" }]);
-      const [book, statusBook, ...weeks] = await Promise.all([archive.loadSheet(priorName), ...[files.cashStatus[0], ...files.weeklyPlans].map((f) => loadWorkbook(f.bytes))]);
+      const [book, ...weeks] = await Promise.all([archive.loadSheet(priorName), ...files.weeklyPlans.map((f) => loadWorkbook(f.bytes))]);
       const candidate = book.getWorksheet(priorName)!;
-      const filenameDate = files.cashStatus[0].name.normalize("NFC").match(/^(\d{6})_/)?.[1];
-      const statusDate = filenameDate ? isoSheetDate(filenameDate) : values.statusDate;
-      if (!statusDate) return ask("자금현황표 내부에 기준일이 없습니다. 이 자료의 계좌잔고 마감일(작업일 직전 영업일)을 확인하세요.", [{ key: "statusDate", label: "자금현황표 기준일 YYYY-MM-DD" }]);
-      // KC 파일명 YYMMDD는 계좌잔고 마감일(일보 기준일)이다. 작업일 15일이면 14일 자금현황표를 쓴다.
-      if (date(statusDate) !== reportDate) throw new Error(`자금현황표 기준일 ${statusDate}와 일보 기준일 ${reportDate}가 다릅니다. 작업일 직전 영업일(${reportDate}) 자금현황표를 지정하세요.`);
-      const kc = readCashStatus(statusBook); const l = layout(candidate);
+      if (!checkpoint.erpCash) checkpoint.erpCash = await fetchErpCashStatus(workDate, signal);
+      const kc = readErpCashStatus(checkpoint.erpCash, workDate); const l = layout(candidate);
+      const erp = checkpoint.erpCash as ErpCashSnapshot;
+      const erpSource = { endpoint: CAPER_CASH_URL, from_dt: erp.from_dt, to_dt: erp.to_dt, fetchedAt: erp.fetchedAt, responseHash: erp.responseHash, rowCount: erp.rows.length, truncated: false };
       const weekly = weeks.map((b, i) => readWeekly(b, files.weeklyPlans[i].name));
       for (const day of [reportDate, workDate]) {
         const selected = weekly.filter((w) => w.dates.has(day));
@@ -170,7 +169,7 @@ export const dailyCashTool: BusinessTool = {
       const diff = differences(planActual, actual);
       const depositDiff = differences(planDeposits, deposits);
       const newDeposits = kc.accounts.filter((a) => a.product === "정기예금" && !l.activeTerms.includes(Number(bindings.get(a.key)!.slice(1)))).map((a) => ({ key: a.key, bank: a.bank, currency: a.currency, start: a.start, maturity: a.maturity, amount: a.incoming.toString(), target: bindings.get(a.key) }));
-      const audit = { workDate, reportDate, priorSheet: candidate.name, sourceDate: statusDate, rates, bindings: Object.fromEntries(bindings), previousOverrides: values.previousValues ?? null, cashChanges: values.cashChanges ?? null, actual: actual.map((m) => ({ ...m, amount: m.amount.toString() })), plan: nextPlan.map((m) => ({ ...m, amount: m.amount.toString() })), differences: diff, deposits: deposits.map((m) => ({ ...m, amount: m.amount.toString() })), depositDifferences: depositDiff, newDeposits, matured, kcTotal: kc.total.toString(), kcTotalSource: kc.totalSource, sources: Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((f) => ({ name: f.name, fingerprint: f.fingerprint }))])) };
+      const audit = { workDate, reportDate, priorSheet: candidate.name, sourceDate: reportDate, erpSource, rates, bindings: Object.fromEntries(bindings), previousOverrides: values.previousValues ?? null, cashChanges: values.cashChanges ?? null, actual: actual.map((m) => ({ ...m, amount: m.amount.toString() })), plan: nextPlan.map((m) => ({ ...m, amount: m.amount.toString() })), differences: diff, deposits: deposits.map((m) => ({ ...m, amount: m.amount.toString() })), depositDifferences: depositDiff, newDeposits, matured, kcTotal: kc.total.toString(), kcTotalSource: kc.totalSource, sources: Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((f) => ({ name: f.name, fingerprint: f.fingerprint }))])) };
       const review = createHash("sha256").update(JSON.stringify(audit)).digest("hex").slice(0, 12);
       if (values.review !== `확인 ${review}`) return ask([
         `### 최종 확인\n\n**작업일 ${workDate} → 일보 기준일 ${reportDate}**\n\n${candidate.name} 금일금액을 전일금액으로 이월합니다.`,
@@ -180,7 +179,7 @@ export const dailyCashTool: BusinessTool = {
         `### 정기예금 집행\n\n**이자는 원금 증감에서 제외합니다.**\n\n${deposits.length ? listing(deposits) : "없음"}`,
         `### 신규 가입\n\n${bullets(newDeposits.map((a) => `${a.bank}: ${a.amount} ${a.currency}, ${a.start}~${a.maturity} → ${a.target}`)) || "없음"}`,
         `### 만기\n\n${bullets(matured) || "없음"}`,
-        `### 원화 대사 및 환율\n\n- **원화 대사 대상: ${kc.total}원** (${markdownText(kc.totalSource)}, 계좌잔고)\n- 고시: ${rates.date} 최종 ${markdownText(rates.round)}회\n- USD ${rates.perUnit.USD}, JPY(1엔) ${rates.perUnit.JPY}, CNY ${rates.perUnit.CNY}`,
+        `### 원화 대사 및 환율\n\n- ERP 조회: ${erp.from_dt}~${erp.to_dt}, ${erp.rows.length}계좌, ${erp.fetchedAt} (이번 작업의 고정 조회 결과)\n- **원화 대사 대상: ${kc.total}원** (${markdownText(kc.totalSource)}, 계좌잔고)\n- 고시: ${rates.date} 최종 ${markdownText(rates.round)}회\n- USD ${rates.perUnit.USD}, JPY(1엔) ${rates.perUnit.JPY}, CNY ${rates.perUnit.CNY}`,
         "확정하려면 **확인하고 계속**을 누르세요. 표를 수정하면 새 확인 코드로 다시 확인합니다.",
       ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
       const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes, await rolloverFormulas(archive, candidate));

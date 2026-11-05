@@ -6,27 +6,30 @@ import JSZip from "jszip";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { dailyCashTool, applyEdits } from "./dailyCash.ts";
 import { bindAccounts, layout, priorAmounts } from "./dailyCash/report.ts";
-import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { renderSheet } from "./dailyCash/image.ts";
+import { annualReportFixture, fixtureBooks, fixtureErpResponse } from "./dailyCash/fixtures.ts";
+import { createErpSnapshot, fetchErpCashStatus } from "./dailyCash/erp.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
 import { Money, previousBusinessDay } from "./dailyCash/values.ts";
 import type { BusinessTool } from "./contracts.ts";
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
+vi.mock("./dailyCash/erp.ts", async (original) => ({ ...await original<typeof import("./dailyCash/erp.ts")>(), fetchErpCashStatus: vi.fn() }));
 vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await sharp({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 async function setup() {
   const books = fixtureBooks(); const file = async (book: ExcelJS.Workbook, name: string) => ({ bytes: Buffer.from(await book.xlsx.writeBuffer()), name, fingerprint: name });
-  const input: Parameters<BusinessTool["execute"]>[0] = { values: { workDate: "2026-10-14", actualEdits: "확인", planEdits: "확인" }, files: { previousReport: [await file(books.report, "전일일보.xlsx")], weeklyPlans: [await file(books.weekly, "계획.xlsx")], cashStatus: [await file(books.status, "261013_자금현황표[KC].xlsx")] }, checkpoint: {}, signal: new AbortController().signal };
+  const input: Parameters<BusinessTool["execute"]>[0] = { values: { workDate: "2026-10-14", actualEdits: "확인", planEdits: "확인" }, files: { previousReport: [await file(books.report, "전일일보.xlsx")], weeklyPlans: [await file(books.weekly, "계획.xlsx")] }, checkpoint: {}, signal: new AbortController().signal };
+  vi.mocked(fetchErpCashStatus).mockReset().mockImplementation(async (workDate) => createErpSnapshot(fixtureErpResponse(books.status), workDate));
   return { books, input, file };
 }
 // Workbook generation needs more time on shared Windows CI runners; native Excel is mocked here.
 const artifactTestTimeout = 30_000;
 it("asks only for unresolved account locations and accepts the form's existing mapping contract", async () => {
-  const { input, books, file } = await setup();
+  const { input, books } = await setup();
   const account = books.status.getWorksheet(1)!.getRow(2);
   account.getCell(3).value = "001234"; account.getCell(4).value = "기업_입출금_원화";
-  input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")];
+
   const result = await dailyCashTool.execute(input);
   expect(result).toMatchObject({ status: "needs_input", fields: [{ key: "accountBindings", type: "text", accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "109000" }] }] });
   if (result.status !== "needs_input") return;
@@ -78,10 +81,13 @@ it("appends a dated sheet, redeems a maturity, reconciles KC cash and returns a 
   for (const row of [238, 239, 249]) expect(s.getRow(row).hidden, `row ${row}`).toBe(false);
   expect(result.externalData?.matured).toHaveLength(1);
 }, artifactTestTimeout);
-it("matches the KC file date to the report date (work date minus one), not the work date", async () => {
-  const { input, books, file } = await setup(); input.files.cashStatus = [await file(books.status, "261014_자금현황표[KC].xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("기준일 2026-10-14와 일보 기준일 2026-10-13") });
+it("rejects a cached ERP period from a different report date", async () => {
+  const { input, books } = await setup();
+  input.checkpoint.erpCash = createErpSnapshot(fixtureErpResponse(books.status), "2026-10-15");
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("ERP 조회 기간과 일보 기준일") });
+  expect(fetchErpCashStatus).not.toHaveBeenCalled();
 });
+
 it("preserves a year of historical sheets, including distant used cells, when appending the next report", async () => {
   const { input, books, file } = await setup();
   for (let day = 0; day < 365; day++) {
@@ -137,7 +143,7 @@ it("requires explicit values for missing formula caches and does not silently us
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ key: "cell_H21", type: "number", label: expect.stringContaining("H21") })] });
 });
 it("stops when actual account cash differs from ledger or a term has not settled", async () => {
-  const { books, input, file } = await setup(); const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000; input.files.cashStatus = [await file(books.status, "261013_자금현황표[KC].xlsx")];
+  const { books, input } = await setup(); const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000;
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" }), expect.objectContaining({ key: "actualEdits", type: "movements" })]) });
 });
 it("requires corrections when planned executions do not reconcile the holding cash", async () => {
@@ -174,7 +180,7 @@ async function depositSetup() {
   k.addRow([4, "기업은행 테스트", "TERM-2", "정기예금2", "TERM-2", "KRW", 10000, 10000, 0, 0, 10000, 10000, 0, 0, 0, 0, "정기예금", "", new Date("2025-10-13T00:00:00Z"), new Date("2026-10-13T00:00:00Z")]);
   for (const [key, amount, maturity] of [["NEW-1", 12000, "2027-09-13"], ["NEW-2", 8000, "2027-10-13"]] as const) k.addRow([6, "우리은행 테스트", key, key, key, "KRW", 0, 0, amount, amount, 0, 0, amount, amount, amount, 0, "정기예금", "", new Date("2026-10-13T00:00:00Z"), new Date(`${maturity}T00:00:00Z`)]);
   for (const c of ["M", "N", "O"]) k.getCell(`${c}4`).value = 119000;
-  input.files.previousReport = [await file(books.report, "전일.xlsx")]; input.files.weeklyPlans = [await file(books.weekly, "계획.xlsx")]; input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")]; input.values.depositEdits = "확인";
+  input.files.previousReport = [await file(books.report, "전일.xlsx")]; input.files.weeklyPlans = [await file(books.weekly, "계획.xlsx")]; input.values.depositEdits = "확인";
   return state;
 }
 it("reads business-coded deposit principal and interest separately, excluding division summaries and daily totals", async () => {
@@ -206,7 +212,7 @@ it("redeems duplicate deposits and allocates a pooled subscription to new KC acc
   for (const r of [3, 5]) for (const c of ["G", "H", "K", "L"]) k.getCell(`${c}${r}`).value = 0;
   for (const [r, amount] of [[6, 12000], [7, 8000]]) { for (const c of ["G", "H"]) k.getCell(`${c}${r}`).value = amount; for (const c of ["I", "J"]) k.getCell(`${c}${r}`).value = 0; }
   for (const c of ["M", "N", "O"]) k.getCell(`${c}4`).value = 117000;
-  input.files.previousReport = [await file(b, "전일.xlsx")]; input.files.cashStatus = [await file(books.status, "261014_현황.xlsx")]; input.values.workDate = "2026-10-15"; input.values.noPlanDates = "2026-10-14,2026-10-15";
+  input.files.previousReport = [await file(b, "전일.xlsx")]; input.values.workDate = "2026-10-15"; input.values.noPlanDates = "2026-10-14,2026-10-15";
   const next = await confirm(input); expect(next.status, JSON.stringify(next.status === "completed" ? {} : next)).toBe("completed"); if (next.status !== "completed") return;
   const nextBook = new ExcelJS.Workbook(); await nextBook.xlsx.load(Buffer.from(next.file.bytes) as unknown as ExcelJS.Buffer); const nextSheet = nextBook.getWorksheet("261014")!;
   expect(nextSheet.getCell("D53").value).toBe(12000); expect(nextSheet.getCell("E98").result).toBe(0); expect(nextSheet.getCell("G98").result).toBe(0); expect(nextSheet.getCell("H98").result).toBe(20000);
@@ -259,7 +265,7 @@ it("keeps JPY and CNY separate and uses KC foreign balances with per-unit FX rat
   const k = books.status.getWorksheet(1)!;
   k.addRow([4, "테스트은행", "FXJPY", "JPY 테스트", "FXJPY", "JPY", 900, 100, 0, 0, 0, 0, 900, 100, 100, 0, "보통예금"]);
   k.addRow([5, "테스트은행", "FXCNY", "CNY 테스트", "FXCNY", "CNY", 40000, 200, 0, 0, 0, 0, 40000, 200, 200, 0, "보통예금"]);
-  input.files.previousReport = [await file(books.report, "전일.xlsx")]; input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")]; input.values.accountBindings = '{"FXJPY:JPY":"H23","FXCNY:CNY":"H26"}';
+  input.files.previousReport = [await file(books.report, "전일.xlsx")]; input.values.accountBindings = '{"FXJPY:JPY":"H23","FXCNY:CNY":"H26"}';
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status !== "completed" && result)).toBe("completed");
   if (result.status !== "completed") return;
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
@@ -405,9 +411,9 @@ it("calculates and saves the next daily cash report from 366 full report sheets 
 }, artifactTestTimeout);
 
 it("reconciles labeled cash totals and keeps invalid answers in the same form", async () => {
-  const { books, input, file } = await setup();
+  const { books, input } = await setup();
   const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000;
-  input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")];
+
   for (const value of [undefined, "invalid", '{"unknown:KRW":{"incoming":"0","outgoing":"0"}}', '{"140013557434:KRW":{"incoming":"-1","outgoing":"0"}}']) {
     if (value === undefined) delete input.values.cashChanges; else input.values.cashChanges = value;
     const result = await dailyCashTool.execute(input);

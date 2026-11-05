@@ -11,14 +11,16 @@ import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { loadWorkbook } from "../work/mapping.ts";
 import { BusinessFlow } from "./flow.ts";
 import { dailyCashTool } from "./dailyCash.ts";
-import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
+import { annualReportFixture, fixtureBooks, fixtureErpResponse } from "./dailyCash/fixtures.ts";
+import { createErpSnapshot, fetchErpCashStatus } from "./dailyCash/erp.ts";
 import type { BusinessTool, ToolResult } from "./contracts.ts";
 import type { BusinessAction, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
 
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 
-vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await (await import("sharp")).default({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 let folder: string;
+vi.mock("./dailyCash/erp.ts", async (original) => ({ ...await original<typeof import("./dailyCash/erp.ts")>(), fetchErpCashStatus: vi.fn() }));
+vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await (await import("sharp")).default({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 let db: ReturnType<typeof openAgentDb>;
 let output: Buffer;
 let input: BusinessInput;
@@ -117,9 +119,10 @@ it("updates the selected original workbook after validating the generated workbo
 it("preserves newly added work-date plans through a balance correction and renewed final review", async () => {
   const books = fixtureBooks(); const status = books.status.worksheets[0];
   status.getCell("O2").value = 108000; status.getCell("O4").value = 108000;
+  vi.mocked(fetchErpCashStatus).mockReset().mockImplementation(async (workDate) => createErpSnapshot(fixtureErpResponse(books.status), workDate));
   const sources = new WorkSources(db);
   const chosen: BusinessInput = { values: { workDate: "2026-10-14" }, files: {} };
-  for (const [key, book, name] of [["previousReport", books.report, "report.xlsx"], ["weeklyPlans", books.weekly, "weekly.xlsx"], ["cashStatus", books.status, "261013_KC.xlsx"]] as const) {
+  for (const [key, book, name] of [["previousReport", books.report, "report.xlsx"], ["weeklyPlans", books.weekly, "weekly.xlsx"]] as const) {
     const path = join(folder, name); await writeFile(path, key === "previousReport" ? await annualReportFixture() : Buffer.from(await book.xlsx.writeBuffer()));
     const source = (await sources.register([path], "file")).find((item) => item.name === name)!;
     chosen.files[key] = await sources.files(source.id);
@@ -129,6 +132,7 @@ it("preserves newly added work-date plans through a balance correction and renew
   const action = () => getRunAction(db, runId) as BusinessAction;
   await flow.submit(runId, action().id, chosen);
   expect(action().fields.find((field) => field.key === "actualEdits")?.type).toBe("movements");
+  await flow.stop(); flow = makeFlow([dailyCashTool], 30000);
   chosen.values.actualEdits = '{"changes":[],"add":[]}';
   const addedPlans = [{ direction: "out", description: "당일 추가 지급", party: "추가 거래처", amount: "5000" }, { direction: "in", description: "당일 추가 입금", party: "입금 거래처", amount: "1000" }];
   chosen.values.planEdits = JSON.stringify({ changes: [], add: addedPlans });
@@ -155,6 +159,7 @@ it("preserves newly added work-date plans through a balance correction and renew
   await flow.submit(runId, action().id, chosen);
   expect(getRun(db, runId).status, action()?.question).toBe("completed");
   expect(flow.artifacts(threadId)).toHaveLength(2);
+  expect(fetchErpCashStatus).toHaveBeenCalledTimes(1);
   const updated = await loadWorkbook(await readFile(join(folder, "report.xlsx")));
   expect(updated.worksheets).toHaveLength(367);
   expect(updated.getWorksheet("250101")!.getCell("H10").value).toBe(100000);
