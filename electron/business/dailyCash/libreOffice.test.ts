@@ -23,7 +23,7 @@ async function fixture() {
   const executable = join(directory, "soffice");
   await writeFile(executable, "fixture", { mode: 0o700 });
   vi.stubEnv("KETCHUPE_LIBREOFFICE_PATH", executable);
-  const input = join(directory, '한글 "$name.xlsx'), sheet = '한글 " target';
+  const input = join(directory, "한글 '$name.xlsx"), sheet = '한글 " target';
   const book = new ExcelJS.Workbook();
   book.addWorksheet(sheet).pageSetup.printArea = "A1:A3";
   const original = Buffer.from(await book.xlsx.writeBuffer());
