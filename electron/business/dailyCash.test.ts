@@ -72,7 +72,7 @@ it("appends a dated sheet, redeems a maturity, reconciles KC cash and returns a 
   expect(s.getCell("G248").value).toBe(109000); expect(s.getCell("H237").result).toBe(107000);
   expect(s.getCell("K23").value).toBe(9.5); expect(s.getCell("H27").formula).toBe("H26");
   expect(s.getCell("J23").result).toBe(0); expect(s.pageSetup.printArea).toBe("A1:P249");
-  expect(s.pageSetup).toMatchObject({ fitToPage: true, fitToWidth: 1, fitToHeight: 0 });
+  expect(s.pageSetup).toMatchObject({ fitToPage: true, fitToWidth: 1, fitToHeight: 1 });
   expect(Buffer.from(result.image!.bytes).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
   expect(renderSheet).toHaveBeenCalledWith(expect.any(Uint8Array), "261013", expect.any(Array), input.signal, expect.any(Array));
   for (const row of [238, 239, 249]) expect(s.getRow(row).hidden, `row ${row}`).toBe(false);
