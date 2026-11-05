@@ -176,6 +176,8 @@ export class SelectiveWorkbook {
   async withCalculatedValues(calculated: ExcelJS.Worksheet, checks: string[], engine: "Excel" | "LibreOffice" = "Excel", fitted: string[] = []): Promise<Uint8Array> {
     const expected = (await this.loadSheet(calculated.name)).getWorksheet(calculated.name)!;
     const areas = fitted.map(range => ({ range, ...textFitArea(expected, range) }));
+    // LibreOffice stores boolean check results as 1.
+    const passed = (result: unknown) => result === true || (engine === "LibreOffice" && result === 1);
     const part = this.sheet(calculated.name).path;
     const sheet = await document(this.zip, part);
     for (const cell of elements(sheet, "c")) {
@@ -195,7 +197,7 @@ export class SelectiveWorkbook {
       }
       const cached: unknown = after.result;
       const result: unknown = cached instanceof Date ? cached.getTime() / 86400000 + 25569 - (calculated.workbook.properties.date1904 ? 1462 : 0)
-        : engine === "LibreOffice" && checks.includes(address) && cached === 1 ? true : cached;
+        : checks.includes(address) && passed(cached) ? true : cached;
       if (result === undefined || result === null || (typeof result === "object") || (typeof result === "number" && !Number.isFinite(result))) throw new Error(`${address}: ${engine} 수식 계산 결과를 확인할 수 없습니다.`);
       if (checks.includes(address) && result !== true) throw new Error(`${address}: 전일말 금액과 금일초 금액이 일치하지 않습니다.`);
       for (const old of elements(cell, "v")) cell.removeChild(old);
@@ -207,7 +209,7 @@ export class SelectiveWorkbook {
     }
     for (const address of checks) {
       const result: unknown = calculated.getCell(address).result;
-      if (!expected.getCell(address).formula || (result !== true && !(engine === "LibreOffice" && result === 1))) throw new Error(`${address}: 이월 검증 수식이 없거나 일치하지 않습니다.`);
+      if (!expected.getCell(address).formula || !passed(result)) throw new Error(`${address}: 이월 검증 수식이 없거나 일치하지 않습니다.`);
     }
     if (areas.length) {
       const styles = await document(this.zip, "xl/styles.xml");

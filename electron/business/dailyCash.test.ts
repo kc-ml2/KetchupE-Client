@@ -300,6 +300,21 @@ it("preserves unmerged overflow text, merged edge styles and template checks at 
   expect(output.pageSetup.printArea).toBe("A1:Q249");
 }, artifactTestTimeout);
 
+it("keeps the template's prior-sheet carry-over formulas and the next-day opening formula", async () => {
+  const { books, input, file } = await setup(); const source = books.report.getWorksheet("261012")!;
+  for (const row of [10, 21]) source.getCell(`D${row}`).value = { formula: `'261009'!H${row}`, result: 0 };
+  source.getCell("D13").value = { formula: "'261009'!H12", result: 0 };
+  source.getCell("H130").value = { formula: "$D$237", result: 0 };
+  input.files.previousReport = [await file(books.report, "carry.xlsx")];
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const output = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(output.getCell("D10").value).toEqual({ formula: "'261012'!H10", result: 100000 });
+  expect(output.getCell("D21").formula).toBe("'261012'!H21");
+  expect(output.getCell("D13").formula).toBeUndefined();
+  expect(output.getCell("H130").formula).toBe("D237");
+  expect(output.getCell("H130").result).toBe(output.getCell("H17").result);
+}, artifactTestTimeout);
+
 it("preserves every cell style, including all blank merged children, and every original row height after saving", async () => {
   const { books, input, file } = await setup();
   const source = books.report.getWorksheet("261012")!;
