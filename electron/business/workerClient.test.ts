@@ -26,8 +26,43 @@ it("kills a worker on cancel and ignores its late response", async () => {
 it("kills timed out workers and rejects process crashes", async () => {
   vi.useFakeTimers(); const process = child();
   const pending = executeBusinessJob("worker", job, new AbortController().signal);
-  const assertion = expect(pending).rejects.toThrow("초과"); await vi.advanceTimersByTimeAsync(120000); await assertion;
+  const assertion = expect(pending).rejects.toThrow("초과");
+  await vi.advanceTimersByTimeAsync(120000); expect(process.kill).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(360000); await assertion;
   expect(process.kill).toHaveBeenCalledTimes(1);
   const other = child(); const crashed = executeBusinessJob("worker", job, new AbortController().signal);
   other.emit("exit", 1); await expect(crashed).rejects.toThrow("종료");
+});
+it("allows a started job to close Excel after cancel without publishing its late result", async () => {
+  const process = child(), abort = new AbortController();
+  const pending = executeBusinessJob("worker", job, abort.signal);
+  process.emit("spawn"); abort.abort();
+  await expect(pending).rejects.toThrow("중단");
+  expect(process.postMessage).toHaveBeenLastCalledWith({ cancel: true });
+  expect(process.kill).not.toHaveBeenCalled();
+  process.emit("message", { ok: true, result: { status: "completed" } });
+  expect(process.kill).toHaveBeenCalledTimes(1);
+});
+it("holds the Mac Excel lock until cancelled work has finished cleanup", async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  try {
+    const worker = child(), abort = new AbortController();
+    const pending = executeBusinessJob("worker", job, abort.signal);
+    worker.emit("spawn"); abort.abort();
+    await expect(pending).rejects.toThrow("중단");
+    await expect(executeBusinessJob("worker", job, new AbortController().signal)).rejects.toThrow("정리 중");
+    worker.emit("message", { ok: false, error: "cancelled" });
+    const next = child();
+    const resumed = executeBusinessJob("worker", job, new AbortController().signal);
+    next.emit("message", { ok: true, result: { status: "failed", message: "fixture" } });
+    await expect(resumed).resolves.toMatchObject({ status: "failed" });
+  } finally { Object.defineProperty(process, "platform", platform); }
+});
+it("still immediately terminates cancelled jobs that do not use native Excel", async () => {
+  const worker = child(), abort = new AbortController();
+  const pending = executeBusinessJob("worker", { ...job, toolId: "bank_daily" }, abort.signal);
+  worker.emit("spawn"); abort.abort();
+  await expect(pending).rejects.toThrow("중단");
+  expect(worker.kill).toHaveBeenCalledTimes(1);
 });

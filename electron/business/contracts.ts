@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
+import type { BusinessField } from "../../src/app-types/BusinessTool.types.ts";
 import type { WorkflowRoute } from "../agent/router.ts";
 
 const MAX_FILES_PER_FIELD = 50;

@@ -17,6 +17,7 @@ import type { BusinessAction, BusinessInput } from "../../src/app-types/Business
 
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 
+vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await (await import("sharp")).default({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 let folder: string;
 let db: ReturnType<typeof openAgentDb>;
 let output: Buffer;

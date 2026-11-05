@@ -3,6 +3,7 @@ import { compact, isoSheetDate, Money, money, numeric, raw, sameWon, sheetDate, 
 import type { KcAccount } from "./cashStatus.ts";
 import { depositKind, type Movement } from "./weekly.ts";
 import type { Rates } from "./hana.ts";
+import type { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
 
 export const cashRows = [9, 10, 11, 12, 13, 15, 21, 23, 24, 26, 28, 30];
 /** 받을어음·적금 rows sit above the term-deposit sections and have been identical in every workbook seen (5월·10월). */
@@ -121,20 +122,32 @@ export function depositIssues(s: ExcelJS.Worksheet, previous: Record<string, Amo
   return issues;
 }
 function formula(s: ExcelJS.Worksheet, cell: string, expression: string, value: Amount) { s.getCell(cell).value = { formula: expression, result: value.toNumber() }; }
-/** Writes a 집행내역 description so neither Excel nor the PNG clips it: wrap on, and the row tall enough for the lines the merged cell's real width can hold. */
-export function fitDescription(s: ExcelJS.Worksheet, cell: ExcelJS.Cell, label: string) {
-  cell.value = label;
-  cell.alignment = { ...cell.alignment, wrapText: true, vertical: cell.alignment?.vertical ?? "middle" };
-  const column = (address: string) => address.replace(/\d+/g, "");
-  const merge = s.model.merges.find((range) => range.startsWith(`${cell.address}:`));
-  const from = column(cell.address).charCodeAt(0), to = merge ? column(merge.split(":")[1]).charCodeAt(0) : from;
-  // Same pixel model as image.ts: width*7+5 px per column, 8 px padding, a CJK glyph is one em and ASCII about 0.55 em.
-  const widthPx = Array.from({ length: to - from + 1 }, (_, i) => Math.round((s.getColumn(String.fromCharCode(from + i)).width ?? 10) * 7 + 5)).reduce((a, b) => a + b, 0) - 8;
-  const pt = cell.font?.size ?? 10; const perLine = Math.max(1, widthPx / (pt * 4 / 3));
-  const lines = label.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil([...line].reduce((units, ch) => units + (ch.charCodeAt(0) > 127 ? 1 : 0.55), 0) / perLine)), 0);
-  const row = s.getRow(Number(cell.row)); row.height = Math.max(row.height ?? 15, Math.ceil(lines * pt * 1.25 + 4));
+/** Resolve dated references against their actual source layout; never infer an external workbook's meaning. */
+export async function rolloverFormulas(archive: SelectiveWorkbook, previous: ExcelJS.Worksheet) {
+  const l = layout(previous), formulas = new Map<string, string>(), sources = new Map<string, Layout>();
+  const candidates: ExcelJS.Cell[] = [];
+  previous.eachRow((row) => row.eachCell((cell) => { if (cell.type === ExcelJS.ValueType.Formula) candidates.push(cell); }));
+  for (const cell of candidates) {
+    const operands = cell.formula.split("=").map((part) => part.trim());
+    if (operands.length !== 2) continue;
+    const opening = operands.findIndex((part) => part.replaceAll("$", "").toUpperCase() === `D${l.opening}`);
+    if (opening < 0) continue;
+    const reference = operands[1 - opening];
+    if (/\[[^\]]+\]/.test(reference)) throw new Error(`${cell.address}: 외부 통합문서의 이월 참조는 추측해서 변경할 수 없습니다. 정상 원본에서 참조를 확인하고 내부 시트로 연결하세요.`);
+    const target = reference.match(/^(?:'(\d{6})'|(\d{6}))!\$?([A-Z]+)\$?(\d+)$/i);
+    if (!target) continue;
+    const name = target[1] ?? target[2];
+    if (!archive.sheetNames.includes(name) || name >= previous.name) throw new Error(`${cell.address}: 이월 검증의 과거 날짜 시트 ${name}를 확인할 수 없습니다.`);
+    if (!sources.has(name)) sources.set(name, layout((await archive.loadSheet(name)).getWorksheet(name)!));
+    const source = sources.get(name)!;
+    const address = `${target[3].toUpperCase()}${target[4]}`;
+    if (address !== `H${source.opening}` && address !== `D${source.closing}`) throw new Error(`${cell.address}: ${name}!${address}가 기초·마감금액 참조인지 확인할 수 없습니다.`);
+    operands[1 - opening] = `'${previous.name}'!D${l.closing}`;
+    formulas.set(cell.address, operands.join("="));
+  }
+  return formulas;
 }
-export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet, reportDate: string, workDate: string, amounts: Record<string, Amount>, accounts: KcAccount[], bindings: Map<string, string>, actual: Movement[], plan: Movement[], rates: Rates, changes: Record<string, { incoming: Amount; outgoing: Amount }>) {
+export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet, reportDate: string, workDate: string, amounts: Record<string, Amount>, accounts: KcAccount[], bindings: Map<string, string>, actual: Movement[], plan: Movement[], rates: Rates, changes: Record<string, { incoming: Amount; outgoing: Amount }>, rollovers: Map<string, string>) {
   const l = layout(previous); const name = sheetDate(reportDate);
   if (book.getWorksheet(name)) throw new Error(`${name} 시트가 이미 있습니다. 기존 시트를 덮어쓰지 않습니다.`);
   const s = book.addWorksheet(name); const id = s.id;
@@ -142,12 +155,13 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   s.model = { ...model, id, name };
   // ExcelJS 4.4 serializes `merges` but its model setter reads `mergeCells`.
   for (const range of model.merges) s.mergeCellsWithoutStyle(range);
-  // Clear old calculations, including scratch checks; new report formulas are computed explicitly.
-  const frozen: [string, ExcelJS.CellValue][] = [];
-  s.eachRow((r) => r.eachCell((c) => { if (!c.isMerged || c.master.address === c.address) { if (c.type === ExcelJS.ValueType.Formula) frozen.push([c.address, null]); } }));
-  for (const [address, value] of frozen) s.getCell(address).value = value;
+  // The model setter skips merged child cells, whose styles carry the outside edges.
+  previous.eachRow({ includeEmpty: true }, (row) => row.eachCell({ includeEmpty: true }, (cell) => { s.getCell(cell.address).style = structuredClone(cell.style); }));
+  const rolloverChecks = [...rollovers.keys()];
+  const textFitRanges: string[] = [];
+  for (const [address, expression] of rollovers) s.getCell(address).value = { formula: expression };
   s.getCell("B2").value = `일 일 자 금 일 보\n${reportDate.replaceAll("-", ".")}`;
-  for (const r of [19, l.fxHeader]) { s.getCell(`M${r}`).value = `${reportDate} 최종 고시`; s.getRow(r).height = Math.max(s.getRow(r).height ?? 15, 30); s.getCell(`M${r}`).alignment = { ...s.getCell(`M${r}`).alignment, wrapText: true }; }
+  for (const r of [19, l.fxHeader]) s.getCell(`M${r}`).value = `${reportDate} 최종 고시`;
   for (const row of [...cashRows, ...l.termRows, ...l.otherRows]) {
     numeric(s.getCell(`D${row}`), amounts[`H${row}`] ?? new Money(0)); numeric(s.getCell(`E${row}`), 0); numeric(s.getCell(`G${row}`), 0);
     numeric(s.getCell(`H${row}`), amounts[`H${row}`] ?? new Money(0));
@@ -197,11 +211,11 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
     for (const direction of ["in", "out"] as const) {
       const entries = items.filter((m) => m.direction === direction); const first = direction === "in" ? l.opening + 1 : l.inSum + 1; const last = direction === "in" ? l.inSum - 1 : l.closing - 2;
       if (entries.length > last - first + 1) throw new Error("집행내역이 고정 양식의 행 수를 초과합니다. 양식 확장이 필요합니다.");
-      entries.forEach((m, i) => { const r = first + i; fitDescription(s, s.getCell(`${descCol}${r}`), `${m.description}${m.party ? ` / ${m.party}` : ""}`); numeric(s.getCell(`${amountCol}${r}`), m.amount); s.getCell(`${amountCol}${r}`).note = m.source; s.getRow(r).hidden = false; });
+      entries.forEach((m, i) => { const r = first + i; s.getCell(`${descCol}${r}`).value = `${m.description}${m.party ? ` / ${m.party}` : ""}`; numeric(s.getCell(`${amountCol}${r}`), m.amount); s.getCell(`${amountCol}${r}`).note = m.source; s.getRow(r).hidden = false; textFitRanges.push(`${descCol}${r}:${s.getCell(r, Number(s.getCell(`${amountCol}${r}`).col) - 1).address}`); });
       formula(s, `${amountCol}${direction === "in" ? l.inSum : l.outSum}`, `SUM(${amountCol}${first}:${amountCol}${last})`, sum(entries.map((m) => m.amount)));
     }
   }
-  numeric(s.getCell(`D${l.opening}`), money(s.getCell("D17"))); numeric(s.getCell(`H${l.opening}`), money(s.getCell("H17")));
+  formula(s, `D${l.opening}`, "D17", money(s.getCell("D17"))); formula(s, `H${l.opening}`, "H17", money(s.getCell("H17")));
   for (const col of ["D", "H"]) formula(s, `${col}${l.closing}`, `${col}${l.opening}+${col}${l.inSum}-${col}${l.outSum}`, money(s.getCell(`${col}${l.opening}`)).plus(money(s.getCell(`${col}${l.inSum}`))).minus(money(s.getCell(`${col}${l.outSum}`))));
   if (!money(s.getCell(`D${l.closing}`)).eq(money(s.getCell("H17")))) throw new Error("주요 집행내역의 마감잔액과 단기성 원화 금일금액이 다릅니다.");
   const bValues = accounts.filter((a) => bindings.get(a.key)?.startsWith("P"));
@@ -212,10 +226,11 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   const totals = [[holdingFx, money(s.getCell("H17"))], [businessFx, businessKrw], [termFx, money(s.getCell(`H${l.krwTermSum}`))]];
   totals.push([sum(totals.map((v) => v[0])), sum(totals.map((v) => v[1]))]);
   totals.forEach(([fx, krw], i) => { const row = l.total - 6 + i * 2; numeric(s.getCell(`F${row}`), fx); numeric(s.getCell(`G${row}`), krw); formula(s, `H${row}`, `F${row}+G${row}`, fx.plus(krw)); s.getRow(row).hidden = false; });
-  // Old scratch checks referenced previous dates; replace with current checks, never stale cached booleans.
-  s.getCell(`D${l.closing + 4}`).value = null; s.getCell(`D${l.closing + 5}`).value = null; s.getCell(`D${l.closing + 6}`).value = null;
-  s.pageSetup.printArea = `A1:M${l.total}`; s.state = "visible";
+  const lastRow = Math.max(l.total, l.businessRows.at(-1) ?? 0);
+  let lastCol = 1;
+  s.eachRow((row, r) => { if (r <= lastRow) row.eachCell((cell, c) => { if (cell.value !== null) lastCol = Math.max(lastCol, c); }); });
+  s.pageSetup.printArea = `A1:${s.getCell(lastRow, lastCol).address}`; s.state = "visible";
+  Object.assign(s.pageSetup, { fitToPage: true, fitToWidth: 1, fitToHeight: 0 });
   book.calcProperties.fullCalcOnLoad = true;
-  // The KC side table runs one row past 총원화; the PNG must include it.
-  return { sheet: s, totalKrw: totals[3][1], lastRow: Math.max(l.total, l.businessRows.at(-1) ?? 0) };
+  return { sheet: s, totalKrw: totals[3][1], lastRow, rolloverChecks, textFitRanges };
 }

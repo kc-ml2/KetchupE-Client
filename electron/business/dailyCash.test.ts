@@ -5,20 +5,22 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { dailyCashTool, applyEdits } from "./dailyCash.ts";
-import { bindAccounts, fitDescription, layout, priorAmounts } from "./dailyCash/report.ts";
+import { bindAccounts, layout, priorAmounts } from "./dailyCash/report.ts";
 import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
+import { renderSheet } from "./dailyCash/image.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
 import { Money, previousBusinessDay } from "./dailyCash/values.ts";
 import type { BusinessTool } from "./contracts.ts";
 vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
+vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await sharp({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 async function setup() {
   const books = fixtureBooks(); const file = async (book: ExcelJS.Workbook, name: string) => ({ bytes: Buffer.from(await book.xlsx.writeBuffer()), name, fingerprint: name });
   const input: Parameters<BusinessTool["execute"]>[0] = { values: { workDate: "2026-10-14", actualEdits: "확인", planEdits: "확인" }, files: { previousReport: [await file(books.report, "전일일보.xlsx")], weeklyPlans: [await file(books.weekly, "계획.xlsx")], cashStatus: [await file(books.status, "261013_자금현황표[KC].xlsx")] }, checkpoint: {}, signal: new AbortController().signal };
   return { books, input, file };
 }
-// Real XLSX/PNG generation needs more time on shared Windows CI runners.
+// Workbook generation needs more time on shared Windows CI runners; native Excel is mocked here.
 const artifactTestTimeout = 30_000;
 it("asks only for unresolved account locations and accepts the form's existing mapping contract", async () => {
   const { input, books, file } = await setup();
@@ -69,15 +71,11 @@ it("appends a dated sheet, redeems a maturity, reconciles KC cash and returns a 
   expect(s.getCell("G51").value).toBe(10000); expect(s.getCell("H51").result).toBe(0);
   expect(s.getCell("G248").value).toBe(109000); expect(s.getCell("H237").result).toBe(107000);
   expect(s.getCell("K23").value).toBe(9.5); expect(s.getCell("H27").formula).toBe("H26");
-  expect(s.getCell("J23").result).toBe(0); expect(s.pageSetup.printArea).toBe("A1:M248");
-  expect(Buffer.from(result.image!.bytes).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a"); expect(result.image!.bytes.length).toBeGreaterThan(10000);
-  // The PNG (rendered at 2x) spans the visible columns A:P and every visible row through O249, the last KC side-table row.
-  // An A:M / 총원화-row render, which cut the 사업부문 자금현황표(KC) off the right edge, would be 702 px narrower and 58 px shorter.
-  const SCALE = 2;
-  const columnsPx = [6, 15, 23, 18, 6, 18, 15, 18, 17, 3, 25, 20].reduce((total, width) => total + Math.round(width * 7 + 5), 0);
-  const rowsPx = Array.from({ length: 249 }, (_, i) => s.getRow(i + 1)).filter((row) => !row.hidden).reduce((total, row) => total + Math.round((row.height ?? 15) * 4 / 3), 0);
+  expect(s.getCell("J23").result).toBe(0); expect(s.pageSetup.printArea).toBe("A1:P249");
+  expect(s.pageSetup).toMatchObject({ fitToPage: true, fitToWidth: 1, fitToHeight: 0 });
+  expect(Buffer.from(result.image!.bytes).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+  expect(renderSheet).toHaveBeenCalledWith(expect.any(Uint8Array), "261013", expect.any(Array), input.signal, expect.any(Array));
   for (const row of [238, 239, 249]) expect(s.getRow(row).hidden, `row ${row}`).toBe(false);
-  await expect(sharp(Buffer.from(result.image!.bytes)).metadata()).resolves.toMatchObject({ width: columnsPx * SCALE, height: rowsPx * SCALE });
   expect(result.externalData?.matured).toHaveLength(1);
 }, artifactTestTimeout);
 it("matches the KC file date to the report date (work date minus one), not the work date", async () => {
@@ -279,14 +277,90 @@ it("re-asks for confirmation when actual or next-day plan changes after review",
   const updated = await dailyCashTool.execute(input); expect(updated.status).toBe("needs_input"); if (updated.status === "needs_input") expect(codeOf(updated.fields)).not.toBe(input.values.review);
 });
 
-it("wraps a long execution description and grows the row so the PNG does not clip it", () => {
-  const { report } = fixtureBooks(); const s = report.getWorksheet("261012")!;
-  const short = s.getCell("F131"); const long = s.getCell("F132");
-  fitDescription(s, short, "익일 지급 계획 / 가상상사");
-  fitDescription(s, long, "협력사 10월 기성 대금 및 부가가치세 정산 지급 (제2공장 설비 증설분 포함) / 가상건설 주식회사");
-  expect(short.alignment.wrapText).toBe(true); expect(s.getRow(131).height).toBe(22);
-  // F:G is 15+23 chars wide (268 px of 9pt text ≈ 22 CJK glyphs per line) → 3 lines ≥ 38pt, well above the template's 22pt.
-  expect(long.alignment.wrapText).toBe(true); expect(s.getRow(132).height).toBeGreaterThanOrEqual(38);
+it("preserves unmerged overflow text, merged edge styles and template checks at arbitrary addresses", async () => {
+  const { books, input, file } = await setup(); const source = books.report.getWorksheet("261012")!;
+  source.unMergeCells("F131:G131"); source.getCell("F131").alignment = { horizontal: "left", wrapText: false };
+  source.getRow(131).height = 19;
+  source.mergeCellsWithoutStyle("A8:B8"); source.mergeCellsWithoutStyle("E8:F8");
+  for (const address of ["B8", "F8"]) source.getCell(address).border = { right: { style: "double", color: { argb: "FF123456" } } };
+  const historic = books.report.addWorksheet("261009");
+  historic.model = { ...structuredClone(source.model), id: historic.id, name: historic.name };
+  source.getCell("D243").value = { formula: "D130='261009'!H130" };
+  source.getCell("Q240").value = { formula: "SUM(H10:H13)", result: 100000 };
+  input.files.previousReport = [await file(books.report, "template.xlsx")];
+  input.values.planEdits = JSON.stringify({ changes: [{ index: 1, amount: 2000, description: "협력사 10월 기성 대금 및 부가가치세 정산 지급 (제2공장 설비 증설분 포함)" }] });
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const output = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(output.getCell("F131").isMerged).toBe(false);
+  expect(output.getCell("F131").alignment.wrapText).not.toBe(true);
+  expect(output.getRow(131).height).toBe(19);
+  for (const address of ["B8", "F8"]) expect(output.getCell(address).border).toEqual(source.getCell(address).border);
+  expect(output.getCell("D243").formula).toBe("D130='261012'!D237");
+  expect(output.getCell("Q240").formula).toBe("SUM(H10:H13)");
+  expect(output.pageSetup.printArea).toBe("A1:Q249");
+}, artifactTestTimeout);
+
+it("preserves every cell style, including all blank merged children, and every original row height after saving", async () => {
+  const { books, input, file } = await setup();
+  const source = books.report.getWorksheet("261012")!;
+  source.mergeCellsWithoutStyle("Q253:S255");
+  for (let row = 253; row <= 255; row++) for (let col = 17; col <= 19; col++) {
+    source.getCell(row, col).style = {
+      border: { left: { style: "double", color: { argb: "FF123456" } }, bottom: { style: "dashed" } },
+      font: { name: "Arial", size: col, bold: row === 254, italic: col === 18, color: { argb: "FF654321" } },
+      alignment: { horizontal: "right", vertical: "middle", wrapText: row === 253, textRotation: col - 17 },
+      numFmt: `0.${"0".repeat(row - 252)}`,
+      fill: { type: "pattern", pattern: "solid", fgColor: { argb: "FFEEDDCC" } },
+    };
+  }
+  source.getCell("T260").font = { name: "Arial", size: 18, strike: true };
+  source.getRow(260).height = 29;
+  source.getCell("M19").alignment = { horizontal: "left", wrapText: false };
+  source.getRow(19).height = 17;
+  input.files.previousReport = [await file(books.report, "styles.xlsx")];
+  const original = (await (await SelectiveWorkbook.open(input.files.previousReport[0].bytes)).loadSheet("261012")).getWorksheet("261012")!;
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const output = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(output.model.merges).toEqual(original.model.merges);
+  original.eachRow({ includeEmpty: true }, (row) => {
+    expect(output.getRow(row.number).height, `row ${row.number}`).toBe(original.getRow(row.number).height);
+    row.eachCell({ includeEmpty: true }, (cell) => expect(output.getCell(cell.address).style, cell.address).toEqual(cell.style));
+  });
+  for (let row = 253; row <= 255; row++) for (let col = 17; col <= 19; col++) {
+    const cell = output.getCell(row, col);
+    expect(cell.isMerged).toBe(true);
+    expect(cell.value).toBeNull();
+    expect(cell.font.size).toBe(col);
+  }
+}, artifactTestTimeout);
+
+it("returns no completed artifacts if Excel export fails", async () => {
+  const { input } = await setup();
+  vi.mocked(renderSheet).mockRejectedValueOnce(new Error("Excel 출력 실패"));
+  expect(await confirm(input)).toEqual({ status: "failed", message: "Excel 출력 실패" });
+});
+
+it("discloses LibreOffice fallback in the result and audit", async () => {
+  const { input } = await setup();
+  vi.mocked(renderSheet).mockImplementationOnce(async (bytes, name) => ({
+    bytes, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!,
+    image: await sharp({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer(),
+    engine: "LibreOffice", fallbackReason: "Excel view-only",
+  }));
+  expect(await confirm(input)).toMatchObject({
+    status: "completed", summary: expect.stringContaining("LibreOffice (Excel 출력 실패로 자동 전환)"),
+    externalData: { outputEngine: "LibreOffice", fallbackReason: "Excel view-only" },
+  });
+});
+
+it.each(["G248", "D237", "H10"])("rejects an Excel-calculated financial mismatch at %s", async (address) => {
+  const { input } = await setup();
+  vi.mocked(renderSheet).mockImplementationOnce(async (bytes, name) => {
+    const sheet = (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!;
+    sheet.getCell(address).value = 999;
+    return { bytes, sheet, image: Buffer.alloc(0), engine: "Excel", fallbackReason: undefined };
+  });
+  expect(await confirm(input)).toMatchObject({ status: "failed", message: expect.stringContaining("Excel 재계산 후") });
 });
 
 it("falls back to manually entered rates after a failed retry and records them as manual", async () => {
@@ -314,14 +388,14 @@ it("calculates and saves the next daily cash report from 366 full report sheets 
     const result = await confirm(input);
     expect(result.status, JSON.stringify(result.status !== "completed" && result)).toBe("completed");
     if (result.status !== "completed") return;
-    expect(parsed).toEqual([["261012"], ["261012"]]);
+    expect(parsed).toEqual([["261012"], ["261012"], ["261013"]]);
     expect(result.validationSheet).toBe("261013");
     const output = await SelectiveWorkbook.open(result.file.bytes);
     expect(output.sheetNames).toHaveLength(367);
     const latest = await output.loadSheet(result.validationSheet!);
     expect(latest.worksheets).toHaveLength(1);
     expect(latest.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
-    expect(latest.getWorksheet("261013")!.pageSetup.printArea).toBe("A1:M248");
+    expect(latest.getWorksheet("261013")!.pageSetup.printArea).toBe("A1:P249");
     const before = await JSZip.loadAsync(annual); const after = await JSZip.loadAsync(result.file.bytes);
     for (const path of Object.keys(before.files).filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))) {
       expect(await after.file(path)!.async("string"), path).toBe(await before.file(path)!.async("string"));
