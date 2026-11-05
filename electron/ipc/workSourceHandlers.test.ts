@@ -13,7 +13,10 @@ import type { WorkbookJob } from "../work/reader.ts";
 import type { AgentRuntime } from "../agent/runtime.ts";
 import type { SourceProfile } from "../../src/app-types/WorkSource.types.ts";
 
-const mock = vi.hoisted(() => ({ handlers: new Map<string, (...args: any[]) => any>(), paths: [] as string[], read: vi.fn(), save: vi.fn(), artifactPath: vi.fn(), networkPath: false }));
+// IPC handlers are registered with heterogeneous signatures; tests call them dynamically.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Handler = (...args: any[]) => any;
+const mock = vi.hoisted(() => ({ handlers: new Map<string, Handler>(), paths: [] as string[], read: vi.fn(), save: vi.fn(), artifactPath: vi.fn(), networkPath: false }));
 vi.mock("node:fs/promises", async (original) => {
   const fs = await original<typeof import("node:fs/promises")>();
   return { ...fs, realpath: (...args: Parameters<typeof fs.realpath>) => {
@@ -21,7 +24,7 @@ vi.mock("node:fs/promises", async (original) => {
     return fs.realpath(...args);
   } };
 });
-vi.mock("electron", () => ({ ipcMain: { handle: (name: string, handler: (...args: any[]) => any) => mock.handlers.set(name, handler) }, BrowserWindow: { fromWebContents: () => null }, dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: mock.paths }), showSaveDialog: mock.save } }));
+vi.mock("electron", () => ({ ipcMain: { handle: (name: string, handler: Handler) => mock.handlers.set(name, handler) }, BrowserWindow: { fromWebContents: () => null }, dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: mock.paths }), showSaveDialog: mock.save } }));
 vi.mock("../work/reader.ts", () => ({ readWorkbookJob: mock.read }));
 import { registerWorkSourceHandlers } from "./workSourceHandlers.ts";
 

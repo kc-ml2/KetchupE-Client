@@ -40,7 +40,7 @@ const formatCitationLabel = (evidenceId: string): string =>
 const formatDailyCashReview = (text: string): string => {
   if (!/^계획 대비 실적 차이\r?$/m.test(text) || !/^원화 대사 대상:/m.test(text) || /^\s*(?:`{3}|~{3})/m.test(text)) return text;
   let inSection = false;
-  const literal = (value: string) => value.replace(/([\\`*_{}\[\]<>])/g, "\\$1");
+  const literal = (value: string) => value.replace(/([\\`*_{}[\]<>])/g, "\\$1");
   return text.split(/\r?\n/).map((line) => {
     const heading = line.match(/^(계좌 연결|계획 대비 실적 차이|정기예금 집행(?:\s*\([^\n]*\))?|신규 가입|만기|원화 대사 대상|환율)(?::\s*(.*))?$/);
     if (heading) {

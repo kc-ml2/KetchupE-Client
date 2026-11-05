@@ -121,6 +121,11 @@ export function depositIssues(s: ExcelJS.Worksheet, previous: Record<string, Amo
   for (const e of expected) if (!e.amount.isZero()) issues.push(`${e.bank}: ${e.kind === "maturity" ? "만기 감소" : "가입 증가"} ${e.amount}원의 실제 집행 내역을 확인하세요.`);
   return issues;
 }
+/** True when D{row} was ='YYMMDD'!H{row} and the prior sheet's H{row} cache is exactly the carried amount (no manual override). */
+function carriesPrior(previous: ExcelJS.Worksheet, row: number, amount: Amount) {
+  if (previous.getCell(`D${row}`).formula?.match(/^(?:'\d{6}'|\d{6})!\$?H\$?(\d+)$/i)?.[1] !== String(row)) return false;
+  try { return money(previous.getCell(`H${row}`)).eq(amount); } catch { return false; }
+}
 function formula(s: ExcelJS.Worksheet, cell: string, expression: string, value: Amount) { s.getCell(cell).value = { formula: expression, result: value.toNumber() }; }
 /** Resolve dated references against their actual source layout; never infer an external workbook's meaning. */
 export async function rolloverFormulas(archive: SelectiveWorkbook, previous: ExcelJS.Worksheet) {
@@ -163,7 +168,10 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   s.getCell("B2").value = `일 일 자 금 일 보\n${reportDate.replaceAll("-", ".")}`;
   for (const r of [19, l.fxHeader]) s.getCell(`M${r}`).value = `${reportDate} 최종 고시`;
   for (const row of [...cashRows, ...l.termRows, ...l.otherRows]) {
-    numeric(s.getCell(`D${row}`), amounts[`H${row}`] ?? new Money(0)); numeric(s.getCell(`E${row}`), 0); numeric(s.getCell(`G${row}`), 0);
+    const opening = amounts[`H${row}`] ?? new Money(0);
+    // Keep the template's ='전일'!H{row} carry-over, re-pointed at this report's prior sheet, whenever its cached value is the amount used.
+    if (carriesPrior(previous, row, opening)) formula(s, `D${row}`, `'${previous.name}'!H${row}`, opening); else numeric(s.getCell(`D${row}`), opening);
+    numeric(s.getCell(`E${row}`), 0); numeric(s.getCell(`G${row}`), 0);
     numeric(s.getCell(`H${row}`), amounts[`H${row}`] ?? new Money(0));
     if (currencyAt(row, l) !== "KRW") numeric(s.getCell(`I${row}`), amounts[`I${row}`] ?? new Money(0));
   }
@@ -215,7 +223,7 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
       formula(s, `${amountCol}${direction === "in" ? l.inSum : l.outSum}`, `SUM(${amountCol}${first}:${amountCol}${last})`, sum(entries.map((m) => m.amount)));
     }
   }
-  formula(s, `D${l.opening}`, "D17", money(s.getCell("D17"))); formula(s, `H${l.opening}`, "H17", money(s.getCell("H17")));
+  formula(s, `D${l.opening}`, "D17", money(s.getCell("D17"))); formula(s, `H${l.opening}`, previous.getCell(`H${l.opening}`).formula?.replaceAll("$", "").toUpperCase() === `D${l.closing}` ? `D${l.closing}` : "H17", money(s.getCell("H17")));
   for (const col of ["D", "H"]) formula(s, `${col}${l.closing}`, `${col}${l.opening}+${col}${l.inSum}-${col}${l.outSum}`, money(s.getCell(`${col}${l.opening}`)).plus(money(s.getCell(`${col}${l.inSum}`))).minus(money(s.getCell(`${col}${l.outSum}`))));
   if (!money(s.getCell(`D${l.closing}`)).eq(money(s.getCell("H17")))) throw new Error("주요 집행내역의 마감잔액과 단기성 원화 금일금액이 다릅니다.");
   const bValues = accounts.filter((a) => bindings.get(a.key)?.startsWith("P"));
@@ -230,7 +238,7 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   let lastCol = 1;
   s.eachRow((row, r) => { if (r <= lastRow) row.eachCell((cell, c) => { if (cell.value !== null) lastCol = Math.max(lastCol, c); }); });
   s.pageSetup.printArea = `A1:${s.getCell(lastRow, lastCol).address}`; s.state = "visible";
-  Object.assign(s.pageSetup, { fitToPage: true, fitToWidth: 1, fitToHeight: 0 });
+  Object.assign(s.pageSetup, { fitToPage: true, fitToWidth: 1, fitToHeight: 1 });
   book.calcProperties.fullCalcOnLoad = true;
-  return { sheet: s, totalKrw: totals[3][1], lastRow, rolloverChecks, textFitRanges };
+  return { sheet: s, totalKrw: totals[3][1], rolloverChecks, textFitRanges };
 }

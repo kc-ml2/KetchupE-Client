@@ -39,3 +39,6 @@ release
 /Xenova/
 /.cache/
 *.tsbuildinfo
+
+# Local verification output (real report data)
+/outputs/
