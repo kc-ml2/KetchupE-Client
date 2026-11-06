@@ -67,19 +67,30 @@ on run argv
   set fitRanges to item 5 of argv
   set fitted to ""
   set targetBook to missing value
-  set stageName to "통합문서 열기"
+  set calculationBook to missing value
+  set stageName to "Excel 자동화 설정"
   with timeout of 60 seconds
     tell application id "com.microsoft.Excel"
       set oldSecurity to automation security
       set oldEvents to enable events
       set oldCalculation to calculation
       set oldCalculateBeforeSave to calculate before save
+      set oldAlerts to display alerts
       try
+        set display alerts to false
         set automation security to msoAutomationSecurityForceDisable
         set enable events to false
+        -- The first opened workbook can override Excel's calculation mode before we can disable it.
+        set calculationBook to make new workbook
+        set stageName to "수동 계산 설정"
         set calculation to calculation manual
+        set stageName to "저장 전 계산 설정"
         set calculate before save to false
+        set stageName to "통합문서 열기"
         set targetBook to open workbook workbook file name bookPath update links do not update links read only false ignore read only recommended true add to mru false
+        close calculationBook saving no
+        set calculationBook to missing value
+        set stageName to "대상 시트 선택"
         set targetSheet to worksheet sheetName of targetBook
         if operation is "calculate" then
           set stageName to "시트 재계산"
@@ -93,6 +104,13 @@ on run argv
         else
           set stageName to "최종 XLSX의 PDF 출력"
           set enable calculation of targetSheet to false
+          -- Mac Save As PDF includes every visible sheet, even when its receiver is a worksheet.
+          set stageName to "다른 시트 숨기기"
+          repeat with sheetIndex from 1 to count of worksheets of targetBook
+            set otherSheet to worksheet sheetIndex of targetBook
+            if name of otherSheet is not sheetName then set visible of otherSheet to false
+          end repeat
+          set stageName to "PDF 저장"
           save as targetSheet filename pdfPath file format PDF file format
         end if
         close targetBook saving no
@@ -101,19 +119,24 @@ on run argv
         set calculation to oldCalculation
         set automation security to oldSecurity
         set enable events to oldEvents
+        set display alerts to oldAlerts
       on error messageText number messageNumber
         with timeout of 5 seconds
+          try
+            set display alerts to oldAlerts
+          end try
           try
             set automation security to oldSecurity
           end try
           try
             set enable events to oldEvents
           end try
-          if targetBook is not missing value then
-            try
-              close targetBook saving no
-            end try
-          end if
+          try
+            close targetBook saving no
+          end try
+          try
+            close calculationBook saving no
+          end try
           try
             set calculate before save to oldCalculateBeforeSave
           end try
