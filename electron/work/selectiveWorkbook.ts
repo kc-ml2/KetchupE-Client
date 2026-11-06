@@ -189,7 +189,8 @@ export class SelectiveWorkbook {
       if (!before.formula) {
         // Office can split unchanged strings into font runs and stores numbers at 15 significant digits.
         const strings = [ExcelJS.ValueType.String, ExcelJS.ValueType.RichText];
-        const unchanged = strings.includes(before.type) && strings.includes(after.type) ? before.text === after.text
+        const unchanged = (before.value === "" || before.value === null) && (after.value === "" || after.value === null) ? true
+          : strings.includes(before.type) && strings.includes(after.type) ? before.text === after.text
           : typeof before.value === "number" && typeof after.value === "number" ? before.value.toPrecision(15) === after.value.toPrecision(15)
           : JSON.stringify(before.value) === JSON.stringify(after.value);
         if (!unchanged) throw new Error(`${address}: ${engine} 재계산 중 입력값이 변경되었습니다.`);
