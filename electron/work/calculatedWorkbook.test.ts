@@ -144,3 +144,19 @@ it("refuses layout areas that overlap populated cells or a different existing me
   sheet.mergeCells("A1:C1");
   expect(() => textFitArea(sheet, "A1:B1")).toThrow("병합 범위");
 });
+
+it("accepts Excel normalizing empty cells and strings but preserves its source XML and rejects lost text", async () => {
+  const book = new ExcelJS.Workbook(), sheet = book.addWorksheet("current");
+  sheet.getCell("A1").value = "";
+  sheet.getCell("B1").value = " ";
+  sheet.getCell("C1").numFmt = "0.00";
+  const bytes = new Uint8Array(await book.xlsx.writeBuffer());
+  const archive = await SelectiveWorkbook.open(bytes);
+  sheet.getCell("A1").value = null;
+  sheet.getCell("C1").value = "";
+  const result = await archive.withCalculatedValues(sheet, []);
+  const original = await JSZip.loadAsync(bytes), output = await JSZip.loadAsync(result);
+  expect(await output.file("xl/worksheets/sheet1.xml")!.async("string")).toBe(await original.file("xl/worksheets/sheet1.xml")!.async("string"));
+  sheet.getCell("B1").value = null;
+  await expect(archive.withCalculatedValues(sheet, [])).rejects.toThrow("입력값");
+});

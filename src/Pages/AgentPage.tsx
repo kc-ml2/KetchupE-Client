@@ -2,6 +2,7 @@ import BusinessToolCard, {
   BusinessArtifacts,
 } from "@Features/Agent/components/BusinessToolCard";
 import { useContext, useEffect, useRef, useState } from "react";
+import { version } from "../../package.json";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { IoSend } from "react-icons/io5";
 import { FaStopCircle } from "react-icons/fa";
@@ -314,6 +315,9 @@ const AgentPage = (): React.JSX.Element => {
               현재 질문은 이 대화에만 적용됩니다.
             </span>
           )}
+          <span className="ml-auto shrink-0 text-xs text-[#71717A] dark:text-[#A1A1AA]" aria-label={`앱 버전 ${version}`}>
+            v{version}
+          </span>
         </div>
 
         {tab !== "home" && (
