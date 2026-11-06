@@ -59,7 +59,7 @@ After company email authentication, the app receives per-user LiteLLM and MARU k
 `.env` can set the generation and routing model aliases and optional service settings. Never commit API keys or tokens.
 
 ```dotenv
-LITELLM_MODEL_ALIAS=loki
+LITELLM_MODEL_ALIAS=ketchupe
 LITELLM_ROUTER_MODEL_ALIAS=clef-flash
 TROLLEY_API_KEY=<optional service user key>
 TROLLEY_MCP_ENDPOINT=https://trolley.ml2-alpha.com/mcp/
@@ -73,7 +73,7 @@ npm run probe:maru
 npm run probe:trolley
 ```
 
-Natural-language task selection uses the `clef-flash` alias registered on the same LiteLLM's `/v1/systemone`. If it is deployed under another name, set `LITELLM_ROUTER_MODEL_ALIAS`. `$workflow_id` and explicit modes do not call the routing model. Generation and answers keep using `LITELLM_MODEL_ALIAS`. A routing failure never falls back to another model. Restart the dev server after changing settings, and rebuild release builds.
+Natural-language task selection uses the `clef-flash` alias registered on the same LiteLLM's `/v1/systemone`. If it is deployed under another name, set `LITELLM_ROUTER_MODEL_ALIAS`. `$workflow_id` and explicit modes do not call the routing model. Generation and answers use `LITELLM_MODEL_ALIAS` (release default `ketchupe`). If that model is rejected as unavailable (HTTP 400/404), the client refreshes `/models` using the same account and tries up to two alternatives: `ketchupe`, `loki`/`Loki`, `odin`, then other exposed generation candidates. Clef and known non-chat aliases are excluded; actual API spelling is preserved. No model fallback occurs for unrelated bad requests, authentication errors, server failures or partial streams. A routing failure never falls back to another model. Restart the dev server after changing settings, and rebuild release builds.
 
 To switch accounts, log out and authenticate again. MARU currently supports storage browsing and search with cited content, plus document download and indexing; Trolley supports capability and Operation listing. Trolley Operation execution is not connected. Follow the [integration guide for external teams](docs/WORKFLOW_INTEGRATION_GUIDE.md) to connect a new MCP server.
 
