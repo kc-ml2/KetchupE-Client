@@ -1,3 +1,4 @@
+import { agentErrorMessage } from "@lib/agentErrorMessage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RunStatus, RunAction, AgentStreamEvent, AppliedContext, CitationSummary, KetchupEAgentAPI } from "@app-types/Agent.types";
 
@@ -52,7 +53,7 @@ export const reduceRunEvent = (current: RunView, event: AgentStreamEvent): RunVi
         appliedContext: payload.appliedContext && typeof payload.appliedContext === "object" ? payload.appliedContext as AppliedContext : current.appliedContext,
       };
     case "failed":
-      return { ...current, isRunning: false, phase: null, streamingText: "", action: null, waitingQuestion: null, error: `${String(payload.code)}: ${String(payload.message ?? "")}` };
+      return { ...current, isRunning: false, phase: null, streamingText: "", action: null, waitingQuestion: null, error: agentErrorMessage(payload.code, payload.message) };
     default:
       return current;
   }

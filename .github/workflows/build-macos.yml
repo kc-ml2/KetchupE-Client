@@ -14,7 +14,7 @@ jobs:
   build-macos:
     runs-on: macos-latest
     env:
-      LITELLM_MODEL_ALIAS: loki
+      LITELLM_MODEL_ALIAS: ketchupe
       LITELLM_ROUTER_MODEL_ALIAS: clef-flash
 
     steps:

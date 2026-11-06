@@ -1,6 +1,7 @@
+import { agentErrorMessage } from "../../src/lib/agentErrorMessage.ts";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { APICallError, generateText, streamText, tool, ToolChoiceViolationError } from "ai";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import {
   AgentError,
   LIMITS,
@@ -18,7 +19,7 @@ import {
 import { buildAnswerMessages, buildPolicyMessages, buildVerifyMessages } from "./policy.ts";
 
 export const DEFAULT_LITELLM_BASE_URL = "https://centinels.ml2-alpha.com/v1/";
-export const DEFAULT_LITELLM_MODEL_ALIAS = "loki";
+export const DEFAULT_LITELLM_MODEL_ALIAS = "ketchupe";
 
 /** Accepts a bare domain, a URL, or a URL with /v1; returns `https://host[/path]/v1/`. */
 export function normalizeBaseURL(input: string): string {
@@ -42,15 +43,24 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
   });
   if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요.");
   if (!response.ok) throw new AgentError("MODEL_PROTOCOL", `GET /models failed: ${response.status}`);
-  const body = (await response.json()) as { data?: Array<{ id?: string }> };
-  return (body.data ?? []).map((item) => item.id ?? "").filter(Boolean);
+  const body = z.object({ data: z.array(z.object({ id: z.string().trim().min(1) })) }).safeParse(await response.json());
+  if (!body.success) throw new AgentError("MODEL_PROTOCOL", "모델 목록을 확인하지 못했습니다.");
+  return [...new Set(body.data.data.map((item) => item.id))];
 }
 
-/** Explicit alias wins; otherwise loki when the gateway exposes it, else the first exposed model. */
+function generationModels(models: string[], excluded?: string): string[] {
+  // shortcut: /models has no standard capability field; exclude known non-chat aliases until the gateway supplies one.
+  const candidates = models.filter((id) => id !== excluded && id !== process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim()
+    && !/(?:^|[\/_.-])(?:clef|embed(?:ding)?s?|rerank(?:er)?|whisper|tts|dall-e)(?:$|[\/_.-])/i.test(id));
+  const preferred = [DEFAULT_LITELLM_MODEL_ALIAS, "loki", "odin"].flatMap((alias) => candidates.filter((id) => id.toLowerCase() === alias));
+  return [...new Set([...preferred, ...candidates])];
+}
+
+/** Explicit alias wins; otherwise prefer an available generation model, never the Clef router. */
 export async function resolveModelAlias(baseURL: string, apiKey: string, explicit?: string): Promise<string> {
   if (explicit?.trim()) return explicit.trim();
   const models = await listModels(baseURL, apiKey);
-  const alias = models.includes(DEFAULT_LITELLM_MODEL_ALIAS) ? DEFAULT_LITELLM_MODEL_ALIAS : models[0];
+  const alias = generationModels(models)[0];
   if (!alias) throw new AgentError("MODEL_PROTOCOL", "LiteLLM이 노출하는 모델이 없습니다.");
   return alias;
 }
@@ -106,6 +116,7 @@ export function toAgentError(error: unknown): AgentError {
       const cause = error.cause instanceof Error ? (error.cause.cause instanceof Error ? error.cause.cause.message : error.cause.message) : "";
       return new AgentError("MODEL_PROTOCOL", `모델 서버 연결이 응답 전에 끊겼습니다${cause ? ` (${cause.slice(0, 120)})` : ""}.`);
     }
+    if (error.statusCode === 400 || error.statusCode === 404) return new AgentError("MODEL_PROTOCOL", agentErrorMessage("MODEL_PROTOCOL", ""));
     const code: AgentErrorCode = error.statusCode === 401 || error.statusCode === 403 ? "MODEL_AUTH" : "MODEL_PROTOCOL";
     return new AgentError(code, error.statusCode === 401 ? "LiteLLM 인증이 만료되었거나 키가 거부되었습니다. 로그아웃 후 다시 인증해 주세요." : error.statusCode === 403 ? "이 모델에 접근할 권한이 없습니다. 운영자에게 확인해 주세요." : `모델 요청이 실패했습니다 (HTTP ${error.statusCode ?? "unknown"}).`);
   }
@@ -137,6 +148,14 @@ export async function fetchWithConnectionRetry(input: string | URL | Request, in
   }
 }
 
+/** Inspect model-selection errors in memory only: gateway messages can contain credentials. */
+async function isInvalidModel(response: Response): Promise<boolean> {
+  if (response.status !== 400 && response.status !== 404) return false;
+  const body = await response.clone().json().catch(() => null);
+  const parsed = z.object({ error: z.object({ message: z.string().optional(), code: z.union([z.string(), z.number()]).nullable().optional() }) }).safeParse(body);
+  return parsed.success && /invalid model|model[_ ]not[_ ]found|model[^\n]*(?:does not exist|not available|not found)/i.test(`${parsed.data.error.code ?? ""} ${parsed.data.error.message ?? ""}`);
+}
+
 const PROVIDER_NAME = "ketchupe-litellm";
 /**
  * Turns off thinking on the vLLM-served Qwen behind LiteLLM (passed through as `chat_template_kwargs`).
@@ -150,13 +169,34 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     self.lastCall = info;
     options.onCall?.(info);
   };
-  const provider = createOpenAICompatible({
-    name: PROVIDER_NAME,
-    baseURL: normalizeBaseURL(options.baseURL),
-    apiKey: options.apiKey,
-    includeUsage: true,
-    fetch: fetchWithConnectionRetry,
-  });
+  function requestModel(alias: string) {
+    const request = { alias };
+    const provider = createOpenAICompatible({
+      name: PROVIDER_NAME,
+      baseURL: normalizeBaseURL(options.baseURL),
+      apiKey: options.apiKey,
+      includeUsage: true,
+      fetch: async (url, init) => {
+        let response = await fetchWithConnectionRetry(url, init);
+        if (!await isInvalidModel(response) || typeof init?.body !== "string") return response;
+        const signal = init.signal ?? undefined;
+        signal?.throwIfAborted();
+        const replacements = generationModels(await listModels(options.baseURL, options.apiKey, signal), alias).slice(0, 2);
+        // At most two alternate models before consuming any stream; never replay a partial answer.
+        for (const replacement of replacements) {
+          const body = JSON.parse(init.body);
+          body.model = replacement;
+          if (!["ketchupe", "loki"].includes(replacement.toLowerCase())) delete body.chat_template_kwargs;
+          signal?.throwIfAborted();
+          response = await fetchWithConnectionRetry(url, { ...init, body: JSON.stringify(body) });
+          request.alias = replacement;
+          if (!await isInvalidModel(response)) break;
+        }
+        return response;
+      },
+    });
+    return { get alias() { return request.alias; }, model: provider(alias) };
+  }
 
   async function structuredCall<T>(
     purpose: ModelCallPurpose,
@@ -168,6 +208,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     signal: AbortSignal,
   ): Promise<T> {
     const startedAt = Date.now();
+    const request = requestModel(profile.modelAlias);
     const validate = (value: unknown): T => {
       const parsed = schema.safeParse(value);
       if (!parsed.success) throw new AgentError(toolName === "policy_decision" ? "INVALID_DECISION" : "MODEL_PROTOCOL", `model returned invalid ${toolName}`);
@@ -175,7 +216,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     };
     try {
       const result = await generateText({
-        model: provider(profile.modelAlias),
+        model: request.model,
         system: messages.system,
         prompt: messages.prompt,
         abortSignal: signal,
@@ -185,7 +226,7 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
         providerOptions: NO_THINKING,
         onLanguageModelCallEnd: ({ usage, finishReason }) => report({
           purpose,
-          modelAlias: profile.modelAlias,
+          modelAlias: request.alias,
           latencyMs: Date.now() - startedAt,
           promptTokens: usage.inputTokens ?? 0,
           cachedPromptTokens: usage.inputTokenDetails.cacheReadTokens,
@@ -229,16 +270,17 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     },
     async complete(input, profile, signal) {
       const startedAt = Date.now();
+      const request = requestModel(profile.modelAlias);
       try {
         // Streamed so long drafts keep bytes flowing; a silent request is cut at the gateway proxy's ~100s idle limit (HTTP 524).
-        const result = streamText({ model: provider(profile.modelAlias), system: input.system, prompt: input.prompt, maxOutputTokens: input.maxOutputTokens, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
+        const result = streamText({ model: request.model, system: input.system, prompt: input.prompt, maxOutputTokens: input.maxOutputTokens, abortSignal: signal, maxRetries: 0, providerOptions: NO_THINKING, onError: () => undefined });
         let text = "";
         for await (const part of result.fullStream) {
           if (part.type === "text-delta") text += part.text;
           else if (part.type === "error") throw part.error;
         }
         const usage = await result.usage;
-        report({ purpose: input.purpose ?? "canvas", modelAlias: profile.modelAlias, latencyMs: Date.now() - startedAt, promptTokens: usage.inputTokens ?? 0, completionTokens: usage.outputTokens ?? 0, finishReason: await result.finishReason });
+        report({ purpose: input.purpose ?? "canvas", modelAlias: request.alias, latencyMs: Date.now() - startedAt, promptTokens: usage.inputTokens ?? 0, completionTokens: usage.outputTokens ?? 0, finishReason: await result.finishReason });
         return text;
       } catch (error) {
         throw toAgentError(error);
@@ -246,25 +288,29 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     },
     async *streamAnswer(input, profile, signal) {
       const startedAt = Date.now();
+      const request = requestModel(profile.modelAlias);
       const messages = buildAnswerMessages(input, options.prompts?.answerSystem);
       try {
         const result = streamText({
-          model: provider(profile.modelAlias),
+          model: request.model,
           system: messages.system,
           prompt: messages.prompt,
           abortSignal: signal,
           maxRetries: 0,
           providerOptions: NO_THINKING,
+          onError: () => undefined,
         });
         let ttftMs: number | undefined;
-        for await (const text of result.textStream) {
-          if (text) ttftMs ??= Date.now() - startedAt;
-          yield { type: "text_delta", text };
+        for await (const part of result.fullStream) {
+          if (part.type === "error") throw part.error;
+          if (part.type !== "text-delta") continue;
+          if (part.text) ttftMs ??= Date.now() - startedAt;
+          yield { type: "text_delta", text: part.text };
         }
         const usage = await result.usage;
         const info: ModelCallInfo = {
           purpose: "answer",
-          modelAlias: profile.modelAlias,
+          modelAlias: request.alias,
           latencyMs: Date.now() - startedAt,
           promptTokens: usage.inputTokens ?? 0,
           cachedPromptTokens: usage.inputTokenDetails.cacheReadTokens,
