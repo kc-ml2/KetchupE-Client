@@ -1,3 +1,4 @@
+import { agentErrorMessage } from "@lib/agentErrorMessage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentStreamEvent, KetchupEAgentAPI } from "@app-types/Agent.types";
 import type { ContractBlock, ContractCanvas, ContractSection } from "@app-types/Canvas.types";
@@ -63,7 +64,7 @@ export const reduceCanvasEvent = (current: CanvasView, event: AgentStreamEvent):
     case "completed":
       return { ...current, isBusy: false, phase: null, interrupt: null, actionContexts: [] };
     case "failed":
-      return { ...current, isBusy: false, phase: null, interrupt: null, error: `${String(payload.code)}: ${String(payload.message ?? "")}` };
+      return { ...current, isBusy: false, phase: null, interrupt: null, error: agentErrorMessage(payload.code, payload.message) };
     default:
       return current;
   }

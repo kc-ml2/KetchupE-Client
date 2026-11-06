@@ -104,3 +104,14 @@ it("refreshes persisted answers once and ignores progress, duplicate and unrelat
   expect(reload).toHaveBeenCalledTimes(1);
   expect(result.current.view).toMatchObject({ isRunning: true, phase: "보고서 생성 중" });
 });
+
+it("shows a friendly model failure while preserving actionable authentication messages", () => {
+  const { api, emit } = fakeApi();
+  const { result } = renderHook(() => useAgentRun(api, "thread", () => undefined));
+  act(() => result.current.attach("failed-model"));
+  emit({ runId: "failed-model", seq: 1, type: "failed", payload: { code: "MODEL_PROTOCOL", message: "HTTP 400" } });
+  expect(result.current.view).toMatchObject({ isRunning: false, error: "케찹이가 잠깐 쉬고 있어요. 잠시 후 다시 시도해 주세요." });
+  act(() => result.current.attach("failed-auth"));
+  emit({ runId: "failed-auth", seq: 1, type: "failed", payload: { code: "MODEL_AUTH", message: "로그아웃 후 다시 인증해 주세요." } });
+  expect(result.current.view.error).toContain("로그아웃 후 다시 인증해 주세요.");
+});

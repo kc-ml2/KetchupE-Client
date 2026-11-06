@@ -101,3 +101,12 @@ describe("useCanvasRun", () => {
     expect(feedbackToOp([], "전체 다시")).toEqual({ op: "regenerate", feedback: "전체 다시" });
   });
 });
+
+it("shows a friendly model failure without discarding the existing document", () => {
+  const { api, emit } = fakeApi();
+  const { result } = renderHook(() => useCanvasRun(api, "thread", () => undefined));
+  act(() => result.current.attach("failed-model"));
+  emit({ runId: "failed-model", seq: 1, type: "canvas", payload: canvas });
+  emit({ runId: "failed-model", seq: 2, type: "failed", payload: { code: "MODEL_PROTOCOL", message: "HTTP 400" } });
+  expect(result.current.view).toMatchObject({ isBusy: false, canvas, error: "케찹이가 잠깐 쉬고 있어요. 잠시 후 다시 시도해 주세요." });
+});
