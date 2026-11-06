@@ -21,6 +21,7 @@ it.each([["darwin", "calculate"], ["darwin", "pdf"], ["win32", "calculate"], ["w
     expect(args[1]).not.toContain(name);
   } else {
     const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+    expect(args).toEqual(expect.arrayContaining(["-Sta", "-OutputFormat", "Text"]));
     expect(script).not.toContain(name);
     expect(options.env.KETCHUPE_EXCEL_SHEET).toBe(name);
     expect(options.env.KETCHUPE_EXCEL_INPUT).toBe(input);
@@ -53,4 +54,43 @@ it("does not start on an aborted signal and discards an export cancelled during 
   const during = new AbortController();
   mock.execute.mockImplementation((_file, _args, _options, callback) => { during.abort(new Error("cancelled")); callback(null, "", ""); });
   await expect(exportWithExcel("in", "sheet", "out", during.signal, "calculate")).rejects.toThrow("cancelled");
+});
+
+it("keeps the original Excel failure when cleanup also fails", async () => {
+  Object.defineProperty(process, "platform", { value: "win32" });
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(Object.assign(new Error("Command failed: encoded source"), { stderr: "[KETCHUPE_EXCEL_ERROR] PDF 출력 (0x800A03EC): export failed", stdout: "[KETCHUPE_EXCEL_STAGE] 최종 XLSX의 PDF 출력" })));
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(new Error("cleanup failed")));
+  const result = exportWithExcel("in", "sheet", "out", new AbortController().signal, "pdf");
+  await expect(result).rejects.toThrow("0x800A03EC");
+  await expect(result).rejects.not.toThrow("cleanup failed");
+});
+
+it("shows the last Excel stage and timeout instead of PowerShell progress XML", async () => {
+  Object.defineProperty(process, "platform", { value: "win32" });
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(Object.assign(new Error("Command failed: encoded source"), {
+    killed: true, stderr: '#< CLIXML <Objs><Obj S="progress"/></Objs>',
+    stdout: "[KETCHUPE_EXCEL_STAGE] Excel 자동화 연결\n[KETCHUPE_EXCEL_STAGE] 일보 파일 열기\n",
+  })));
+  const result = exportWithExcel("in", "sheet", "out", new AbortController().signal, "calculate");
+  await expect(result).rejects.toThrow("실패 단계: 일보 파일 열기");
+  await expect(result).rejects.toThrow("90초");
+  await expect(result).rejects.not.toThrow("CLIXML");
+  await expect(result).rejects.not.toThrow("설치·활성화");
+});
+
+it("does not leak encoded script source when PowerShell exits without error text", async () => {
+  Object.defineProperty(process, "platform", { value: "win32" });
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(Object.assign(new Error("Command failed: encoded source"), { stderr: "", code: 1 })));
+  const result = exportWithExcel("in", "sheet", "out", new AbortController().signal, "calculate");
+  await expect(result).rejects.toThrow("종료 코드: 1");
+  await expect(result).rejects.not.toThrow("encoded source");
+});
+
+it("identifies a cleanup timeout separately from the Excel export timeout", async () => {
+  Object.defineProperty(process, "platform", { value: "win32" });
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(null, "", ""));
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(Object.assign(new Error("Command failed: cleanup script"), { killed: true })));
+  const result = exportWithExcel("in", "sheet", "out", new AbortController().signal, "calculate");
+  await expect(result).rejects.toThrow("Excel 프로세스 정리");
+  await expect(result).rejects.toThrow("10초");
 });

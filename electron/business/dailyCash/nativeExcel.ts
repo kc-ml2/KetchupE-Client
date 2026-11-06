@@ -140,12 +140,20 @@ end run`;
 
 export const windowsExcelScript = `
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+function Set-ExcelStage([string]$name) {
+  $script:stageName = $name
+  [Console]::Out.WriteLine('[KETCHUPE_EXCEL_STAGE] ' + $name)
+}
+$failed = $false
 $excel = $null
 $book = $null
 $sheet = $null
 $seed = $null
 $owned = $false
 try {
+  Set-ExcelStage 'Excel 자동화 연결'
   $existing = @(Get-Process EXCEL -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
   $excel = New-Object -ComObject Excel.Application
   Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ExcelWindow { [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId); }'
@@ -160,17 +168,23 @@ try {
   $excel.AutomationSecurity = 3
   $excel.EnableEvents = $false
   $excel.AskToUpdateLinks = $false
+  Set-ExcelStage '임시 통합문서 생성'
   $seed = $excel.Workbooks.Add()
   $excel.Calculation = -4135
   $excel.CalculateBeforeSave = $false
+  Set-ExcelStage '일보 파일 열기'
   $book = $excel.Workbooks.Open($env:KETCHUPE_EXCEL_INPUT, 0, $false)
+  if ($book.ReadOnly) { throw 'Excel opened the temporary workbook as read-only.' }
+  Set-ExcelStage '일보 시트 선택'
   $sheet = $book.Worksheets.Item($env:KETCHUPE_EXCEL_SHEET)
   if ($env:KETCHUPE_EXCEL_OPERATION -eq 'calculate') {
+    Set-ExcelStage '일보 재계산'
     $sheet.Calculate()
     if ($env:KETCHUPE_EXCEL_FIT) {
       $fitted = @()
       $probeSheet = $seed.Worksheets.Item(1)
       foreach ($areaName in ($env:KETCHUPE_EXCEL_FIT -split ',')) {
+        Set-ExcelStage ('집행내역 표시 영역 측정: ' + $areaName)
         $area = $sheet.Range($areaName)
         $first = $area.Cells.Item(1, 1)
         $wasWrapped = [bool]$first.WrapText
@@ -199,33 +213,48 @@ try {
       }
       [IO.File]::WriteAllText($env:KETCHUPE_EXCEL_INPUT + '.fit', ($fitted -join [Environment]::NewLine))
     }
+    Set-ExcelStage '재계산한 XLSX 저장'
     $book.Save()
   } else {
+    Set-ExcelStage '최종 XLSX의 PDF 출력'
     $sheet.EnableCalculation = $false
     $sheet.ExportAsFixedFormat(0, $env:KETCHUPE_EXCEL_PDF, 0, $true, $false)
   }
+  Set-ExcelStage 'Excel 종료'
+} catch {
+  $failed = $true
+  $cause = $_.Exception.GetBaseException()
+  [Console]::Error.WriteLine(('[KETCHUPE_EXCEL_ERROR] {0} (0x{1:X8}): {2}' -f $stageName, $cause.HResult, $cause.Message))
 } finally {
   if ($null -ne $book) { try { $book.Close($false) } catch {} }
   if ($null -ne $seed) { try { $seed.Close($false) } catch {} }
   if ($owned) { try { $excel.Quit() } catch {} }
   foreach ($item in @($sheet, $book, $seed, $excel)) {
-    if ($null -ne $item) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) }
+    if ($null -ne $item) { try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item) } catch {} }
   }
 }
+if ($failed) { exit 1 }
+exit 0
 `;
 
 // A timed-out PowerShell process cannot run finally; reclaim only the Excel instance it created.
-const windowsCleanupScript = `
+export const windowsCleanupScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 if (Test-Path -LiteralPath $env:KETCHUPE_EXCEL_PROCESS) {
   $owner = Get-Content -LiteralPath $env:KETCHUPE_EXCEL_PROCESS -Raw | ConvertFrom-Json
   $process = Get-Process -Id $owner.id -ErrorAction SilentlyContinue
   if ($null -ne $process -and $process.ProcessName -eq 'EXCEL' -and $process.StartTime.ToFileTimeUtc().ToString() -eq $owner.started) { Stop-Process -InputObject $process -Force }
 }
+# A normally exited Excel is already gone; Get-Process must not leave the host exit code at 1.
+exit 0
 `;
 
 /** Finish the native script's cleanup even after cancellation; the caller must discard its output. */
 export async function exportWithExcel(input: string, sheet: string, pdf: string, signal: AbortSignal, operation: "calculate" | "pdf", textFitRanges: string[] = []) {
   signal.throwIfAborted();
+  let failedStage: string | undefined;
+  let timeoutMs = EXCEL_TIMEOUT_MS;
   try {
     const execute = promisify(execFile);
     if (process.platform === "darwin") {
@@ -233,18 +262,30 @@ export async function exportWithExcel(input: string, sheet: string, pdf: string,
     } else if (process.platform === "win32") {
       const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
       const env = { ...process.env, KETCHUPE_EXCEL_INPUT: input, KETCHUPE_EXCEL_SHEET: sheet, KETCHUPE_EXCEL_PDF: pdf, KETCHUPE_EXCEL_PROCESS: `${input}.process`, KETCHUPE_EXCEL_OPERATION: operation, KETCHUPE_EXCEL_FIT: textFitRanges.join(",") };
-      const args = (script: string) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+      const args = (script: string) => ["-NoProfile", "-NonInteractive", "-Sta", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")];
+      let failure: unknown;
       try {
         await execute(powershell, args(windowsExcelScript), { timeout: EXCEL_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES, windowsHide: true, env });
-      } finally {
+      } catch (error) { failure = error; }
+      try {
         await execute(powershell, args(windowsCleanupScript), { timeout: CLEANUP_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES, windowsHide: true, env });
+      } catch (error) {
+        if (!failure) { failure = error; failedStage = "Excel 프로세스 정리"; timeoutMs = CLEANUP_TIMEOUT_MS; }
       }
+      if (failure) throw failure;
     } else throw new Error("Microsoft Excel 출력은 Windows와 macOS에서 지원합니다.");
     await access(operation === "calculate" ? input : pdf);
   } catch (error) {
     signal.throwIfAborted();
-    const detail = error && typeof error === "object" && "stderr" in error ? String(error.stderr).trim() : error instanceof Error ? error.message : "";
-    throw new ExcelExportError(`Microsoft Excel 재계산·출력에 실패했습니다. 데스크톱 Excel 설치·활성화 상태와 자동화 권한을 확인하세요. ${detail}`);
+    const native = error as { stderr?: string; stdout?: string; killed?: boolean; code?: string | number } | undefined;
+    const stage = native?.stdout?.match(/\[KETCHUPE_EXCEL_STAGE\] ([^\r\n]+)/g)?.at(-1)?.replace("[KETCHUPE_EXCEL_STAGE] ", "") ?? failedStage;
+    const stderr = native?.stderr?.trim() ?? "";
+    const message = error instanceof Error ? error.message.split("\n")[0] : "";
+    const detail = native?.killed ? `실행 제한 시간(${timeoutMs / 1000}초)을 초과했습니다.`
+      : stderr && !stderr.startsWith("#< CLIXML") && !stderr.startsWith("#<CLIXML") ? stderr.replace("[KETCHUPE_EXCEL_ERROR] ", "")
+      : native?.code === "ENOENT" ? "Excel 자동화 실행 프로그램을 찾을 수 없습니다."
+      : message.startsWith("Command failed:") ? `자동화 실행이 종료되었습니다 (종료 코드: ${native?.code ?? "알 수 없음"}).` : message;
+    throw new ExcelExportError(`Microsoft Excel 재계산·출력에 실패했습니다.${stage ? ` 실패 단계: ${stage}.` : ""} ${detail}`);
   }
   signal.throwIfAborted();
 }
