@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentStreamEvent, RunAction, StartRunInput } from "../../src/app-types/Agent.types.ts";
+import type { AgentStreamEvent, RunAction } from "../../src/app-types/Agent.types.ts";
 import type { ExtractionPreview, WorkSelection } from "../../src/app-types/WorkSource.types.ts";
+import type { WorkflowStartInput } from "./workflows.ts";
 import type { WorkflowRoute } from "./router.ts";
-import type { RunHandle } from "./runLifecycle.ts";
-import { appendMessage, createRun, getRun, getRunAction, setRunStatus } from "./store.ts";
+import { startWorkflowRun, type RunHandle } from "./runLifecycle.ts";
+import { appendMessage, getRun, getRunAction, setRunStatus } from "./store.ts";
 import { TraceWriter } from "./trace.ts";
 
 export const WORK_SOURCES_ROUTE: WorkflowRoute = {
@@ -24,9 +25,8 @@ export const DAILY_CASH_ROUTE: WorkflowRoute = {
 export class WorkSourcesFlow {
   constructor(private readonly db: DatabaseSync, private readonly emit: (event: AgentStreamEvent) => void) {}
 
-  start(input: StartRunInput, kind: "work_sources" | "daily_cash"): RunHandle {
-    const runId = createRun(this.db, { threadId: input.threadId, goal: input.text, kind, retrievalProfile: "local", policyProfile: "work-sources-v1", answerProfile: "local" });
-    appendMessage(this.db, { threadId: input.threadId, runId, role: "user", content: input.text });
+  start(input: WorkflowStartInput, kind: "work_sources" | "daily_cash"): RunHandle {
+    const { runId } = startWorkflowRun(this.db, { threadId: input.threadId, goal: input.text, kind, retrievalProfile: "local", policyProfile: "work-sources-v1", answerProfile: "local" }, input.runId);
     new TraceWriter(this.db, runId).record("run.started", "runtime", { localOnly: true, workflow: kind });
     this.ask(runId, kind === "daily_cash"
       ? "일일자금일보 자료 준비를 시작합니다. 사용할 원천 파일과 추출 매핑을 지정해 주세요. 현재는 자료 검증까지 지원하며 최종 보고서 계산·출력은 아직 연결되지 않았습니다."

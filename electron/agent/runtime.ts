@@ -21,11 +21,12 @@ import { CollectionWatchers } from "../collectionWatchers.ts";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { PIPELINE_PROFILE, type Collection } from "../tomato/tomato.ts";
 import { TomatoClient } from "../tomato/tomatoClient.ts";
+import type { WorkflowStartInput } from "./workflows.ts";
 import { Harness } from "./harness.ts";
+import { ChatWorkflow } from "./chatWorkflow.ts";
 import { CanvasFlow } from "./canvas/flow.ts";
-import { CHAT_ROUTE, DOC_ROUTE, routeMessage } from "./router.ts";
+import { CHAT_ROUTE, RAG_ROUTE, DOC_ROUTE } from "./router.ts";
 import type { StartRunInput, StartRunResult } from "../../src/app-types/Agent.types.ts";
-import { WorkflowDispatcher } from "./workflows.ts";
 import { tomatoTools } from "./tools.ts";
 import { settingsBackedModelClient } from "./liveModelClient.ts";
 import { listModels, resolveModelAlias } from "./modelClient.ts";
@@ -33,7 +34,7 @@ import { ANSWER_PROMPT_VERSION, assignVariant, POLICY_VARIANTS } from "./policy.
 import { accountModelSettings, loadTelemetrySettings, type ModelSettings } from "./settings.ts";
 import { interactionScore, LangfuseExporter, loadInstallId } from "./telemetry.ts";
 import type { InteractionKind } from "../../src/app-types/Agent.types.ts";
-import { excludedMaruStorages, ensureWorkspace, inactiveCollections, recentMessages, getRunAction } from "./store.ts";
+import { excludedMaruStorages, ensureWorkspace, inactiveCollections, getRunAction } from "./store.ts";
 import { MaruClient } from "./maru.ts";
 import { MaruAccess } from "./maruAccess.ts";
 import { DEFAULT_TROLLEY_ENDPOINT, TrolleyClient } from "./trolley.ts";
@@ -52,7 +53,8 @@ export type AgentRuntime = {
   /** Routes new messages to registered workflows; replies resume their persisted owner. */
   startMessage: (input: StartRunInput) => Promise<StartRunResult>;
   resumeRun: (runId: string, text: string) => void;
-  cancelRun: (runId: string) => void;
+  cancelRun: (runId: string) => Promise<void>;
+  harness: Harness;
   collections: () => Collection[];
   refreshCollections: () => Promise<Collection[]>;
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
@@ -129,7 +131,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     const inactive = inactiveCollections(db, workspaceId);
     return collections.map((collection) => collection.name).filter((name) => !name.startsWith("maru_") && !inactive.has(name));
   };
-  const onRunSettled = (runId: string) => telemetry.exportRun(db, runId);
+  const emit = (event: AgentStreamEvent): void => harness.forward(event);
   const maruToken = options.account.keys.maru.api_key;
   const trolleyKey = process.env.TROLLEY_API_KEY?.trim();
   const trolley = trolleyKey ? new TrolleyClient(
@@ -157,9 +159,10 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     try { await toolRegistry.registerMcp(connection, config.allowedTools, accessSignal()); }
     catch { console.warn(`[agent] MCP tool discovery unavailable: ${config.id}`); }
   }));
-  const harness = new Harness({
+  const chat = new ChatWorkflow({
     db,
     model: harnessModel,
+    workflows: () => harness.routes(),
     toolRegistry,
     toolsReady,
     tools: {
@@ -176,9 +179,8 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     excludedMaruStorages: (workspaceId) => excludedMaruStorages(db, workspaceId),
     authorizeContext: (threadId, signal) => maruAccess.authorizeThread(threadId, AbortSignal.any([signal, accessSignal()])),
     onExternalDocuments: (threadId, documents) => maruAccess.record(threadId, documents),
-    emit: options.emitAgentEvent,
+    emit,
     runMetadata: () => ({ variant, appVersion: options.appVersion, installId, corpusFingerprints: { ...corpusFingerprints } }),
-    onRunSettled,
   });
   telemetry.appSession(variant);
 
@@ -193,11 +195,10 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     },
     profile: { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" },
     activeCollections,
-    emit: options.emitAgentEvent,
-    onRunSettled,
+    emit,
   });
 
-  const workSourcesFlow = new WorkSourcesFlow(db, options.emitAgentEvent);
+  const workSourcesFlow = new WorkSourcesFlow(db, emit);
   const excelWorkerPath = join(dirname(options.workerPath), "excel.worker.js");
   const excelJobs = (run: <J extends ExcelJob>(job: J, signal: AbortSignal) => Promise<unknown>): ExcelJobs => ({
     profile: (bytes, signal, query, inspection) => run({ kind: "profile", bytes, query, inspection }, signal) as ReturnType<ExcelJobs["profile"]>,
@@ -210,26 +211,32 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     session: () => { const worker = createExcelWorker(excelWorkerPath); return { ...excelJobs(worker.run), close: worker.close }; },
     pdf: printReportPdf,
   });
-  const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), options.emitAgentEvent, async (bytes, sheet) => {
+  const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), emit, async (bytes, sheet) => {
     await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
   });
-  const workflows = new WorkflowDispatcher(db, [
+  const harness: Harness = new Harness({ db, workflows: [
     {
       ...CHAT_ROUTE,
+      kind: "chat",
+      start: (input) => chat.startRun(input, "general"),
+      cancel: async (runId) => { chat.cancelRun(runId); await chat.drain(runId); },
+    },
+    {
+      ...RAG_ROUTE,
       kind: "agent",
-      start: (input) => harness.startRun(input),
-      resume: (runId, text) => harness.resumeRun(runId, text),
-      cancel: (runId) => harness.cancelRun(runId),
+      start: (input) => chat.startRun(input),
+      resume: (runId, text) => chat.resumeRun(runId, text),
+      cancel: async (runId) => { chat.cancelRun(runId); await chat.drain(runId); },
     },
     {
       ...DOC_ROUTE,
       kind: "canvas",
-      start: (input) => canvas.start({ workspaceId: input.workspaceId, threadId: input.threadId, instruction: input.text }),
-      cancel: (runId) => canvas.cancel(runId),
+      start: (input) => canvas.start({ workspaceId: input.workspaceId, threadId: input.threadId, instruction: input.text, runId: input.runId, canvasType: input.canvas?.canvasType, anchorOnly: input.canvas?.anchorOnly }),
+      cancel: async (runId) => { canvas.cancel(runId); await canvas.drain(runId); },
     },
     ...([WORK_SOURCES_ROUTE] as const).map((route) => ({
       ...route, kind: route.id,
-      start: (input: StartRunInput) => workSourcesFlow.start(input, route.id as "work_sources" | "daily_cash"),
+      start: (input: WorkflowStartInput) => workSourcesFlow.start(input, route.id as "work_sources" | "daily_cash"),
       resume: (runId: string, text: string) => workSourcesFlow.resume(runId, text),
       cancel: (runId: string) => workSourcesFlow.cancel(runId),
     })),
@@ -238,13 +245,12 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       resume: (id: string, text: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.resume(id, text) : workflow.resume!(id, text),
       cancel: (id: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.cancel(id) : workflow.cancel(id),
     })),
-  ], (text, routes, input) => routeMessage(
-    { ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" },
-    text,
-    AbortSignal.any([lifetime.signal, AbortSignal.timeout(policyProfile.runTimeoutMs)]),
-    routes,
-    { recentUserMessages: recentMessages(db, input.threadId, 6).filter((message) => message.role === "user").map((message) => message.content.slice(0, 2000)) },
-  ).then((route) => { lifetime.signal.throwIfAborted(); return route; }), onRunSettled);
+  ],
+    routingSettings: () => ({ ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" }),
+    authorizeThread: (threadId, signal) => maruAccess.authorizeThread(threadId, AbortSignal.any([signal, accessSignal()])),
+    emit: options.emitAgentEvent,
+    onSettled: (runId) => telemetry.exportRun(db, runId),
+  });
 
   const refreshCollections = async () => {
     collections = (await tomato.call("listCollections", [])).filter((collection) => !collection.name.startsWith("maru_"));
@@ -267,7 +273,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     stopped = true;
     lifetime.abort();
     watchers.stop();
-    draining = Promise.allSettled([tomato.stop(), harness.stop(), canvas.stop(), businessFlow.stop()]);
+    draining = harness.stop().then(() => Promise.allSettled([tomato.stop(), chat.stop(), canvas.stop(), businessFlow.stop()]));
   };
 
   return {
@@ -277,9 +283,10 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     canvas,
     workSourcesFlow,
     businessFlow,
-    startMessage: async (input) => { await authorizeThread(input.threadId); lifetime.signal.throwIfAborted(); return workflows.start(input); },
-    resumeRun: (runId, text) => { workflows.resume(runId, text); },
-    cancelRun: (runId) => workflows.cancel(runId),
+    harness,
+    startMessage: async ({ threadId, workspaceId, text, mode }) => harness.start({ threadId, workspaceId, text, mode }),
+    resumeRun: (runId, text) => { harness.resume(runId, text); },
+    cancelRun: (runId) => harness.cancel(runId),
     collections: () => collections,
     refreshCollections,
     settings: () => current,

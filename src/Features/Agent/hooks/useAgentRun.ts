@@ -15,6 +15,8 @@ export type RunView = {
 };
 
 const PHASE_LABEL: Record<string, string> = {
+  routing: "실행할 작업 선택 중",
+  HANDOFF: "작업 전환 중",
   deciding: "다음 행동 결정 중",
   searching: "문서 검색 중",
   SEARCH: "검색",
@@ -65,6 +67,7 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
   // Event bookkeeping lives in refs mutated by the listener (never inside a state updater).
   const runIdRef = useRef<string | null>(null);
   const lastSeq = useRef(0);
+  const isCanvas = useRef(false);
   const messagesChanged = useRef(onMessagesChanged);
   messagesChanged.current = onMessagesChanged;
 
@@ -75,11 +78,12 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
 
   useEffect(() => {
     bind(null);
+    isCanvas.current = false;
     setView(initial);
     if (!api || !threadId) return;
     let cancelled = false;
     void api.openRun(threadId).then((open) => {
-      if (cancelled || !open || open.kind === "canvas") return;
+      if (cancelled || lastSeq.current > 0 || !open || open.kind === "canvas") return;
       bind(open.runId);
       setView((current) => open.status === "waiting_user"
         ? { ...current, runId: open.runId, waitingQuestion: open.action?.question ?? "", action: open.action }
@@ -93,17 +97,29 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
   useEffect(() => {
     if (!api) return;
     return api.onAgentEvent((event: AgentStreamEvent) => {
-      if (event.runId !== runIdRef.current || event.seq <= lastSeq.current) return;
+      if (event.type === "workflow_changed") {
+        const payload = event.payload as { threadId: string; kind: string };
+        if (payload.threadId !== threadId || (event.runId === runIdRef.current && event.seq <= lastSeq.current)) return;
+        bind(event.runId);
+        lastSeq.current = event.seq;
+        isCanvas.current = payload.kind === "canvas";
+        setView(isCanvas.current ? initial : { ...initial, runId: event.runId, isRunning: true, phase: "deciding" });
+        messagesChanged.current();
+        return;
+      }
+      if (isCanvas.current || event.runId !== runIdRef.current || event.seq <= lastSeq.current) return;
       lastSeq.current = event.seq;
       setView((current) => reduceRunEvent(current, event));
       // Accepted form answers are persisted before execution; don't wait for the submission IPC to finish.
       if (SETTLING_EVENTS.has(event.type) || (event.type === "status" && (event.payload as Record<string, unknown>).messagesChanged === true)) messagesChanged.current();
     });
-  }, [api]);
+  }, [api, threadId, bind]);
 
   /** Binds this hook to a run the page just started. */
   const attach = useCallback(
     (runId: string, action?: RunAction, status?: RunStatus) => {
+      if (runIdRef.current === runId && lastSeq.current > 0) return;
+      isCanvas.current = false;
       bind(runId);
       setView({ ...initial, runId, action, waitingQuestion: action?.question ?? null, isRunning: !action && status !== "abstained", phase: action || status === "abstained" ? null : "deciding" });
     },

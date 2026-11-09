@@ -1,14 +1,15 @@
 # Architecture and code map
 
-Current implementation, 2026-10-26. “v3” names the architecture; the release version lives in [package.json](../package.json).
+Current implementation, 2026-11-09. “v3” names the architecture; the release version lives in [package.json](../package.json).
 
 KetchupE is an Electron desktop app for local document search, grounded answers, document drafting, deterministic Excel tasks, and experimental LLM-planned Excel analysis. Start with the [README](../README.md) for setup, the [integration guide](WORKFLOW_INTEGRATION_GUIDE.md) to add capabilities, or [business tools](BUSINESS_TOOLS.md) for Excel contracts and Daily Cash rules. Type definitions and tests are the source of truth; this document does not duplicate their schemas.
 
 ## Execution boundaries
 
 ```text
-React → email authentication → session-bound preload IPC → account runtime / WorkflowDispatcher
-                            ├─ chat → Harness → Tomato / MARU / Trolley / LiteLLM
+React → email authentication → session-bound preload IPC → request Harness (runtime wires dependencies)
+                            ├─ chat → ChatWorkflow answer / handoff → LiteLLM
+                            ├─ rag → ChatWorkflow → Tomato / MARU / Trolley / LiteLLM
                             ├─ doc → CanvasFlow → Tomato / LiteLLM
                             ├─ work_sources → WorkSourcesFlow → workbook worker
                             ├─ excel_work → BusinessFlow → LLM planner / QuickJS worker / PDF, HTML, XLSX
@@ -21,9 +22,10 @@ Telemetry → durable outbox → service-owned OTLP gateway → Langfuse
 
 | Component | Owns | Entry point |
 | --- | --- | --- |
-| Runtime / dispatcher | Dependency wiring, routing, start/resume/cancel | [runtime.ts](../electron/agent/runtime.ts), [workflows.ts](../electron/agent/workflows.ts) |
+| Runtime | Account resources, dependency wiring, shutdown | [runtime.ts](../electron/agent/runtime.ts) |
+| Harness | Request identity, routing, start/resume/cancel, bounded workflow handoffs | [harness.ts](../electron/agent/harness.ts), [workflows.ts](../electron/agent/workflows.ts) |
 | Tool registry | Approved read-only capability catalog, schema validation and bounded execution | [toolRegistry.ts](../electron/agent/toolRegistry.ts), [discoveryTools.ts](../electron/agent/discoveryTools.ts) |
-| Harness / policy | Bounded RAG execution / next-action decisions | [harness.ts](../electron/agent/harness.ts), [policy.ts](../electron/agent/policy.ts), [contracts.ts](../electron/agent/contracts.ts) |
+| ChatWorkflow / policy | General answers, bounded RAG execution and handoff proposals | [chatWorkflow.ts](../electron/agent/chatWorkflow.ts), [policy.ts](../electron/agent/policy.ts), [contracts.ts](../electron/agent/contracts.ts) |
 | Tomato | Parsing, chunks, indexing, retrieval in a utility process | [tomato/](../electron/tomato/), [tomatoClient.ts](../electron/tomato/tomatoClient.ts) |
 | Model client | LiteLLM transport, streaming, usage, cancellation | [modelClient.ts](../electron/agent/modelClient.ts), [liveModelClient.ts](../electron/agent/liveModelClient.ts) |
 | Canvas | Reference selection, drafts, edits, document snapshots | [canvas/flow.ts](../electron/agent/canvas/flow.ts) |
@@ -45,15 +47,33 @@ Email authentication and credential provisioning live in `electron/auth/`; see [
 
 | Route ID | Stored kind | Executor |
 | --- | --- | --- |
-| `chat` | `agent` | Harness |
+| `routing` | `routing` | Harness authorization and initial routing; cancellable before executor selection |
+| `chat` | `chat` | ChatWorkflow answer or handoff; no retrieval in this executor |
+| `rag` | `agent` | ChatWorkflow retrieval and read-only tools (also owns legacy agent runs) |
 | `doc` | `canvas` | CanvasFlow |
 | `work_sources` | `work_sources` | WorkSourcesFlow |
-| `daily_cash`, `bank_daily` | Same as route ID | BusinessFlow |
+| `daily_cash` | Same as route ID | BusinessFlow |
 | `excel_work` | `excel_work` | BusinessFlow with model planning and isolated execution |
+
+## Request ownership and workflow correction
+
+Runtime creates the Harness and domain executors once per account. The Harness controls execution: it creates a `routing` run and its user message synchronously, then authorizes context and invokes Clef. Executors adopt that same run through `startWorkflowRun`; they never create a second request or duplicate the initial message. Routing has its own trace spans and 30-second timeout. It is cancellable with the same run ID as later execution. Routing spans record duration and alias; the choice endpoint does not currently provide token usage to this client.
+
+ChatWorkflow can yield a schema-validated `HANDOFF` before answering, including after a retrieval observation or a resumed clarification. The Harness validates the destination, preserves the original goal and history, and starts the registered replacement. Domain input forms and validation remain mandatory. Tool/network/authentication failures never trigger automatic workflow fallback.
+
+The **작업 변경** control lets a user correct any running or waiting workflow, including Canvas and BusinessFlow. The old executor is cancelled and drained before the correction is classified (or its explicit `$workflow_id` is applied). A correction is appended to history and the new executor receives the original goal plus that correction. Failed correction routing leaves a failed request with its history intact; it does not replay the old executor. Structured edits and submissions are blocked during transfer, and old action IDs are invalidated. Completed runs cannot be switched. Once an original-file write begins, switching is refused; no rollback of external effects is implied.
+
+A request may switch at most twice and cannot revisit a selected workflow. The selected-workflow trace persists this limit across restarts. Each executor keeps its own domain budget; routing is separately timed and workflow transitions are bounded. This is correction of a misrouted request, not a general workflow graph or automatic multi-task composition engine.
+
+All executor events pass through the Harness, which assigns one increasing renderer sequence per request. `workflow_changed` moves the UI between text/input-card and Canvas views, clearing stale streaming text and controls. Multiple trace writers allocate sequence numbers from SQLite. Any locally restricted stage keeps the combined request out of central telemetry; tool-derived handoff reasons are omitted and other reasons follow the configured content mode.
 
 ## RAG, retrieval, and context
 
-The policy proposes `SEARCH`, `ASK`, `VERIFY`, `ANSWER`, or `STOP`; the Harness validates the decision and executes it. Policy code does not own I/O. `llm`, `always-search`, and `gated` strategies share the same execution contracts.
+Clef separates general answers, evidence-based lookups, and execution requests. Routing receives up to six recent user/assistant messages (2,000 characters each) with persisted workflow kinds; result filenames already present in assistant messages remain in that context. `chat` uses a general-knowledge answer prompt and no retrieval. With the application workflow catalog it first chooses ANSWER or HANDOFF through the generation model, allowing a wrong chat selection to reach RAG or another executor. Bare greetings and standalone clients without a workflow catalog keep the direct-answer path. `rag` retains the grounded-answer prompt and the bounded ChatWorkflow loop. Catalog-enabled execution uses model selection even under fixed/gated policy variants; this adds policy calls compared with those standalone fast paths. Explicit `$chat` and `$rag` select these paths directly; persisted `agent` runs still resume through `rag`.
+
+Dedicated execution workflows take precedence. Excel execution requests without a dedicated workflow go to `excel_work`, which collects files and clarifies calculation criteria. Planning-only discussion stays in `chat`. This uses the current editable Excel executor; saving, scheduling, or registering user-created workflows is not implemented.
+
+The policy proposes `SEARCH`, `ASK`, `VERIFY`, `ANSWER`, `STOP`, or `HANDOFF`; ChatWorkflow validates the decision, executes local actions, and yields handoffs to the request Harness. Policy code does not own I/O. `llm`, `always-search`, and `gated` strategies share the same execution contracts.
 
 1. Select active collections, recent messages, and confirmed memory.
 2. Build policy state, including the registered capability descriptions and schemas, and validate the next action against availability and remaining budget. Provider names are not required in user requests.

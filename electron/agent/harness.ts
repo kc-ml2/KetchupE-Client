@@ -1,704 +1,285 @@
 import type { DatabaseSync } from "node:sqlite";
-import { createHash } from "node:crypto";
-import type { AgentStreamEvent, AppliedContext, CitationSummary, RunStatus } from "../../src/app-types/Agent.types.ts";
-import {
-  AgentError,
-  LIMITS,
-  type AgentErrorCode,
-  validateDecision,
-  type Evidence,
-  type Observation,
-  type PolicyDecision,
-  type PolicyProfile,
-  type PolicyState,
-  type PolicyTransition,
-  type RunOutcome,
-  type ExternalDocumentRef,
-} from "./contracts.ts";
-import { selectContext } from "./context.ts";
-import type { ModelCallInfo, ModelClient } from "./modelClient.ts";
-import { alwaysSearchDecision, derivePolicySignals, gatedDecision, profileFingerprint, smallTalkDecision } from "./policy.ts";
-import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "./store.ts";
-import { chunkToEvidence, normalizeQuery, resultToEvidence, withTimeout, type EvidenceSource, type SearchTools } from "./tools.ts";
+import type { AgentStreamEvent, StartRunInput, StartRunResult } from "../../src/app-types/Agent.types.ts";
+import { AgentError } from "./contracts.ts";
+import { selectRoutingContext } from "./context.ts";
+import { routeMessage, type RoutingContext, type WorkflowRoute } from "./router.ts";
+import type { ModelSettings } from "./settings.ts";
+import { appendMessage, createRun, findOpenRun, getRun, getRunAction, getThread, setRunStatus } from "./store.ts";
 import { readTrace, TraceWriter } from "./trace.ts";
-import { discoveryCall, registerDiscoveryTools } from "./discoveryTools.ts";
-import { ToolRegistry } from "./toolRegistry.ts";
-import { MARU_EXCERPT_CHARS } from "./maru.ts";
-import { stripInvalidCitations, validateCitations } from "./verify.ts";
-import { cancelWaitingRun, type RunHandle } from "./runLifecycle.ts";
+import { WorkflowHandoff, type AgentWorkflow, type WorkflowStartInput } from "./workflows.ts";
 
-/** An explicit MARU request ("공유 저장소" in the UI) searches every accessible storage, including ones turned off. */
-const MARU_REQUEST = /maru|마루|공유\s*저장소/iu;
-
-export type AnswerProfile = { modelAlias: string; promptVersion: string };
-export type HarnessProfiles = { retrieval: Record<string, unknown>; policy: PolicyProfile; answer: AnswerProfile };
-export type HarnessLimits = { [Key in keyof typeof LIMITS]: number };
+const MAX_HANDOFFS = 2;
+type Router = (text: string, routes: readonly WorkflowRoute[], signal: AbortSignal, context: RoutingContext) => Promise<string>;
 
 export type HarnessOptions = {
   db: DatabaseSync;
-  model: ModelClient;
-  tools: SearchTools;
-  toolRegistry?: ToolRegistry;
-  toolsReady?: Promise<unknown>;
-  profiles: HarnessProfiles;
-  activeCollections: (workspaceId: string) => string[];
-  excludedMaruStorages?: (workspaceId: string) => string[];
-  authorizeContext?: (threadId: string, signal: AbortSignal) => Promise<void>;
-  onExternalDocuments?: (threadId: string, documents: ExternalDocumentRef[]) => void;
+  workflows: readonly AgentWorkflow[];
+  routingSettings: () => ModelSettings;
+  authorizeThread?: (threadId: string, signal: AbortSignal) => Promise<void>;
   emit?: (event: AgentStreamEvent) => void;
-  limits?: Partial<HarnessLimits>;
-  /** Extra fields for the run.started payload (variant, app version, corpus fingerprints, …); a function is read per run. */
-  runMetadata?: Record<string, unknown> | (() => Record<string, unknown>);
-  /** Called when a run stops running (completed, abstained, waiting_user, failed, cancelled). */
-  onRunSettled?: (runId: string, status: RunStatus) => void;
+  onSettled?: (runId: string) => void;
+  route?: Router;
 };
 
-export type { RunHandle } from "./runLifecycle.ts";
-
-type RunContext = {
-  runId: string;
-  threadId: string;
-  workspaceId: string;
-  state: PolicyState;
-  contextText: string;
-  sources: Map<string, EvidenceSource>;
-  searchCache: Map<string, Observation>;
-  controller: AbortController;
-  deadline: number;
-  trace: TraceWriter;
-  seq: number;
-};
-
-const NEIGHBOR_SPAN = 1;
-const MAX_DECIDE_ATTEMPTS = 2;
-const EXTERNAL_DOCUMENT_TIMEOUT_MS = 120_000;
-
-const appliedContext = (state: PolicyState): AppliedContext => ({
-  memories: state.selectedMemories,
-});
-
+/** Owns the entire request, from routing to bounded handoffs; Runtime only supplies dependencies. */
 export class Harness {
-  private readonly limits: HarnessLimits;
-  private readonly fingerprints: { retrieval: string; policy: string; answer: string };
-  private readonly running = new Map<string, RunContext>();
+  private readonly byId = new Map<string, AgentWorkflow>();
+  private readonly byKind = new Map<string, AgentWorkflow>();
+  private readonly controls = new Map<string, AbortController>();
+  private readonly tasks = new Map<string, Promise<void>>();
+  private readonly switching = new Set<string>();
+  private readonly seqs = new Map<string, number>();
   private stopped = false;
-  private readonly pending = new Set<Promise<void>>();
-  private readonly pausedSeqs = new Map<string, number>();
-  private readonly options: HarnessOptions;
-  private readonly toolRegistry: ToolRegistry;
 
-  constructor(options: HarnessOptions) {
-    this.options = options;
-    this.toolRegistry = options.toolRegistry ?? new ToolRegistry();
-    registerDiscoveryTools(this.toolRegistry, options.tools);
-    this.limits = { ...LIMITS, ...options.limits };
-    this.fingerprints = {
-      retrieval: profileFingerprint(options.profiles.retrieval),
-      policy: profileFingerprint(options.profiles.policy),
-      answer: profileFingerprint(options.profiles.answer),
-    };
+  constructor(private readonly options: HarnessOptions) {
+    for (const workflow of options.workflows) {
+      if (!workflow.id || ["auto", "routing"].includes(workflow.id) || !workflow.kind || workflow.kind === "routing" || this.byId.has(workflow.id) || this.byKind.has(workflow.kind)) {
+        throw new Error(`duplicate or invalid workflow: ${workflow.id}/${workflow.kind}`);
+      }
+      this.byId.set(workflow.id, workflow);
+      this.byKind.set(workflow.kind, workflow);
+    }
+    if (!this.byId.size) throw new Error("at least one workflow is required");
   }
 
-  startRun(input: { workspaceId: string; threadId: string; text: string }): RunHandle {
+  routes(): WorkflowRoute[] {
+    return [...this.byId.values()].map(({ id, description, examples, requiredInputs }) => ({ id, description, examples, requiredInputs }));
+  }
+
+  start(input: WorkflowStartInput): StartRunResult {
     if (this.stopped) throw new AgentError("CANCELLED", "signed out");
     const { db } = this.options;
     const thread = getThread(db, input.threadId);
     if (thread.workspaceId !== input.workspaceId) throw new AgentError("INTERNAL", "대화의 작업 공간이 일치하지 않습니다.");
     if (!input.text.trim()) throw new AgentError("INTERNAL", "요청 내용을 입력하세요.");
-    const open = findOpenRun(db, input.threadId);
-    if (open && open.kind !== "agent") throw new AgentError("INTERNAL", "이 대화에 다른 작업이 진행 중입니다.");
-    if (open?.status === "waiting_user") return this.resumeRun(open.id, input.text);
-    if (open) throw new AgentError("INTERNAL", "a run is already in progress for this thread");
-
-    const goal = input.text.trim();
-    const runId = createRun(db, {
-      threadId: thread.id,
-      goal,
-      retrievalProfile: this.fingerprints.retrieval,
-      policyProfile: this.fingerprints.policy,
-      answerProfile: this.fingerprints.answer,
-    });
-    const message = appendMessage(db, { threadId: thread.id, runId, role: "user", content: goal });
-    const context = selectContext(db, { workspaceId: input.workspaceId, threadId: thread.id, userGoal: goal, excludeMessageId: message.id });
-    const activeCollections = this.options.activeCollections(input.workspaceId);
-    const state: PolicyState = {
-      runId,
-      step: 1,
-      userGoal: goal,
-      selectedMemories: context.memories,
-      activeCollections,
-      excludedMaruStorages: this.options.tools.maru ? this.options.excludedMaruStorages?.(input.workspaceId) ?? [] : [],
-      availableTools: this.toolRegistry.catalog(),
-      maruAvailable: Boolean(this.options.tools.maru),
-      trolleyAvailable: Boolean(this.options.tools.trolley),
-      externalDocuments: [],
-      recentMessages: context.recentMessages.map(({ role, content }) => ({ role, content })),
-      evidence: [],
-      previousDecisions: [],
-      remaining: {
-        steps: Math.min(this.limits.maxSteps, this.options.profiles.policy.maxSteps),
-        modelCalls: Math.min(this.limits.maxModelCalls, this.options.profiles.policy.maxModelCalls),
-        searches: Math.min(this.limits.maxSearchCalls, this.options.profiles.policy.maxSearchCalls),
-        verifies: Math.min(this.limits.maxVerifyCalls, this.options.profiles.policy.maxVerifyCalls),
-        wallTimeMs: Math.min(this.limits.runTimeoutMs, this.options.profiles.policy.runTimeoutMs),
-      },
-    };
-    const run = this.createContext(runId, thread.id, input.workspaceId, state, context.contextText);
-    const metadata = typeof this.options.runMetadata === "function" ? this.options.runMetadata() : this.options.runMetadata;
-    run.trace.record("run.started", "input", { workspaceId: input.workspaceId, threadId: thread.id, messageId: message.id, profiles: this.fingerprints, activeCollections, excludedMaruStorages: state.excludedMaruStorages, ...metadata });
-    run.trace.record("context.selected", "context", { ...context.selected, tokenEstimate: context.tokenEstimate });
-    return { runId, done: this.runLoop(run) };
-  }
-
-  resumeRun(runId: string, text: string): RunHandle {
-    if (this.stopped) throw new AgentError("CANCELLED", "signed out");
-    const { db } = this.options;
-    const record = getRun(db, runId);
-    if (record.kind !== "agent" || record.status !== "waiting_user") throw new AgentError("INTERNAL", `run ${runId} is not waiting for an agent reply`);
-    if (!text.trim()) throw new AgentError("INTERNAL", "응답 내용을 입력하세요.");
-    const decided = readTrace(db, runId).filter((event) => event.type === "policy.decided").at(-1);
-    const started = readTrace(db, runId).find((event) => event.type === "run.started");
-    if (!decided || !started) throw new AgentError("INTERNAL", "cannot resume without a recorded decision");
-    const transition = decided.payload.transition as PolicyTransition;
-    const remaining = decided.payload.remainingAfter as PolicyState["remaining"];
-    const workspaceId = String(started.payload.workspaceId);
-    const question = transition.decision.question ?? "";
-    const reply = text.trim();
-    const message = appendMessage(db, { threadId: record.threadId, runId, role: "user", content: reply });
-    const state: PolicyState = {
-      ...transition.state,
-      availableTools: this.toolRegistry.catalog(),
-      maruAvailable: Boolean(this.options.tools.maru),
-      trolleyAvailable: Boolean(this.options.tools.trolley),
-      step: transition.state.step + 1,
-      previousDecisions: [...transition.state.previousDecisions, "ASK"],
-      recentMessages: [...transition.state.recentMessages, { role: "assistant", content: question }, { role: "user", content: reply }],
-      lastObservation: { kind: "user", messageId: message.id },
-      remaining,
-    };
-    const contextText = String(decided.payload.contextText ?? "");
-    const run = this.createContext(runId, record.threadId, workspaceId, state, `${contextText}\n\nassistant: ${question}\nuser: ${reply}`.trim());
-    for (const row of db.prepare("SELECT * FROM citations WHERE run_id = ?").all(runId) as Record<string, unknown>[]) {
-      run.sources.set(String(row.evidence_id), {
-        evidenceId: String(row.evidence_id),
-        sourceId: String(row.source_id),
-        chunkId: String(row.chunk_id),
-        path: String(row.path),
-        title: String(row.title),
-        locator: JSON.parse(String(row.locator)),
-      });
+    const open = findOpenRun(db, thread.id);
+    if (open) {
+      this.resume(open.id, input.text);
+      return this.result(open.id);
     }
-    setRunStatus(db, runId, "running");
-    run.trace.record("interaction.recorded", "feedback", { kind: "clarification_answered", messageId: message.id });
-    return { runId, done: this.runLoop(run) };
+    const explicit = this.explicitMode(input);
+    if (explicit) this.workflow(explicit);
+    const runId = createRun(db, { threadId: thread.id, goal: input.text.trim(), kind: "routing", retrievalProfile: "pending", policyProfile: "harness-1", answerProfile: "pending" });
+    appendMessage(db, { threadId: thread.id, runId, role: "user", content: input.text.trim() });
+    new TraceWriter(db, runId).record("request.started", "input", { workspaceId: input.workspaceId, threadId: thread.id });
+    const controller = new AbortController();
+    this.controls.set(runId, controller);
+    // Return a cancellable run ID before any network work or executor events reach the renderer.
+    this.track(runId, controller, async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await this.options.authorizeThread?.(thread.id, controller.signal);
+      controller.signal.throwIfAborted();
+      const id = explicit ?? await this.choose(runId, input.text, controller.signal);
+      await this.execute(runId, id, input.canvas, controller.signal);
+    });
+    return { runId, kind: "routing", status: "running" };
   }
+
+  resume(runId: string, text: string): void {
+    this.assertAvailable(runId);
+    const run = getRun(this.options.db, runId);
+    if (run.status !== "waiting_user") throw new AgentError("INTERNAL", "사용자 응답을 기다리는 작업이 아닙니다.");
+    const workflow = this.owner(run.kind);
+    if (!workflow.resume) throw new AgentError("INTERNAL", "이 작업은 전용 화면에서 이어서 진행하세요.");
+    if (!text.trim()) throw new AgentError("INTERNAL", "응답 내용을 입력하세요.");
+    const controller = new AbortController();
+    const handle = workflow.resume(runId, text);
+    this.controls.set(runId, controller);
+    this.track(runId, controller, async () => {
+      try { await handle.done; }
+      catch (error) {
+        if (!(error instanceof WorkflowHandoff)) throw error;
+        controller.signal.throwIfAborted();
+        this.checkHandoff(runId, error.workflow);
+        await this.execute(runId, error.workflow, undefined, controller.signal, error.reason);
+      }
+    });
+  }
+
+  /** A user correction can replace any running/waiting executor, including one restored after restart. */
+  async switchWorkflow(runId: string, text: string, mode?: string): Promise<void> {
+    this.assertAvailable(runId);
+    if (!text.trim()) throw new AgentError("INTERNAL", "변경할 작업 내용을 입력하세요.");
+    const run = getRun(this.options.db, runId);
+    if (!["running", "waiting_user"].includes(run.status) || run.kind === "routing") throw new AgentError("INTERNAL", "실행 중이거나 입력을 기다리는 작업만 변경할 수 있습니다.");
+    if (readTrace(this.options.db, runId).some((event) => event.type === "workflow.effect_started")) throw new AgentError("INTERNAL", "원본 파일 갱신이 시작된 작업은 변경할 수 없습니다. 완료 후 새 요청으로 시작해 주세요.");
+    const explicit = this.explicitMode({ text, mode });
+    if (explicit) this.checkHandoff(runId, explicit);
+    if (this.selections(runId).length > MAX_HANDOFFS) throw new AgentError("BUDGET_EXCEEDED", "작업 전환 횟수를 초과했습니다. 새 요청으로 시작해 주세요.");
+    if (!readTrace(this.options.db, runId).some((event) => event.type === "workflow.selected")) {
+      new TraceWriter(this.options.db, runId).record("workflow.selected", "runtime", { workflow: this.owner(run.kind).id, kind: run.kind, reason: "restored" });
+    }
+    const oldTask = this.tasks.get(runId);
+    this.controls.get(runId)?.abort();
+    const controller = new AbortController();
+    this.controls.set(runId, controller);
+    this.switching.add(runId);
+    const task = this.track(runId, controller, async () => {
+      try {
+        await this.owner(run.kind).cancel(runId);
+        await oldTask;
+        controller.signal.throwIfAborted();
+        setRunStatus(this.options.db, runId, "running");
+        this.options.db.prepare("DELETE FROM run_actions WHERE run_id = ?").run(runId);
+        appendMessage(this.options.db, { threadId: run.threadId, runId, role: "user", content: text.trim() });
+        const goal = `${run.goal}\n\n사용자 정정: ${text.trim()}`;
+        this.options.db.prepare("UPDATE runs SET goal = ? WHERE id = ?").run(goal, runId);
+        this.send(runId, "status", { phase: "routing", messagesChanged: true });
+        await this.options.authorizeThread?.(run.threadId, controller.signal);
+        controller.signal.throwIfAborted();
+        const id = explicit ?? await this.choose(runId, text, controller.signal, { currentWorkflow: this.owner(run.kind).id, originalGoal: run.goal });
+        this.checkHandoff(runId, id);
+        this.switching.delete(runId);
+        await this.execute(runId, id, undefined, controller.signal, "user_correction");
+      } finally { this.switching.delete(runId); }
+    });
+    // Execution continues in the background, just like start/resume; routing failures are stream events.
+    void task;
+  }
+
+  async cancel(runId: string): Promise<void> {
+    const run = getRun(this.options.db, runId);
+    if (!["running", "waiting_user"].includes(run.status) && !this.switching.has(runId)) return;
+    this.controls.get(runId)?.abort();
+    if (run.kind !== "routing" && !this.switching.has(runId)) await this.owner(run.kind).cancel(runId);
+    if (getRun(this.options.db, runId).status !== "cancelled") {
+      setRunStatus(this.options.db, runId, "cancelled", "CANCELLED");
+      new TraceWriter(this.options.db, runId).record("run.failed", "runtime", { code: "CANCELLED" });
+      this.send(runId, "failed", { code: "CANCELLED", message: "작업을 중단했습니다." });
+    } else if (this.switching.has(runId)) {
+      this.send(runId, "failed", { code: "CANCELLED", message: "작업을 중단했습니다." });
+    }
+  }
+
+  assertAvailable(runId: string): void {
+    if (this.stopped) throw new AgentError("CANCELLED", "signed out");
+    if (this.switching.has(runId) || getRun(this.options.db, runId).kind === "routing") throw new AgentError("INTERNAL", "작업을 선택하거나 전환하는 중입니다.");
+  }
+
+  /** All executors share one monotonic renderer stream across workflow changes. */
+  forward(event: AgentStreamEvent): void {
+    if (this.switching.has(event.runId)) return;
+    this.send(event.runId, event.type, event.payload);
+  }
+
+  async drain(runId: string): Promise<void> { await this.tasks.get(runId); }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const run of this.running.values()) run.controller.abort();
-    await Promise.allSettled([...this.pending]);
+    await Promise.allSettled([...this.controls.keys()].map((id) => this.cancel(id)));
+    await Promise.allSettled([...this.tasks.values()]);
   }
 
-  private runLoop(run: RunContext): Promise<void> {
-    const done = this.loop(run);
-    this.pending.add(done);
-    void done.finally(() => this.pending.delete(done)).catch(() => undefined);
-    return done;
+  private explicitMode(input: Pick<StartRunInput, "text" | "mode">): string | undefined {
+    return input.mode && input.mode !== "auto" ? input.mode : input.text.trim().match(/^\$([a-zA-Z][a-zA-Z0-9_-]*)(?=\s|$)/)?.[1];
   }
 
-  cancelRun(runId: string): void {
-    const run = this.running.get(runId);
-    if (run) {
-      run.controller.abort();
-    } else if (cancelWaitingRun(this.options.db, runId, "agent")) {
-      const seq = (this.pausedSeqs.get(runId) ?? 0) + 1;
-      this.pausedSeqs.delete(runId);
-      this.options.emit?.({ runId, seq, type: "failed", payload: { code: "CANCELLED", message: "cancelled" } });
-      this.notifySettled(runId, "cancelled");
+  private workflow(id: string): AgentWorkflow {
+    const workflow = this.byId.get(id);
+    if (!workflow) throw new AgentError("INTERNAL", `등록되지 않은 기능입니다: ${id}`);
+    return workflow;
+  }
+
+  private owner(kind: string): AgentWorkflow {
+    const workflow = this.byKind.get(kind);
+    if (!workflow) throw new AgentError("INTERNAL", `unregistered workflow kind: ${kind}`);
+    return workflow;
+  }
+
+  private result(runId: string): StartRunResult {
+    const run = getRun(this.options.db, runId);
+    const action = getRunAction(this.options.db, runId);
+    return { runId, kind: run.kind, status: run.status, ...(action ? { action } : {}) };
+  }
+
+  private selections(runId: string): string[] {
+    const selections = readTrace(this.options.db, runId).filter((event) => event.type === "workflow.selected").map((event) => String(event.payload.workflow));
+    if (!selections.length) {
+      const owner = this.byKind.get(getRun(this.options.db, runId).kind);
+      if (owner) selections.push(owner.id);
     }
+    return selections;
   }
 
-  private createContext(runId: string, threadId: string, workspaceId: string, state: PolicyState, contextText: string): RunContext {
-    const run: RunContext = {
-      runId,
-      threadId,
-      workspaceId,
-      state,
-      contextText,
-      sources: new Map(),
-      searchCache: new Map(),
-      controller: new AbortController(),
-      deadline: Date.now() + state.remaining.wallTimeMs,
-      trace: new TraceWriter(this.options.db, runId),
-      seq: 0,
-    };
-    this.running.set(runId, run);
-    this.pausedSeqs.delete(runId);
-    return run;
+  private checkHandoff(runId: string, id: string): void {
+    this.workflow(id);
+    if (readTrace(this.options.db, runId).some((event) => event.type === "workflow.effect_started")) throw new AgentError("INTERNAL", "원본 파일 갱신이 시작된 작업은 전환할 수 없습니다.");
+    const visited = this.selections(runId);
+    if (visited.includes(id)) throw new AgentError("INVALID_DECISION", "이미 선택했던 작업으로 다시 전환할 수 없습니다. 새 요청으로 시작해 주세요.");
+    if (visited.length > MAX_HANDOFFS) throw new AgentError("BUDGET_EXCEEDED", "작업 전환 횟수를 초과했습니다. 새 요청으로 시작해 주세요.");
   }
 
-  private emit(run: RunContext, type: AgentStreamEvent["type"], payload: unknown): void {
-    run.seq += 1;
-    this.options.emit?.({ runId: run.runId, seq: run.seq, type, payload });
-  }
-
-  private async loop(run: RunContext): Promise<void> {
-    const { db } = this.options;
-    try {
-      await this.options.toolsReady;
-      run.state.availableTools = this.toolRegistry.catalog().filter((tool) => !run.state.failedTools?.includes(tool.id));
-      await this.options.authorizeContext?.(run.threadId, run.controller.signal);
-      while (true) {
-        run.state.remaining.wallTimeMs = Math.max(0, run.deadline - Date.now());
-        run.state.signals = derivePolicySignals(run.state);
-        if (run.controller.signal.aborted) throw new AgentError("CANCELLED", "cancelled");
-        const { remaining } = run.state;
-        if (remaining.steps <= 0 || remaining.modelCalls <= 0 || remaining.wallTimeMs <= 0) {
-          throw new AgentError("BUDGET_EXCEEDED", `budget exhausted at step ${run.state.step}`);
-        }
-
-        this.emit(run, "status", { step: run.state.step, phase: "deciding" });
-        const decision = await this.decide(run);
-        const stateSnapshot = structuredClone(run.state);
-        run.state.remaining.steps -= 1;
-        run.state.step += 1;
-        run.state.previousDecisions.push(decision.action);
-
-        const transition: PolicyTransition = { state: stateSnapshot, decision };
-        const decidedSeq = run.trace.record("policy.decided", "policy", {
-          transition,
-          profileHash: this.fingerprints.policy,
-          remainingAfter: run.state.remaining,
-          contextText: decision.action === "ASK" ? run.contextText : undefined,
-        });
-        this.emit(run, "status", { step: stateSnapshot.step, phase: decision.action, reasonCode: decision.reasonCode, taskDifficulty: decision.taskDifficulty });
-
-        switch (decision.action) {
-          case "SEARCH":
-            run.state.lastObservation = await this.search(run, decision, decidedSeq);
-            this.updateTransition(run, decidedSeq, { observation: run.state.lastObservation });
-            break;
-          case "VERIFY":
-            run.state.lastObservation = await this.verify(run, decision, decidedSeq);
-            this.updateTransition(run, decidedSeq, { observation: run.state.lastObservation });
-            break;
-          case "ASK": {
-            const question = decision.question ?? "";
-            const context = appliedContext(run.state);
-            const message = appendMessage(db, { threadId: run.threadId, runId: run.runId, role: "assistant", content: question, appliedContext: context });
-            setRunStatus(db, run.runId, "waiting_user");
-            this.updateTransition(run, decidedSeq, { outcome: "waiting_user" });
-            run.trace.record("run.waiting_user", "runtime", { messageId: message.id });
-            this.emit(run, "ask_user", { messageId: message.id, question });
-            this.settle(run, "waiting_user");
-            return;
-          }
-          case "ANSWER": {
-            const outcome = await this.answer(run, decidedSeq);
-            this.updateTransition(run, decidedSeq, { outcome });
-            this.settle(run, "completed");
-            return;
-          }
-          case "STOP": {
-            const reason = decision.stopReason ?? "";
-            const context = appliedContext(run.state);
-            const message = appendMessage(db, { threadId: run.threadId, runId: run.runId, role: "assistant", content: reason, appliedContext: context });
-            setRunStatus(db, run.runId, "abstained");
-            this.updateTransition(run, decidedSeq, { outcome: "abstained" });
-            run.trace.record("run.completed", "runtime", { outcome: "abstained", messageId: message.id, ...this.usage(run) });
-            this.emit(run, "completed", { outcome: "abstained", messageId: message.id, text: reason, appliedContext: context });
-            this.settle(run, "abstained");
-            return;
-          }
-        }
-      }
-    } catch (error) {
-      const failure = error instanceof AgentError ? error : new AgentError("INTERNAL", error instanceof Error ? error.message : String(error));
-      const status = failure.code === "CANCELLED" ? "cancelled" : "failed";
-      setRunStatus(db, run.runId, status, failure.code);
-      run.trace.record("run.failed", "runtime", { code: failure.code, message: failure.message, step: run.state.step });
-      this.emit(run, "failed", { code: failure.code, message: failure.message });
-      this.settle(run, status);
-    }
-  }
-
-  private settle(run: RunContext, status: RunStatus): void {
-    this.running.delete(run.runId);
-    if (status === "waiting_user") this.pausedSeqs.set(run.runId, run.seq);
-    this.notifySettled(run.runId, status);
-  }
-
-  private notifySettled(runId: string, status: RunStatus): void {
-    try {
-      this.options.onRunSettled?.(runId, status);
-    } catch (error) {
-      console.warn("[harness] onRunSettled failed:", error);
-    }
-  }
-
-  /** The policy.decided payload is the PolicyTransition record; observation and outcome are filled in as they happen. */
-  private updateTransition(run: RunContext, seq: number, patch: Pick<PolicyTransition, "observation" | "outcome">): void {
-    const row = this.options.db.prepare("SELECT payload FROM trace_events WHERE run_id = ? AND seq = ?").get(run.runId, seq) as { payload: string };
-    const payload = JSON.parse(row.payload) as { transition: PolicyTransition };
-    Object.assign(payload.transition, patch);
-    this.options.db.prepare("UPDATE trace_events SET payload = ? WHERE run_id = ? AND seq = ?").run(JSON.stringify(payload), run.runId, seq);
-  }
-
-  private async callModel<T>(run: RunContext, purpose: ModelCallInfo["purpose"], call: () => Promise<T>): Promise<T> {
-    if (run.state.remaining.modelCalls <= 0) throw new AgentError("BUDGET_EXCEEDED", `no model calls remaining for ${purpose}`);
-    run.state.remaining.modelCalls -= 1;
+  private async choose(runId: string, text: string, signal: AbortSignal, correction?: Pick<RoutingContext, "currentWorkflow" | "originalGoal">): Promise<string> {
+    const run = getRun(this.options.db, runId);
+    const trace = new TraceWriter(this.options.db, runId);
     const startedAt = Date.now();
-    const stage = purpose === "policy" ? "policy" : purpose === "verify" ? "verification" : "generation";
-    const configuredAlias = purpose === "answer" ? this.options.profiles.answer.modelAlias : this.options.profiles.policy.modelAlias;
-    const seq = run.trace.record("model.started", stage, { purpose, modelAlias: configuredAlias });
-    const previous = this.options.model.lastCallFor ? this.options.model.lastCallFor(run.controller.signal) : this.options.model.lastCall;
+    const modelAlias = this.options.routingSettings().modelAlias;
+    const parentSeq = trace.record("model.started", "policy", { purpose: "routing", modelAlias });
+    this.send(runId, "status", { phase: "routing" });
+    let choice: string | undefined;
     let code: string | undefined;
     try {
-      return await withTimeout(call(), run.deadline - Date.now(), "MODEL_TIMEOUT", run.controller.signal);
+      const context = { ...selectRoutingContext(this.options.db, run.threadId), ...correction };
+      choice = await (this.options.route ?? ((message, routes, requestSignal, routingContext) => routeMessage(this.options.routingSettings(), message, requestSignal, routes, routingContext)))(text, this.routes(), signal, context);
+      signal.throwIfAborted();
+      this.workflow(choice);
+      return choice;
     } catch (error) {
-      code = error instanceof AgentError ? error.code : "INTERNAL";
+      code = error instanceof AgentError ? error.code : signal.aborted ? "CANCELLED" : "INTERNAL";
       throw error;
     } finally {
-      const last = this.options.model.lastCallFor ? this.options.model.lastCallFor(run.controller.signal) : this.options.model.lastCall;
-      const usage = last && last !== previous && last.purpose === purpose ? { modelAlias: last.modelAlias, promptTokens: last.promptTokens, cachedPromptTokens: last.cachedPromptTokens, completionTokens: last.completionTokens, finishReason: last.finishReason, ttftMs: last.ttftMs } : {};
-      run.trace.record("model.completed", stage, { purpose, latencyMs: Date.now() - startedAt, ...usage, ...(code ? { code } : {}) }, { parentSeq: seq, startedAt });
+      trace.record("model.completed", "policy", { purpose: "routing", modelAlias, latencyMs: Date.now() - startedAt, workflow: choice, ...(code ? { code } : {}) }, { parentSeq, startedAt });
     }
   }
 
-  private async decide(run: RunContext): Promise<PolicyDecision> {
-    const { policy } = this.options.profiles;
-    const smallTalk = smallTalkDecision(run.state, policy.version);
-    const smallTalkValidation = smallTalk && validateDecision(smallTalk, run.state, policy.allowedActions);
-    if (smallTalkValidation?.ok) return smallTalkValidation.decision;
-    // Tool selection follows intent even when the user does not know provider names.
-    const wantsExternal = Boolean(run.state.availableTools?.length || run.state.failedTools?.length);
-    if (policy.strategy === "always-search" && !wantsExternal) {
-      const raw = alwaysSearchDecision(run.state, policy.version);
-      const validation = validateDecision(raw, run.state, policy.allowedActions);
-      if (validation.ok) return validation.decision;
-      if (validation.code === "BUDGET_EXCEEDED") return this.coerce(run, raw);
-      throw new AgentError(validation.code, validation.reason);
-    }
-    if (policy.strategy === "gated" && !wantsExternal) {
-      const fast = gatedDecision(run.state, policy.version);
-      const validation = fast && validateDecision(fast, run.state, policy.allowedActions);
-      if (validation?.ok) return validation.decision;
-    }
-
-    let lastReason = "";
-    for (let attempt = 1; attempt <= MAX_DECIDE_ATTEMPTS; attempt += 1) {
-      if (run.state.remaining.modelCalls <= 0) break;
-      let raw: PolicyDecision;
-      try {
-        raw = await this.callModel(run, "policy", () => this.options.model.decide(run.state, this.options.profiles.policy, run.controller.signal));
-      } catch (error) {
-        if (!(error instanceof AgentError) || error.code !== "INVALID_DECISION") throw error;
-        lastReason = error.message;
-        run.trace.record("policy.decided", "policy", { invalid: true, code: error.code, reason: lastReason, attempt });
-        continue;
+  private async execute(runId: string, initialId: string, canvas: WorkflowStartInput["canvas"], signal: AbortSignal, reason?: string): Promise<void> {
+    let id = initialId;
+    while (true) {
+      signal.throwIfAborted();
+      const workflow = this.workflow(id);
+      const run = getRun(this.options.db, runId);
+      if (run.status !== "running") return;
+      this.options.db.prepare("DELETE FROM run_actions WHERE run_id = ?").run(runId);
+      new TraceWriter(this.options.db, runId).record("workflow.selected", "runtime", { workflow: id, kind: workflow.kind, reason });
+      this.send(runId, "workflow_changed", { threadId: run.threadId, kind: workflow.kind, workflow: id, reason });
+      const handle = workflow.start({ runId, threadId: run.threadId, workspaceId: getThread(this.options.db, run.threadId).workspaceId, text: run.goal, mode: id, canvas });
+      if (handle.runId !== runId) throw new AgentError("INTERNAL", "Workflow did not adopt its request");
+      try { await handle.done; return; }
+      catch (error) {
+        if (!(error instanceof WorkflowHandoff)) throw error;
+        signal.throwIfAborted();
+        this.checkHandoff(runId, error.workflow);
+        id = error.workflow;
+        reason = error.reason;
+        canvas = undefined;
       }
-      const validation = validateDecision(raw, run.state, policy.allowedActions);
-      if (validation.ok) {
-        const decision = validation.decision;
-        const call = decision.action === "SEARCH" && decision.search ? discoveryCall(decision.search) : undefined;
-        if (call) {
-          try {
-            if (run.state.failedTools?.includes(call.toolId)) throw new AgentError("INVALID_DECISION", "Tool already failed during this run");
-            this.toolRegistry.validateInput(call.toolId, call.arguments);
-          } catch (error) {
-            if (!(error instanceof AgentError)) throw error;
-            lastReason = error.message;
-            run.trace.record("policy.decided", "policy", { invalid: true, code: error.code, reason: lastReason, attempt });
-            continue;
-          }
-        }
-        const proposedSearch = decision.search;
-        const duplicateSearch = decision.action === "SEARCH"
-          && proposedSearch?.tool === "search_local_docs"
-          && run.searchCache.has(normalizeQuery(proposedSearch.query));
-        return duplicateSearch ? this.coerce(run, decision) : decision;
-      }
-      lastReason = validation.reason;
-      run.trace.record("policy.decided", "policy", { invalid: true, code: validation.code, reason: validation.reason, raw, attempt });
-      if (validation.code === "BUDGET_EXCEEDED") return this.coerce(run, raw);
     }
-    throw new AgentError("INVALID_DECISION", lastReason || "model produced no valid decision");
   }
 
-  /** Budget wins over the model: an over-budget action becomes ANSWER (with evidence) or STOP. */
-  private coerce(run: RunContext, raw: unknown): PolicyDecision {
-    const base = raw as Partial<PolicyDecision>;
-    const common = {
-      taskDifficulty: base.taskDifficulty ?? 2,
-      predictedSuccess: base.predictedSuccess ?? 0,
-      evidenceSufficiency: base.evidenceSufficiency ?? 0,
-      reasonCode: "BUDGET_LIMIT" as const,
-      policyVersion: this.options.profiles.policy.version,
-    };
-    const hasMaterial = run.state.evidence.length > 0 || run.state.lastObservation?.kind === "external";
-    return hasMaterial && run.state.remaining.modelCalls > 0 && this.options.profiles.policy.allowedActions.includes("ANSWER")
-      ? { ...common, action: "ANSWER" }
-      : { ...common, action: "STOP", stopReason: "검색 예산을 모두 사용했지만 답변에 필요한 근거를 찾지 못했습니다." };
-  }
-
-  private usage(run: RunContext): { modelCalls: number; promptTokens: number; completionTokens: number; totalTokens: number } {
-    const calls = readTrace(this.options.db, run.runId).filter((event) => event.type === "model.completed");
-    const promptTokens = calls.reduce((sum, event) => sum + Number(event.payload.promptTokens ?? 0), 0);
-    const completionTokens = calls.reduce((sum, event) => sum + Number(event.payload.completionTokens ?? 0), 0);
-    return { modelCalls: calls.length, promptTokens, completionTokens, totalTokens: promptTokens + completionTokens };
-  }
-
-  private addEvidence(run: RunContext, items: Array<{ evidence: Evidence; source: EvidenceSource }>): string[] {
-    const ids: string[] = [];
-    for (const item of items) {
-      const existing = run.state.evidence.find((known) => known.chunkId === item.evidence.chunkId);
-      if (existing) {
-        ids.push(existing.evidenceId);
-        continue;
-      }
-      run.state.evidence.push(item.evidence);
-      run.sources.set(item.evidence.evidenceId, item.source);
-      this.options.db.prepare(`
-        INSERT OR IGNORE INTO citations (run_id, evidence_id, source_id, chunk_id, path, title, locator) VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(run.runId, item.evidence.evidenceId, item.source.sourceId, item.source.chunkId, item.source.path, item.source.title, JSON.stringify(item.source.locator));
-      ids.push(item.evidence.evidenceId);
-    }
-    if (run.state.evidence.length > this.limits.maxEvidence) {
-      run.state.evidence = [...run.state.evidence].sort((left, right) => right.score - left.score).slice(0, this.limits.maxEvidence);
-    }
-    return ids;
-  }
-
-  private nextEvidenceId(run: RunContext): string {
-    return `e${run.sources.size + 1}`;
-  }
-
-  private async search(run: RunContext, decision: PolicyDecision, parentSeq: number): Promise<Observation> {
-    const search = decision.search;
-    if (!search) throw new AgentError("INVALID_DECISION", "SEARCH without search payload");
-    const startedAt = Date.now();
-    const call = discoveryCall(search);
-    if (call) {
-      run.state.remaining.searches -= 1;
-      const tool = search.tool === "call_tool" ? call.toolId : search.tool;
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool, toolId: call.toolId }, { parentSeq });
-      this.emit(run, "status", { phase: "searching", query: call.toolId });
-      let observation: Observation;
-      try {
-        const value = await this.toolRegistry.execute(call.toolId, call.arguments, run.controller.signal,
-          Math.min(this.limits.toolTimeoutMs, run.state.remaining.wallTimeMs));
-        if (value.documents?.length) {
-          this.options.onExternalDocuments?.(run.threadId, value.documents);
-          const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
-          for (const document of value.documents) known.set(document.refId, document);
-          run.state.externalDocuments = [...known.values()];
-        }
-        this.addMaruEvidence(run, value.excerpts ?? [], this.limits.evidenceSnippetChars);
-        observation = { kind: "external", tool, result: value.summary, latencyMs: Date.now() - startedAt };
-        run.contextText = `${run.contextText}\n\n${call.toolId} result (untrusted data):\n${value.summary}`.trim();
-      } catch (error) {
-        if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-        observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE", toolId: call.toolId };
-        if (observation.code !== "INVALID_DECISION") {
-          run.state.failedTools = [...new Set([...(run.state.failedTools ?? []), call.toolId])];
-          run.state.availableTools = run.state.availableTools?.filter((item) => item.id !== call.toolId);
-        }
-      }
-      run.trace.record("tool.completed", "retrieval", { tool, toolId: call.toolId, observation }, { parentSeq: toolSeq, startedAt });
-      return observation;
-    }
-    if (search.tool === "read_external_document") {
-      if (!this.options.tools.maru) throw new AgentError("TOOL_UNAVAILABLE", "MARU is not configured");
-      const document = run.state.externalDocuments?.find((item) => item.refId === search.ref_id);
-      if (!document) throw new AgentError("INVALID_DECISION", "unknown external document ref_id");
-      run.state.remaining.searches -= 1;
-      const query = search.query?.trim() || run.state.userGoal;
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, refId: document.refId, query }, { parentSeq });
-      this.emit(run, "status", { phase: "searching", query: `MARU ${document.path}` });
-      let observation: Observation;
-      try {
-        const imported = await withTimeout(
-          this.options.tools.maru.readDocument(document, run.controller.signal),
-          Math.min(EXTERNAL_DOCUMENT_TIMEOUT_MS, run.state.remaining.wallTimeMs),
-          "TOOL_TIMEOUT",
-          run.controller.signal,
-        );
-        const result = await withTimeout(this.options.tools.search(query, [imported.collection]), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-        let items = result.results.map((item) => resultToEvidence(item, this.nextEvidenceIdFor(run, item.chunkId), this.limits.evidenceSnippetChars));
-        if (!items.length) {
-          const chunks = await withTimeout(this.options.tools.sourceChunks(imported.sourceId), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-          items = chunks.slice(0, this.limits.maxEvidence).map((chunk, index) => chunkToEvidence(chunk, this.nextEvidenceIdFor(run, chunk.chunkId), 1 / (index + 1), this.limits.evidenceSnippetChars));
-        }
-        const ids = this.addEvidence(run, items);
-        observation = { kind: "search", resultIds: ids, effectiveMode: result.effectiveMode, latencyMs: Date.now() - startedAt };
-      } catch (error) {
-        if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-        observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE" };
-      }
-      run.trace.record("tool.completed", "retrieval", { tool: search.tool, refId: document.refId, observation, evidence: this.observedEvidence(run, observation) }, { parentSeq: toolSeq, startedAt });
-      return observation;
-    }
-    if (search.tool === "search_local_docs") {
-      const query = search.query ?? "";
-      const key = normalizeQuery(query);
-      const cached = run.searchCache.get(key);
-      if (cached) {
-        run.trace.record("tool.completed", "retrieval", { tool: search.tool, cached: true, query, evidence: this.observedEvidence(run, cached) }, { parentSeq, startedAt });
-        return cached;
-      }
-      run.state.remaining.searches -= 1;
-      const maruScope = this.maruScope(run);
-      const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, query, collections: run.state.activeCollections, maruExcluded: maruScope ?? undefined }, { parentSeq });
-      this.emit(run, "status", { phase: "searching", query });
-      // Local and MARU run in parallel; either one alone still yields evidence.
-      const signal = run.controller.signal;
-      const maru = this.options.tools.maru;
-      const [local, remote] = await Promise.allSettled([
-        withTimeout(this.options.tools.search(query, run.state.activeCollections), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", signal),
-        maruScope === null || !maru?.searchExcerpts
-          ? Promise.resolve(undefined)
-          : withTimeout(maru.searchExcerpts(query, maruScope, signal), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", signal),
-      ]);
-      for (const settled of [local, remote]) {
-        if (settled.status === "rejected" && settled.reason instanceof AgentError && settled.reason.code === "CANCELLED") throw settled.reason;
-      }
-      const errorCode = (reason: unknown): AgentErrorCode => reason instanceof AgentError ? reason.code : "TOOL_UNAVAILABLE";
-      let observation: Observation;
-      if (local.status === "rejected" && (remote.status === "rejected" || !remote.value)) {
-        observation = { kind: "tool_error", code: errorCode(local.reason) };
-      } else {
-        const ids = local.status === "fulfilled"
-          ? this.addEvidence(run, local.value.results.map((item) => resultToEvidence(item, this.nextEvidenceIdFor(run, item.chunkId), this.limits.evidenceSnippetChars)))
-          : [];
-        if (remote.status === "fulfilled" && remote.value) {
-          this.options.onExternalDocuments?.(run.threadId, remote.value.map(({ document }) => document));
-          ids.push(...this.addMaruEvidence(run, remote.value, MARU_EXCERPT_CHARS));
-        }
-        observation = { kind: "search", resultIds: ids, effectiveMode: local.status === "fulfilled" ? local.value.effectiveMode : "keyword", latencyMs: Date.now() - startedAt };
-      }
-      run.searchCache.set(key, observation);
-      run.trace.record("tool.completed", "retrieval", {
-        tool: search.tool,
-        observation,
-        evidence: this.observedEvidence(run, observation),
-        ...(local.status === "rejected" ? { localError: errorCode(local.reason) } : {}),
-        ...(remote.status === "rejected" ? { maruError: errorCode(remote.reason) } : {}),
-      }, { parentSeq: toolSeq, startedAt });
-      return observation;
-    }
-
-    if (search.tool !== "get_document_context") throw new AgentError("INVALID_DECISION", "Unknown search tool");
-    const anchor = run.state.evidence.find((item) => item.evidenceId === search.evidenceId);
-    if (!anchor) throw new AgentError("INVALID_DECISION", "unknown evidenceId for get_document_context");
-    run.state.remaining.searches -= 1;
-    const toolSeq = run.trace.record("tool.started", "retrieval", { tool: search.tool, evidenceId: anchor.evidenceId }, { parentSeq });
-    let observation: Observation;
-    try {
-      const chunks = await withTimeout(this.options.tools.neighbors(anchor.chunkId, NEIGHBOR_SPAN, NEIGHBOR_SPAN), this.limits.toolTimeoutMs, "TOOL_TIMEOUT", run.controller.signal);
-      const ids = this.addEvidence(run, chunks.map((chunk) => chunkToEvidence(chunk, this.nextEvidenceIdFor(run, chunk.chunkId), anchor.score, this.limits.evidenceSnippetChars)));
-      observation = { kind: "search", resultIds: ids, effectiveMode: "keyword", latencyMs: Date.now() - startedAt };
-    } catch (error) {
-      if (error instanceof AgentError && error.code === "CANCELLED") throw error;
-      observation = { kind: "tool_error", code: error instanceof AgentError ? error.code : "TOOL_UNAVAILABLE" };
-    }
-    run.trace.record("tool.completed", "retrieval", { tool: search.tool, observation, evidence: this.observedEvidence(run, observation) }, { parentSeq: toolSeq, startedAt });
-    return observation;
-  }
-
-  /** Storages to skip, or null when MARU is unavailable. An explicit MARU request also searches storages turned off. */
-  private maruScope(run: RunContext): string[] | null {
-    if (!this.options.tools.maru) return null;
-    return MARU_REQUEST.test(run.state.userGoal) ? [] : run.state.excludedMaruStorages ?? [];
-  }
-
-  private addMaruEvidence(run: RunContext, excerpts: Array<{ document: ExternalDocumentRef; text: string }>, snippetChars: number): string[] {
-    const known = new Map((run.state.externalDocuments ?? []).map((document) => [document.refId, document]));
-    for (const { document } of excerpts) known.set(document.refId, document);
-    run.state.externalDocuments = [...known.values()];
-    return this.addEvidence(run, excerpts.map(({ document, text }) => {
-      const sourceId = `maru:${document.refId}`;
-      const chunkId = `${sourceId}:${createHash("sha256").update(text).digest("hex").slice(0, 16)}`;
-      const evidenceId = this.nextEvidenceIdFor(run, chunkId);
-      return {
-        // score 0: a literal-match excerpt carries no rank signal comparable to Tomato's RRF scores.
-        evidence: { evidenceId, sourceId, chunkId, title: document.path, breadcrumb: [document.storageName ?? document.storageId], locator: {}, snippet: text.slice(0, snippetChars), score: 0 },
-        source: { evidenceId, sourceId, chunkId, path: sourceId, title: document.path, locator: {} },
-      };
-    }));
-  }
-
-  private observedEvidence(run: RunContext, observation: Observation): Evidence[] {
-    if (observation.kind !== "search") return [];
-    const ids = new Set(observation.resultIds);
-    return run.state.evidence.filter((item) => ids.has(item.evidenceId));
-  }
-
-  /** Reuses the id of an already-issued chunk so ids stay stable within a run. */
-  private nextEvidenceIdFor(run: RunContext, chunkId: string): string {
-    for (const source of run.sources.values()) if (source.chunkId === chunkId) return source.evidenceId;
-    const id = this.nextEvidenceId(run);
-    run.sources.set(id, { evidenceId: id, sourceId: "", chunkId, path: "", title: "", locator: {} });
-    return id;
-  }
-
-  private async verify(run: RunContext, decision: PolicyDecision, parentSeq: number): Promise<Observation> {
-    run.state.remaining.verifies -= 1;
-    const claims = decision.claimsToVerify ?? [];
-    const startedAt = Date.now();
-    const result = await this.callModel(run, "verify", () =>
-      this.options.model.verify({ userGoal: run.state.userGoal, claims, evidence: run.state.evidence }, this.options.profiles.policy, run.controller.signal),
-    );
-    const observation: Observation = { kind: "verification", supported: result.supported, missingClaims: result.missingClaims, confidence: result.confidence };
-    run.trace.record("verification.completed", "verification", { claims, result }, { parentSeq, startedAt });
-    return observation;
-  }
-
-  private async answer(run: RunContext, parentSeq: number): Promise<RunOutcome> {
-    const { db } = this.options;
-    const startedAt = Date.now();
-    let text = "";
-    let answerUsage = { promptTokens: 0, completionTokens: 0 };
-    await this.callModel(run, "answer", async () => {
-      const stream = this.options.model.streamAnswer(
-        { userGoal: run.state.userGoal, context: run.contextText, evidence: run.state.evidence },
-        { ...this.options.profiles.policy, ...this.options.profiles.answer },
-        run.controller.signal,
-      );
-      for await (const event of stream) {
-        if (run.controller.signal.aborted) throw new AgentError("CANCELLED", "cancelled");
-        if (event.type === "text_delta") {
-          text += event.text;
-          this.emit(run, "text_delta", { text: event.text });
-        } else {
-          answerUsage = { promptTokens: event.promptTokens, completionTokens: event.completionTokens };
-        }
-      }
+  private track(runId: string, controller: AbortController, work: () => Promise<void>): Promise<void> {
+    const task = work().catch((error: unknown) => {
+      if (this.controls.get(runId) !== controller) return;
+      const run = getRun(this.options.db, runId);
+      if (!["running", "waiting_user"].includes(run.status)) return;
+      const failure = controller.signal.aborted ? new AgentError("CANCELLED", "작업을 중단했습니다.") : error instanceof AgentError ? error : new AgentError("INTERNAL", "작업을 진행하지 못했습니다. 다시 요청해 주세요.");
+      setRunStatus(this.options.db, runId, failure.code === "CANCELLED" ? "cancelled" : "failed", failure.code);
+      new TraceWriter(this.options.db, runId).record("run.failed", "runtime", { code: failure.code, message: failure.message });
+      this.send(runId, "failed", { code: failure.code, message: failure.message });
+    }).finally(() => {
+      if (this.controls.get(runId) === controller) this.controls.delete(runId);
+      if (this.tasks.get(runId) === task) this.tasks.delete(runId);
     });
+    this.tasks.set(runId, task);
+    return task;
+  }
 
-    let check = validateCitations(text, run.state.evidence);
-    let repaired = false;
-    if (check.invalid.length) {
-      text = stripInvalidCitations(text, check.invalid);
-      repaired = true;
-      check = validateCitations(text, run.state.evidence);
+  private send(runId: string, type: AgentStreamEvent["type"], payload: unknown): void {
+    const seq = (this.seqs.get(runId) ?? 0) + 1;
+    this.seqs.set(runId, seq);
+    this.options.emit?.({ runId, seq, type, payload });
+    if (["ask_user", "completed", "failed"].includes(type)) {
+      try { this.options.onSettled?.(runId); }
+      catch { console.warn("[harness] telemetry export failed"); }
     }
-    // Citing only unknown ids is a grounding failure. Citing nothing means the model judged the retrieved
-    // evidence irrelevant (e.g. "어떤 MCP가 연결돼 있어?" against local docs); keep that answer, uncited.
-    const citationsFailed = run.state.evidence.length > 0 && check.valid.length === 0 && repaired;
-    const uncited = run.state.evidence.length > 0 && check.valid.length === 0 && !repaired;
-    run.trace.record("answer.validated", "citation", { valid: check.valid, invalid: check.invalid, repaired, usage: answerUsage, failed: citationsFailed, uncited }, { parentSeq, startedAt });
-    if (citationsFailed) throw new AgentError("INVALID_CITATION", "answer did not cite known evidence");
-
-    const citations: CitationSummary[] = check.valid.map((id) => {
-      const evidence = run.state.evidence.find((item) => item.evidenceId === id);
-      return { evidenceId: id, title: evidence?.title ?? "", breadcrumb: evidence?.breadcrumb ?? [], page: evidence?.locator.pageStart };
-    });
-    for (const citation of citations) this.emit(run, "citation", citation);
-    const context = appliedContext(run.state);
-    const message = appendMessage(db, { threadId: run.threadId, runId: run.runId, role: "assistant", content: text, appliedContext: context });
-    setRunStatus(db, run.runId, "completed");
-    run.trace.record("run.completed", "runtime", { outcome: "success", messageId: message.id, citations: check.valid, answerUsage, ...this.usage(run) });
-    this.emit(run, "completed", { outcome: "success", messageId: message.id, text, citations, appliedContext: context });
-    return "success";
   }
 }

@@ -563,7 +563,9 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
     editable: true,
     executionTimeoutMs: 15 * 60 * 1000,
     description:
-      "여러 로컬 엑셀의 시트를 비교·병합·분석한다. LLM이 요청에 맞는 코드를 만들어 실행하고 PDF, HTML 또는 XLSX 결과를 만든다.",
+      "전용 기능이 없는 엑셀 업무를 사용자와 기준을 구체화하며 수행한다. 여러 로컬 엑셀의 시트를 비교·병합·집계·분석하고, 필요한 기준을 질문하고 결과를 수정한다. LLM이 코드를 만들어 실행하고 PDF, HTML 또는 XLSX 결과를 만든다. 재사용 workflow 저장·예약 실행은 지원하지 않는다.",
+    examples: ["거래처별 미수금 집계표를 같이 만들어보자", "엑셀로 월별 비용을 비교하고 기준을 정하면서 보고서를 만들어줘"],
+    requiredInputs: ["작업할 엑셀 파일", "원하는 결과와 계산 기준 (대화로 구체화 가능)"],
     fields: [
       {
         key: "source",

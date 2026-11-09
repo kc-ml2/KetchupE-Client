@@ -61,7 +61,7 @@ it("holds the Mac Excel lock until cancelled work has finished cleanup", async (
 });
 it("still immediately terminates cancelled jobs that do not use native Excel", async () => {
   const worker = child(), abort = new AbortController();
-  const pending = executeBusinessJob("worker", { ...job, toolId: "bank_daily" }, abort.signal);
+  const pending = executeBusinessJob("worker", { ...job, toolId: "test_tool" }, abort.signal);
   worker.emit("spawn"); abort.abort();
   await expect(pending).rejects.toThrow("중단");
   expect(worker.kill).toHaveBeenCalledTimes(1);

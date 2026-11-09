@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { ipcMain, shell } from "electron";
 import type { InteractionKind, MemoryInput, StartRunInput } from "../../src/app-types/Agent.types.ts";
 import type { AnchorChoiceResumeContent, CanvasEditOp, StartCanvasInput } from "../../src/app-types/CanvasEdit.types.ts";
@@ -25,15 +26,15 @@ export function registerAgentHandlers(runtime: AgentRuntime, handle: typeof ipcM
     return run ? { runId: run.id, status: run.status, kind: run.kind, action: getRunAction(db, run.id) } : null;
   });
 
-  handle("canvas:start", async (_event, input: StartCanvasInput) => {
-    await runtime.authorizeThread(input.threadId);
-    assertActive();
-    return { runId: runtime.canvas.start(input).runId };
+  handle("canvas:start", (_event, input: StartCanvasInput) => {
+    return runtime.harness.start({ workspaceId: input.workspaceId, threadId: input.threadId, text: input.instruction, mode: "doc", canvas: { canvasType: input.canvasType, anchorOnly: input.anchorOnly } });
   });
   handle("canvas:edit", (_event, runId: string, op: CanvasEditOp, displayText?: string) => {
+    runtime.harness.assertAvailable(runId);
     runtime.canvas.applyEdit(runId, op, displayText);
   });
   handle("canvas:anchorChoice", (_event, runId: string, choice: AnchorChoiceResumeContent) => {
+    runtime.harness.assertAvailable(runId);
     runtime.canvas.resumeAnchorChoice(runId, choice);
   });
   handle("canvas:load", (_event, runId: string) => runtime.canvas.view(runId));
@@ -51,8 +52,9 @@ export function registerAgentHandlers(runtime: AgentRuntime, handle: typeof ipcM
     runtime.resumeRun(runId, text);
   });
   handle("agent:cancelRun", (_event, runId: string) => {
-    runtime.cancelRun(runId);
+    return runtime.cancelRun(runId);
   });
+  handle("agent:switchWorkflow", (_event, runId: unknown, text: unknown, mode: unknown) => runtime.harness.switchWorkflow(z.string().min(1).parse(runId), z.string().trim().min(1).max(20000).parse(text), z.string().min(1).optional().parse(mode)));
   handle("agent:recordInteraction", (_event, runId: string, kind: InteractionKind) => {
     recordInteraction(db, runId, kind);
     runtime.recordInteractionScore(runId, kind);

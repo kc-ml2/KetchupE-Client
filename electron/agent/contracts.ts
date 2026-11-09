@@ -22,7 +22,7 @@ export class AgentError extends Error {
   }
 }
 
-export const POLICY_ACTIONS = ["SEARCH", "ASK", "VERIFY", "ANSWER", "STOP"] as const;
+export const POLICY_ACTIONS = ["SEARCH", "ASK", "VERIFY", "ANSWER", "STOP", "HANDOFF"] as const;
 export type PolicyAction = (typeof POLICY_ACTIONS)[number];
 
 export const POLICY_STRATEGIES = ["llm", "always-search", "gated"] as const;
@@ -94,8 +94,10 @@ export type Budget = {
 
 export type PolicyState = {
   runId: string;
+  answerMode?: "general" | "grounded";
   step: number;
   userGoal: string;
+  workflow?: { id: string; routes: Array<{ id: string; description: string }> };
   selectedMemories: SelectedMemory[];
   activeCollections: string[];
   /** MARU storages the user turned off; every other accessible storage is searched with local collections. */
@@ -139,6 +141,7 @@ export const PolicyDecisionSchema = z.object({
   evidenceSufficiency: probability,
   reasonCode: z.enum(REASON_CODES),
   search: searchDecision.optional(),
+  handoff: z.object({ workflow: z.string().min(1), reason: z.string().trim().min(1).max(500) }).optional(),
   question: z.string().optional(),
   claimsToVerify: z.array(z.string()).optional(),
   stopReason: z.string().optional(),
@@ -178,7 +181,7 @@ export type PolicyProfile = {
 
 export type VerifyInput = { userGoal: string; claims: string[]; evidence: Evidence[] };
 
-export type AnswerInput = { userGoal: string; context: string; evidence: Evidence[] };
+export type AnswerInput = { userGoal: string; context: string; evidence: Evidence[]; answerMode?: "general" | "grounded" };
 
 export type AnswerEvent =
   | { type: "text_delta"; text: string }
@@ -208,6 +211,9 @@ export type TraceStage =
   | "feedback";
 
 export type TraceEventType =
+  | "request.started"
+  | "workflow.selected"
+  | "workflow.effect_started"
   | "run.started"
   | "context.selected"
   | "policy.decided"
@@ -260,6 +266,9 @@ export function validateDecision(raw: unknown, state: PolicyState, allowedAction
   if (!allowedActions.includes(decision.action)) return invalid(`${decision.action} is disabled by the policy profile`);
 
   switch (decision.action) {
+    case "HANDOFF":
+      if (!decision.handoff || decision.handoff.workflow === state.workflow?.id || !state.workflow?.routes.some(({ id }) => id === decision.handoff?.workflow)) return invalid("HANDOFF requires a different registered workflow and a reason");
+      break;
     case "SEARCH": {
       if (state.remaining.searches <= 0) return overBudget("no searches remaining");
       if (!decision.search) return invalid("SEARCH requires search");

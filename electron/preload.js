@@ -32,6 +32,7 @@ function agentAPI(sessionId) {
   startRun: (input) => invoke('agent:startRun', input),
   resumeRun: (runId, text) => invoke('agent:resumeRun', runId, text),
   cancelRun: (runId) => invoke('agent:cancelRun', runId),
+  switchWorkflow: (runId, text, mode) => invoke('agent:switchWorkflow', runId, text, mode),
   onAgentEvent: (listener) => {
     const handler = (_event, payload) => { if (payload.sessionId === sessionId) listener(payload.event); };
     ipcRenderer.on('agent:event', handler);

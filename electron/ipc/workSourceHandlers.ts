@@ -14,7 +14,7 @@ const fileSchema = z.object({ sourceId: z.string().min(1).max(100), relativePath
 const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: string, handle: typeof ipcMain.handle = ipcMain.handle.bind(ipcMain), assertActive: () => void = () => undefined): void {
-  handle("business:submit", (_event, runId: unknown, actionId: unknown, input: unknown) => runtime.businessFlow.submit(z.string().min(1).parse(runId), z.string().min(1).parse(actionId), input));
+  handle("business:submit", (_event, runId: unknown, actionId: unknown, input: unknown) => { const id = z.string().min(1).parse(runId); runtime.harness.assertAvailable(id); return runtime.businessFlow.submit(id, z.string().min(1).parse(actionId), input); });
   handle("business:artifacts", (_event, threadId: unknown) => runtime.businessFlow.artifacts(z.string().min(1).parse(threadId)));
   handle("business:openArtifact", async (_event, id: unknown) => {
     const path = await runtime.businessFlow.artifactPath(z.string().uuid().parse(id));
@@ -61,6 +61,7 @@ export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: st
     if (!profile || profile.revision !== selection.profileRevision) throw new Error("매핑이 변경되었습니다. 다시 불러와 확인해 주세요.");
     const result = await read(selection.file, { kind: "extract", mapping: profile.mapping }, selection.fingerprint) as ExtractionPreview;
     if (listProfiles(runtime.db).find((item) => item.id === profile.id)?.revision !== profile.revision) throw new Error("검증 중 매핑이 변경되었습니다.");
+    runtime.harness.assertAvailable(runId);
     runtime.workSourcesFlow.complete(runId, actionId, selection, result);
   });
   handle("work:listSources", () => sources.list());

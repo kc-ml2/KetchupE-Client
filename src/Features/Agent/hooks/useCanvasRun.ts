@@ -20,7 +20,7 @@ export type CanvasView = {
 
 const initial: CanvasView = { runId: null, canvas: null, interrupt: null, isBusy: false, phase: null, error: null, actionContexts: [], selectedAnchorIds: [], changedBlockIds: [], submittedTermsKey: null, hidden: false };
 
-const PHASE_LABEL: Record<string, string> = { classifying: "문서 종류 판단 중", grounding: "참고 문서 검색 중", drafting: "초안 작성 중" };
+const PHASE_LABEL: Record<string, string> = { routing: "실행할 작업 선택 중", classifying: "문서 종류 판단 중", grounding: "참고 문서 검색 중", drafting: "초안 작성 중" };
 export const canvasPhaseLabel = (phase: string | null): string => (phase ? (PHASE_LABEL[phase] ?? phase) : "");
 
 const blockLabel = (section: ContractSection, block: ContractBlock): string => {
@@ -52,7 +52,7 @@ export const reduceCanvasEvent = (current: CanvasView, event: AgentStreamEvent):
   const payload = event.payload as Record<string, unknown>;
   switch (event.type) {
     case "status":
-      return { ...current, phase: String(payload.phase ?? "") };
+      return { ...current, phase: String(payload.phase ?? ""), ...(payload.phase === "routing" ? { isBusy: true, interrupt: null } : {}) };
     case "canvas": {
       const canvas = event.payload as ContractCanvas;
       return { ...current, canvas, changedBlockIds: changedBlocks(current.canvas, canvas) };
@@ -75,6 +75,7 @@ export const useCanvasRun = (api: KetchupEAgentAPI | null, threadId: string | nu
   const [view, setView] = useState<CanvasView>(initial);
   const runIdRef = useRef<string | null>(null);
   const lastSeq = useRef(0);
+  const isCanvas = useRef(false);
   const settled = useRef(onSettled);
   settled.current = onSettled;
 
@@ -85,13 +86,15 @@ export const useCanvasRun = (api: KetchupEAgentAPI | null, threadId: string | nu
 
   useEffect(() => {
     bind(null);
+    isCanvas.current = false;
     setView(initial);
     if (!api || !threadId) return;
     let cancelled = false;
     void api.openRun(threadId).then(async (open) => {
-      if (cancelled || open?.kind !== "canvas") return;
+      if (cancelled || lastSeq.current > 0 || open?.kind !== "canvas") return;
       const state = await api.loadCanvas(open.runId);
-      if (cancelled) return;
+      if (cancelled || lastSeq.current > 0) return;
+      isCanvas.current = true;
       bind(open.runId);
       setView({ ...initial, runId: open.runId, canvas: state.canvas, interrupt: state.interrupt, isBusy: open.status === "running" });
     });
@@ -103,16 +106,28 @@ export const useCanvasRun = (api: KetchupEAgentAPI | null, threadId: string | nu
   useEffect(() => {
     if (!api) return;
     return api.onAgentEvent((event: AgentStreamEvent) => {
-      if (event.runId !== runIdRef.current || event.seq <= lastSeq.current) return;
+      if (event.type === "workflow_changed") {
+        const payload = event.payload as { threadId: string; kind: string };
+        if (payload.threadId !== threadId || (event.runId === runIdRef.current && event.seq <= lastSeq.current)) return;
+        bind(event.runId);
+        lastSeq.current = event.seq;
+        isCanvas.current = payload.kind === "canvas";
+        setView(isCanvas.current ? { ...initial, runId: event.runId, isBusy: true, phase: "classifying" } : initial);
+        settled.current();
+        return;
+      }
+      if (!isCanvas.current || event.runId !== runIdRef.current || event.seq <= lastSeq.current) return;
       lastSeq.current = event.seq;
       setView((current) => reduceCanvasEvent(current, event));
       if (SETTLING_EVENTS.has(event.type)) settled.current();
     });
-  }, [api]);
+  }, [api, threadId, bind]);
 
   /** Binds this hook to a canvas run the page just started. */
   const attach = useCallback(
     (runId: string) => {
+      if (runIdRef.current === runId && lastSeq.current > 0) return;
+      isCanvas.current = true;
       bind(runId);
       setView({ ...initial, runId, isBusy: true, phase: "classifying" });
     },

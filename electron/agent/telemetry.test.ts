@@ -6,11 +6,12 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { PIPELINE_PROFILE, Tomato } from "../tomato/tomato.ts";
 import type { PolicyDecision } from "./contracts.ts";
-import { Harness } from "./harness.ts";
+import { ChatWorkflow } from "./chatWorkflow.ts";
 import { createFixtureClient } from "./modelClient.ts";
 import { ANSWER_PROMPT_VERSION, assignVariant, DEFAULT_POLICY_PROFILE, POLICY_VARIANTS } from "./policy.ts";
-import { createThread, ensureWorkspace, recordInteraction } from "./store.ts";
+import { createThread, ensureWorkspace, recordInteraction, createRun, setRunStatus } from "./store.ts";
 import { buildRunTrace, interactionScore, LangfuseExporter, retryAfterMs, traceIdFor } from "./telemetry.ts";
+import { readTrace, TraceWriter } from "./trace.ts";
 import { tomatoTools } from "./tools.ts";
 
 let temporary: string;
@@ -32,7 +33,7 @@ beforeAll(async () => {
   await tomato.registerCollection(docs, "work");
   const workspace = ensureWorkspace(db);
   const settled: string[] = [];
-  const harness = new Harness({
+  const harness = new ChatWorkflow({
     db,
     model: createFixtureClient({ decide: decisions, answer: "수당으로 정산합니다 [[e1]]" }),
     tools: tomatoTools(tomato, { mode: "keyword", topK: 8 }),
@@ -47,7 +48,7 @@ beforeAll(async () => {
   expect(settled).toEqual([`${runId}:completed`]);
   recordInteraction(db, runId, "accepted");
 
-  const maruHarness = new Harness({
+  const maruHarness = new ChatWorkflow({
     db,
     model: createFixtureClient({
       decide: [
@@ -254,4 +255,23 @@ describe("telemetry", () => {
     exporter.exportRun(db, runId);
     expect(await exporter.flush()).toEqual({ traces: 0, scores: 0 });
   });
+});
+
+
+it("does not export a mixed request after a local-only executor or raw handoff reasons in ops mode", () => {
+  const workspace = ensureWorkspace(db);
+  const id = createRun(db, { threadId: createThread(db, workspace.id).id, goal: "switch", kind: "agent", retrievalProfile: "test", policyProfile: "test", answerProfile: "test" });
+  const trace = new TraceWriter(db, id);
+  trace.record("run.started", "input", {});
+  const transition = structuredClone(readTrace(db, runId).find((event) => event.type === "policy.decided")!.payload.transition) as { decision: PolicyDecision };
+  transition.decision = { ...base, action: "HANDOFF", reasonCode: "MISSING_EVIDENCE", handoff: { workflow: "rag", reason: "Private reason user@example.com" } };
+  trace.record("policy.decided", "policy", { transition });
+  trace.record("run.failed", "runtime", { code: "CANCELLED", message: "old executor cancelled for handoff" });
+  setRunStatus(db, id, "completed");
+  const options = { userId: "test", identityKey: "key", contentMode: "ops" as const, environment: "test", tenantId: "test", resource: {} };
+  const built = buildRunTrace(db, id, options)!;
+  expect(JSON.stringify(built.payload)).not.toContain("user@example.com");
+  expect(JSON.stringify(built.payload)).not.toContain("old executor cancelled");
+  trace.record("run.started", "runtime", { localOnly: true });
+  expect(buildRunTrace(db, id, options)).toBeUndefined();
 });

@@ -1,473 +1,164 @@
 // @vitest-environment node
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AgentStreamEvent } from "../../src/app-types/Agent.types.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DatabaseSync } from "node:sqlite";
 import { openAgentDb } from "../db/openAgentDb.ts";
-import { PIPELINE_PROFILE, Tomato } from "../tomato/tomato.ts";
-import { AgentError, type PolicyDecision, type PolicyProfile, type PolicyState } from "./contracts.ts";
-import { Harness } from "./harness.ts";
-import { addMemory, confirmMemory, proposeMemory } from "./memory.ts";
-import { createFixtureClient, type FixtureScript } from "./modelClient.ts";
-import { ANSWER_PROMPT_VERSION, DEFAULT_POLICY_PROFILE, buildPolicyMessages, gatedDecision, smallTalkDecision } from "./policy.ts";
-import { ToolRegistry } from "./toolRegistry.ts";
-import { excludedMaruStorages, createThread, deleteThread, ensureWorkspace, getRun, inactiveCollections, listThreads, loadThread, setCollectionActive } from "./store.ts";
-import { tomatoTools, type SearchTools } from "./tools.ts";
-import { readTrace, transitions } from "./trace.ts";
-import { buildRunTrace } from "./telemetry.ts";
+import { Harness, type HarnessOptions } from "./harness.ts";
+import { WorkflowHandoff, type AgentWorkflow } from "./workflows.ts";
+import { createThread, ensureWorkspace, getRun, loadThread, setRunStatus } from "./store.ts";
+import { startWorkflowRun } from "./runLifecycle.ts";
+import { readTrace, TraceWriter } from "./trace.ts";
+import type { AgentStreamEvent } from "../../src/app-types/Agent.types.ts";
 
-const base = { taskDifficulty: 1, predictedSuccess: 0.8, evidenceSufficiency: 0.5, policyVersion: "orchestration-1" } as const;
-const search = (query: string): PolicyDecision => ({ ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "search_local_docs", query } });
-const answer: PolicyDecision = { ...base, action: "ANSWER", reasonCode: "ENOUGH_EVIDENCE" };
-
-let temporary: string;
-let tomato: Tomato;
-const db = openAgentDb(":memory:");
-const workspace = ensureWorkspace(db);
-
-function harness(script: FixtureScript, events: AgentStreamEvent[] = [], policy: PolicyProfile = DEFAULT_POLICY_PROFILE, maru?: NonNullable<SearchTools["maru"]>, trolley?: SearchTools["trolley"], toolRegistry?: ToolRegistry) {
-  return new Harness({
-    db,
-    model: createFixtureClient(script),
-    toolRegistry,
-    tools: { ...tomatoTools(tomato, { mode: "hybrid", topK: 8 }), ...(maru ? { maru } : {}), ...(trolley ? { trolley } : {}) },
-    profiles: { retrieval: PIPELINE_PROFILE, policy, answer: { modelAlias: "fixture", promptVersion: ANSWER_PROMPT_VERSION } },
-    activeCollections: () => ["work"],
-    emit: (event) => events.push(event),
-  });
+let db: DatabaseSync;
+let workspaceId: string;
+beforeEach(() => { db = openAgentDb(":memory:"); workspaceId = ensureWorkspace(db).id; });
+afterEach(() => { db.close(); });
+const settings = () => ({ baseURL: "https://example.test", modelAlias: "clef" });
+const input = (text = "hello", mode?: string) => ({ workspaceId, threadId: createThread(db, workspaceId).id, text, mode });
+function workflow(id: string, kind = id, work?: (runId: string) => Promise<void>): AgentWorkflow {
+  return { id, kind, description: `${id} task`,
+    start: vi.fn((request) => {
+      const { runId } = startWorkflowRun(db, { threadId: request.threadId, goal: request.text, kind, retrievalProfile: id, policyProfile: id, answerProfile: id }, request.runId);
+      return { runId, done: work ? work(runId) : Promise.resolve().then(() => { setRunStatus(db, runId, "waiting_user"); }) };
+    }),
+    resume: vi.fn((runId) => { setRunStatus(db, runId, "completed"); return { runId, done: Promise.resolve() }; }),
+    cancel: vi.fn((runId) => { setRunStatus(db, runId, "cancelled", "CANCELLED"); }),
+  };
 }
+function harness(flows: AgentWorkflow[], extra: Partial<HarnessOptions> = {}) {
+  return new Harness({ db, workflows: flows, route: async () => flows[0].id, routingSettings: settings, ...extra });
+}
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-beforeAll(async () => {
-  temporary = await mkdtemp(join(tmpdir(), "harness-"));
-  const documents = join(temporary, "docs");
-  await mkdir(documents);
-  await writeFile(join(documents, "handbook.md"), "# 인사 규정\n\n## 연차\n\n퇴직 시 미사용 연차는 퇴직일 기준으로 수당으로 정산한다.\n\n## 휴가\n\n경조사 휴가는 5일이다.\n");
-  tomato = new Tomato(join(temporary, "home"));
-  await tomato.registerCollection(documents, "work");
-});
-
-afterAll(async () => {
-  await rm(temporary, { recursive: true, force: true });
-});
-
-describe("harness", () => {
-  it.each(["llm", "gated", "always-search"] as const)("offers capabilities without a provider-name trigger under %s", async (strategy) => {
-    const thread = createThread(db, workspace.id);
-    let decisions = 0;
-    const calls: string[] = [];
-    const handle = harness({
-      decide: (state) => {
-        const prompt = buildPolicyMessages(state, DEFAULT_POLICY_PROFILE);
-        expect(prompt.prompt).toContain("List available business operations");
-        expect(state.userGoal).toBe("어떤 업무를 자동화할 수 있어?");
-        return decisions++ === 0
-          ? { ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "call_tool", toolId: "trolley/list_operations", arguments: {} } }
-          : answer;
-      },
-      answer: "조회 가능한 업무 목록입니다.",
-    }, [], { ...DEFAULT_POLICY_PROFILE, strategy }, undefined, {
-      call: async (tool) => { calls.push(tool); return { summary: "available operations", documents: [] }; },
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "어떤 업무를 자동화할 수 있어?" });
-    await handle.done;
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(calls).toEqual(["list_operations"]);
-  });
-
-  it("replans a failed read through another registered provider without retrying the failed tool or exporting its data", async () => {
-    const registry = new ToolRegistry();
-    const primary = vi.fn(async () => { throw new AgentError("TOOL_UNAVAILABLE", "offline"); });
-    const alternate = vi.fn(async () => ({ data: { price: 42 }, summary: "private-product-result" }));
-    for (const [id, execute] of [["primary/find", primary], ["replica/find", alternate]] as const) registry.register({
-      id, description: "Look up products in the same product catalog",
-      inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false }, execute,
-    });
-    const thread = createThread(db, workspace.id);
-    let decisions = 0;
-    const handle = harness({
-      decide: (state) => {
-        decisions += 1;
-        if (decisions === 1) return { ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "call_tool", toolId: "primary/find", arguments: { query: "private-product-query" } } };
-        if (decisions === 2) {
-          expect(state.lastObservation).toMatchObject({ kind: "tool_error", toolId: "primary/find" });
-          expect(state.failedTools).toEqual(["primary/find"]);
-          expect(state.availableTools?.map((tool) => tool.id)).toEqual(["replica/find"]);
-          expect(state.remaining.searches).toBe(2);
-          return { ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "call_tool", toolId: "replica/find", arguments: { query: "private-product-query" } } };
-        }
-        return answer;
-      },
-      answer: (input) => { expect(input.context).toContain("private-product-result"); return "private-final-answer"; },
-    }, [], { ...DEFAULT_POLICY_PROFILE, strategy: "always-search" }, undefined, undefined, registry)
-      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "Find product pricing" });
-    await handle.done;
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(primary).toHaveBeenCalledTimes(1);
-    expect(alternate).toHaveBeenCalledTimes(1);
-    const exported = JSON.stringify(buildRunTrace(db, handle.runId, { userId: "test", identityKey: "test", contentMode: "internal_full", environment: "test", tenantId: "test", resource: {} })?.payload);
-    expect(exported).toContain("[TOOL_ARGUMENTS_OMITTED]");
-    expect(exported).not.toMatch(/private-product-query|private-product-result|private-final-answer/);
-  });
-
-  it("answers a provider-free file request with cited MARU excerpts without downloading the full file", async () => {
-    const thread = createThread(db, workspace.id);
-    const document = { refId: "remote-excerpt", provider: "maru" as const, storageId: "group-a", path: "leave.pdf" };
-    const handle = harness({
-      decide: [{ ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "call_tool", toolId: "maru/find_storage", arguments: { query: "휴가" } } }, answer],
-      answer: "휴가는 5일입니다 [[e1]]",
-    }, [], DEFAULT_POLICY_PROFILE, {
-      call: async () => ({ summary: "search result", documents: [document], excerpts: [{ document, text: "휴가는 5일이다." }] }),
-      readDocument: async () => { throw new Error("must not download"); },
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "공유된 휴가 규정 파일을 찾아줘" });
-    await handle.done;
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(db.prepare("SELECT path FROM citations WHERE run_id = ?").get(handle.runId)).toMatchObject({ path: "maru:remote-excerpt" });
-    expect(loadThread(db, thread.id).messages.at(-1)?.citations).toMatchObject([{ evidenceId: "e1", title: "leave.pdf" }]);
-  });
-
-  it.each(["llm", "gated", "always-search"] as const)("uses Trolley capabilities instead of local search for %s policy", async (strategy) => {
-    const thread = createThread(db, workspace.id);
-    const calls: string[] = [];
-    let context = "";
-    const handle = harness({
-      decide: [{ ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "get_my_capabilities" } }, answer],
-      answer: (input) => { context = input.context; return "Trolley 연결이 준비되었습니다."; },
-    }, [], { ...DEFAULT_POLICY_PROFILE, strategy }, undefined, {
-      call: async (tool) => { calls.push(tool); return { summary: '{"role":"developer"}', documents: [] }; },
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "Trolley에서 무엇을 할 수 있어?" });
-    await handle.done;
-    expect(calls).toEqual(["get_my_capabilities"]);
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(context).toContain('trolley/get_my_capabilities result (untrusted data)');
-    expect(transitions(db, handle.runId)[0].state.trolleyAvailable).toBe(true);
-    expect(transitions(db, handle.runId)[0].observation).toMatchObject({ kind: "external", tool: "get_my_capabilities" });
-    const exported = JSON.stringify(buildRunTrace(db, handle.runId, { userId: "test", identityKey: "test", contentMode: "internal_full", environment: "test", tenantId: "test", resource: {} })?.payload);
-    expect(exported).toContain("[TROLLEY_RESULT_OMITTED]");
-    expect(exported).not.toContain('"role":"developer"');
-    expect(exported).not.toContain("Trolley 연결이 준비되었습니다.");
-  });
-
-  it("allows one schema repair while counting both attempts against the model budget", async () => {
-    let attempts = 0;
-    const thread = createThread(db, workspace.id);
-    const handle = harness({ decide: () => {
-      attempts += 1;
-      if (attempts === 1) throw new AgentError("INVALID_DECISION", "invalid policy schema");
-      return answer;
-    }, answer: "안녕하세요" }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "인사해줘" });
-    await handle.done;
-    expect(attempts).toBe(2);
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(readTrace(db, handle.runId).filter((event) => event.type === "model.started")).toHaveLength(3);
-    expect(readTrace(db, handle.runId).filter((event) => event.type === "model.completed")).toHaveLength(3);
-    expect(readTrace(db, handle.runId).find((event) => event.type === "model.completed")?.payload).toMatchObject({ code: "INVALID_DECISION", promptTokens: 0 });
-    expect(readTrace(db, handle.runId).filter((event) => event.type === "policy.decided")[0].payload).toMatchObject({ invalid: true, attempt: 1 });
-  });
-
-  it("cancels an ASK-waiting run and emits a fresh event without deleting its messages", async () => {
+describe("request Harness", () => {
+  it("creates one cancellable request before routing and preserves its message across automatic handoff", async () => {
     const events: AgentStreamEvent[] = [];
-    const thread = createThread(db, workspace.id);
-    const instance = harness({ decide: [{ ...base, action: "ASK", reasonCode: "MISSING_USER_INPUT", question: "고용 형태는?" }] }, events);
-    const handle = instance.startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산" });
-    await handle.done;
-    const lastSeq = events.at(-1)!.seq;
-    instance.cancelRun(handle.runId);
-    expect(getRun(db, handle.runId).status).toBe("cancelled");
-    expect(events.at(-1)).toMatchObject({ type: "failed", payload: { code: "CANCELLED" } });
-    expect(events.at(-1)!.seq).toBeGreaterThan(lastSeq);
-    expect(loadThread(db, thread.id).messages).toHaveLength(2);
-    expect(() => deleteThread(db, thread.id)).not.toThrow();
+    const chat = workflow("chat", "chat", async () => { throw new WorkflowHandoff("rag", "private evidence required"); });
+    const rag = workflow("rag", "agent");
+    const agent = harness([chat, rag], { emit: (event) => events.push(event) });
+    const request = input(); const result = agent.start(request);
+    expect(result.kind).toBe("routing");
+    expect(getRun(db, result.runId).status).toBe("running");
+    expect(chat.start).not.toHaveBeenCalled();
+    await agent.drain(result.runId);
+    expect(getRun(db, result.runId)).toMatchObject({ kind: "agent", status: "waiting_user" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM runs").get()?.n).toBe(1);
+    expect(loadThread(db, request.threadId).messages).toHaveLength(1);
+    expect(events.filter((event) => event.type === "workflow_changed").map((event) => event.payload)).toMatchObject([{ workflow: "chat" }, { workflow: "rag" }]);
+    expect(readTrace(db, result.runId).filter((event) => event.type === "model.completed")[0].payload).toMatchObject({ purpose: "routing", workflow: "chat" });
   });
 
-  it("searches MARU storages with local folders by default and cites both", async () => {
-    const thread = createThread(db, workspace.id);
-    const document = { refId: "maru-leave", provider: "maru" as const, storageId: "storage-a", storageName: "인사팀", path: "규정/휴가.hwp" };
-    const scopes: string[][] = [];
-    const handle = new Harness({
-      db,
-      model: createFixtureClient({ decide: [search("연차 정산"), answer], answer: "연차는 수당으로 정산합니다 [[e1]] [[e2]]" }),
-      tools: { ...tomatoTools(tomato, { mode: "hybrid", topK: 1 }), maru: {
-        call: async () => { throw new Error("chat search must not call find_storage directly"); },
-        readDocument: async () => { throw new Error("must not download"); },
-        searchExcerpts: async (_question, storageIds) => { scopes.push(storageIds); return [{ document, text: "MARU 연차 규정: 미사용 연차는 수당으로 정산한다." }]; },
-      } },
-      profiles: { retrieval: PIPELINE_PROFILE, policy: DEFAULT_POLICY_PROFILE, answer: { modelAlias: "fixture", promptVersion: ANSWER_PROMPT_VERSION } },
-      activeCollections: () => ["work"],
-      excludedMaruStorages: () => ["storage-off"],
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산 방법" });
-    await handle.done;
-    expect(scopes).toEqual([["storage-off"]]);
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    const paths = (db.prepare("SELECT path FROM citations WHERE run_id = ? ORDER BY evidence_id").all(handle.runId) as Array<{ path: string }>).map((row) => row.path);
-    expect(paths).toHaveLength(2);
-    expect(paths).toContain("maru:maru-leave");
-    expect(loadThread(db, thread.id).messages.at(-1)?.citations).toHaveLength(2);
+  it("rejects duplicate starts before asynchronous authorization and permits independent threads", async () => {
+    let authorize!: () => void;
+    const agent = harness([workflow("chat")], { authorizeThread: () => new Promise<void>((resolve) => { authorize = resolve; }) });
+    const request = input(); const first = agent.start(request);
+    expect(() => agent.start(request)).toThrow();
+    await tick(); authorize(); await agent.drain(first.runId);
+    const second = agent.start(input()); await tick(); authorize(); await agent.drain(second.runId);
+    expect(second.runId).not.toBe(first.runId);
   });
 
-  it("keeps MARU storages on until turned off without affecting local folder defaults", () => {
-    expect(excludedMaruStorages(db, workspace.id)).toEqual([]);
-    setCollectionActive(db, workspace.id, "maru:storage-x", true);
-    setCollectionActive(db, workspace.id, "maru:storage-y", false);
-    expect(excludedMaruStorages(db, workspace.id)).toEqual(["storage-y"]);
-    expect(inactiveCollections(db, workspace.id).has("work")).toBe(false);
-    setCollectionActive(db, workspace.id, "maru:storage-y", true);
-    expect(excludedMaruStorages(db, workspace.id)).toEqual([]);
+  it("cancels routing, ignores a late route and records the routing duration", async () => {
+    let finish!: (id: string) => void;
+    const flow = workflow("chat");
+    const agent = harness([flow], { route: () => new Promise<string>((resolve) => { finish = resolve; }) });
+    const { runId } = agent.start(input()); await tick();
+    await agent.cancel(runId); finish("chat"); await agent.drain(runId);
+    expect(flow.start).not.toHaveBeenCalled();
+    expect(getRun(db, runId).status).toBe("cancelled");
+    expect(readTrace(db, runId).find((event) => event.type === "model.completed")?.payload.code).toBe("CANCELLED");
   });
 
-  it.each([
-    ["skips storages turned off", "연차 정산 방법", ["storage-off"], [["storage-off"]]],
-    ["searches turned-off storages too when the question mentions MARU", "MARU에서 연차 정산 찾아줘", ["storage-off"], [[]]],
-    ["treats 공유 저장소 as an explicit MARU request", "공유 저장소에서 연차 정산 찾아줘", ["storage-off"], [[]]],
-  ] as const)("%s", async (_name, text, excluded, expected) => {
-    const thread = createThread(db, workspace.id);
-    const scopes: string[][] = [];
-    const handle = new Harness({
-      db,
-      model: createFixtureClient({ decide: [search("연차 정산"), answer], answer: "연차는 수당으로 정산합니다 [[e1]]" }),
-      tools: { ...tomatoTools(tomato, { mode: "hybrid", topK: 1 }), maru: {
-        call: async () => ({ summary: "", documents: [] }),
-        readDocument: async () => { throw new Error("must not download"); },
-        searchExcerpts: async (_question, storageIds) => { scopes.push(storageIds); throw new AgentError("TOOL_UNAVAILABLE", "MARU down"); },
-      } },
-      profiles: { retrieval: PIPELINE_PROFILE, policy: DEFAULT_POLICY_PROFILE, answer: { modelAlias: "fixture", promptVersion: ANSWER_PROMPT_VERSION } },
-      activeCollections: () => ["work"],
-      excludedMaruStorages: () => [...excluded],
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text });
-    await handle.done;
-    expect(scopes).toEqual(expected);
-    // A MARU failure leaves local evidence usable.
-    expect(getRun(db, handle.runId).status).toBe("completed");
+  it("does not launch workflows after authorization or routing failures", async () => {
+    for (const failure of ["authorization", "routing"]) {
+      const flow = workflow("chat");
+      const agent = harness([flow], failure === "authorization" ? { authorizeThread: async () => { throw new Error("denied"); } } : { route: async () => { throw new Error("offline"); } });
+      const { runId } = agent.start(input()); await agent.drain(runId);
+      expect(getRun(db, runId).status).toBe("failed"); expect(flow.start).not.toHaveBeenCalled();
+    }
   });
 
-  it("SEARCH → ANSWER with validated citation and trace", async () => {
+  it("explicit mode and command skip routing; waiting replies resume their persisted owner", async () => {
+    const chat = workflow("chat"), rag = workflow("rag", "agent");
+    const route = vi.fn(async () => "chat"); const agent = harness([chat, rag], { route });
+    for (const request of [input("question", "rag"), input("$rag question")]) {
+      const { runId } = agent.start(request); await agent.drain(runId);
+      agent.start({ ...request, text: "answer", mode: "chat" }); await agent.drain(runId);
+      expect(rag.resume).toHaveBeenCalledWith(runId, "answer");
+    }
+    expect(route).not.toHaveBeenCalled();
+    const invalid = input("hello", "missing"); expect(() => agent.start(invalid)).toThrow("등록되지 않은");
+    expect(() => agent.start({ ...input(), workspaceId: "other" })).toThrow("작업 공간");
+    expect(() => agent.start(input("  "))).toThrow("요청 내용");
+  });
+
+  it("bounds handoffs and rejects loops, unknown targets and ordinary failures without fallback", async () => {
+    for (const target of ["chat", "missing", "rag"]) {
+      const chat = workflow("chat", "chat", async () => { throw new WorkflowHandoff(target, "wrong workflow"); });
+      const rag = workflow("rag", "agent", async () => { throw new WorkflowHandoff("chat", "back"); });
+      const agent = harness([chat, rag]); const { runId } = agent.start(input()); await agent.drain(runId);
+      expect(getRun(db, runId).status).toBe("failed"); expect(chat.start).toHaveBeenCalledOnce();
+    }
+    const flows = ["a", "b", "c", "d"].map((id, index, ids) => workflow(id, id, async () => { throw new WorkflowHandoff(ids[index + 1], "next"); }));
+    const agent = harness(flows); const { runId } = agent.start(input()); await agent.drain(runId);
+    expect(getRun(db, runId).errorCode).toBe("BUDGET_EXCEEDED"); expect(flows[3].start).not.toHaveBeenCalled();
+    const broken = workflow("broken", "broken", async () => { throw new Error("timeout"); });
+    const fallback = workflow("fallback"); const other = harness([broken, fallback]); const result = other.start(input()); await other.drain(result.runId);
+    expect(fallback.start).not.toHaveBeenCalled();
+  });
+
+  it("drains an active executor before user correction, clears stale input and keeps monotonic events", async () => {
+    let finish!: () => void; let drain!: () => void;
     const events: AgentStreamEvent[] = [];
-    const thread = createThread(db, workspace.id);
-    const handle = harness({ decide: [search("미사용 연차 정산"), answer], answer: "미사용 연차는 수당으로 정산합니다 [[e1]] [[e9]]." }, events).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "퇴직 전 연차는 어떻게 정산하나?" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    const page = loadThread(db, thread.id);
-    expect(page.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-    expect(page.messages[1].content).toBe("미사용 연차는 수당으로 정산합니다 [[e1]].");
-    expect(page.messages[1].citations).toMatchObject([{ evidenceId: "e1", title: "인사 규정" }]);
-    const trajectory = transitions(db, handle.runId);
-    expect(trajectory.map((transition) => transition.decision.action)).toEqual(["SEARCH", "ANSWER"]);
-    expect(trajectory[1].state.evidence[0].evidenceId).toBe("e1");
-    expect(trajectory[1].state.lastObservation).toMatchObject({ kind: "search", effectiveMode: "keyword" });
-    expect(trajectory[1].state.signals).toMatchObject({ evidenceCount: 1, uniqueSourceCount: 1 });
-    expect(trajectory[0].observation).toMatchObject({ kind: "search", resultIds: ["e1"] });
-    expect(trajectory[1].outcome).toBe("success");
-    expect(events.some((event) => event.type === "text_delta")).toBe(true);
-    expect(events.filter((event) => event.type === "citation")).toHaveLength(1);
-
-    expect(readTrace(db, handle.runId).map((event) => event.type)).toContain("policy.decided");
+    const old = workflow("doc", "canvas", () => new Promise<void>((resolve) => { finish = resolve; }));
+    const next = workflow("excel_work");
+    old.cancel = vi.fn(async (id) => { setRunStatus(db, id, "cancelled"); await new Promise<void>((resolve) => { drain = resolve; }); finish(); });
+    const agent = harness([old, next], { emit: (event) => events.push(event), route: async (_text, _routes, _signal, context) => context.currentWorkflow ? "excel_work" : "doc" });
+    const request = input(); const { runId } = agent.start(request); await tick();
+    agent.forward({ runId, seq: 99, type: "text_delta", payload: { text: "old" } });
+    await agent.switchWorkflow(runId, "엑셀 집계가 필요해");
+    expect(() => agent.assertAvailable(runId)).toThrow("전환"); expect(next.start).not.toHaveBeenCalled();
+    drain(); await agent.drain(runId);
+    expect(next.start).toHaveBeenCalledOnce(); expect(getRun(db, runId)).toMatchObject({ kind: "excel_work", status: "waiting_user" });
+    expect(loadThread(db, request.threadId).messages).toHaveLength(2);
+    expect(events.map((event) => event.seq)).toEqual(events.map((_, index) => index + 1));
+    expect(events.some((event) => event.type === "failed")).toBe(false);
   });
 
-  it("ASK → waiting_user → resume → ANSWER keeps one run trajectory", async () => {
-    const thread = createThread(db, workspace.id);
-    const decide = (state: PolicyState): PolicyDecision => {
-      if (state.step === 1) return { ...base, action: "ASK", reasonCode: "MISSING_USER_INPUT", question: "정규직인가요, 계약직인가요?" };
-      if (state.previousDecisions.at(-1) === "ASK") return search("연차 정산");
-      return answer;
-    };
-    const first = harness({ decide, answer: "정산합니다 [[e1]]" }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산 알려줘" });
-    await first.done;
-    expect(getRun(db, first.runId).status).toBe("waiting_user");
-
-    const second = harness({ decide, answer: "정산합니다 [[e1]]" }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "정규직" });
-    await second.done;
-    expect(second.runId).toBe(first.runId);
-    expect(getRun(db, first.runId).status).toBe("completed");
-    const actions = transitions(db, first.runId).map((transition) => transition.decision.action);
-    expect(actions).toEqual(["ASK", "SEARCH", "ANSWER"]);
-    expect(transitions(db, first.runId)[1].state.lastObservation?.kind).toBe("user");
-    expect(loadThread(db, thread.id).messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  it("cancels during a handoff without starting the replacement", async () => {
+    let release!: () => void;
+    const old = workflow("chat"), next = workflow("doc", "canvas");
+    old.cancel = vi.fn(async (id) => { setRunStatus(db, id, "cancelled"); await new Promise<void>((resolve) => { release = resolve; }); });
+    const agent = harness([old, next]); const { runId } = agent.start(input()); await agent.drain(runId);
+    await agent.switchWorkflow(runId, "문서로 작성", "doc");
+    const cancelling = agent.cancel(runId); release(); await cancelling; await agent.drain(runId);
+    expect(next.start).not.toHaveBeenCalled(); expect(getRun(db, runId).status).toBe("cancelled");
   });
 
-  it("stops after a repeated empty search instead of exhausting the step budget", async () => {
-    const thread = createThread(db, workspace.id);
-    const repeated = search("available tools list");
-    const handle = harness({ decide: () => repeated }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "사용할 수 있는 tool들 reload 해줘" });
-    await handle.done;
-
-    const trajectory = transitions(db, handle.runId);
-    expect(trajectory.map((transition) => transition.decision.action)).toEqual(["SEARCH", "STOP"]);
-    expect(trajectory.at(-1)?.decision.reasonCode).toBe("BUDGET_LIMIT");
-    expect(trajectory[0].observation).toMatchObject({ kind: "search", resultIds: [] });
-    expect(readTrace(db, handle.runId).filter((event) => event.type === "tool.completed")).toHaveLength(1);
-    expect(getRun(db, handle.runId).status).toBe("abstained");
+  it("restores waiting ownership and refuses switching after original-file writes begin", async () => {
+    const old = workflow("daily_cash"), next = workflow("excel_work");
+    const first = harness([old, next]); const { runId } = first.start(input()); await first.drain(runId);
+    const restored = harness([old, next]);
+    new TraceWriter(db, runId).record("workflow.effect_started", "runtime", { localOnly: true });
+    await expect(restored.switchWorkflow(runId, "변경", "excel_work")).rejects.toThrow("원본 파일");
+    expect(old.cancel).not.toHaveBeenCalled(); restored.resume(runId, "확인"); await restored.drain(runId);
+    expect(getRun(db, runId).status).toBe("completed");
   });
 
-  it("runs the fixed policy with the same model client reserved for answer generation", async () => {
-    const thread = createThread(db, workspace.id);
-    const calls: string[] = [];
-    const profile: PolicyProfile = { ...DEFAULT_POLICY_PROFILE, strategy: "always-search", allowedActions: ["SEARCH", "ANSWER", "STOP"] };
-    const handle = harness({ decide: () => { throw new Error("fixed policy must not call the model"); }, answer: "정산합니다 [[e1]]", onCall: (call) => calls.push(call.purpose) }, [], profile)
-      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(transitions(db, handle.runId).map((transition) => transition.decision.action)).toEqual(["SEARCH", "ANSWER"]);
-    expect(calls).toEqual(["answer"]);
+  it("allocates trace sequences across overlapping writers", () => {
+    const flow = workflow("chat"); const result = flow.start(input());
+    const first = new TraceWriter(db, result.runId), second = new TraceWriter(db, result.runId);
+    expect(first.record("workflow.selected", "runtime", {})).toBe(1);
+    expect(second.record("workflow.selected", "runtime", {})).toBe(2);
+    expect(first.record("workflow.selected", "runtime", {})).toBe(3);
+    return result.done;
   });
 
-  it("gated policy searches without the model and asks it only when the evidence gate does not pass", async () => {
-    const thread = createThread(db, workspace.id);
-    const calls: string[] = [];
-    const profile: PolicyProfile = { ...DEFAULT_POLICY_PROFILE, strategy: "gated" };
-    const handle = harness({ decide: [answer], answer: "정산합니다 [[e1]]", onCall: (call) => calls.push(call.purpose) }, [], profile)
-      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 정산" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(transitions(db, handle.runId).map((transition) => transition.decision.action)).toEqual(["SEARCH", "ANSWER"]);
-    expect(calls).toEqual(["policy", "answer"]); // one keyword hit is below the gate, so the model decides step 2
-
-    const strong: PolicyState = { ...transitions(db, handle.runId)[1].state, lastObservation: { kind: "search", resultIds: ["e1"], effectiveMode: "hybrid", latencyMs: 1 }, signals: { evidenceCount: 3, uniqueSourceCount: 1, topEvidenceScore: 2 / 61 } };
-    expect(gatedDecision(strong, "gated-1")?.action).toBe("ANSWER");
-    expect(gatedDecision({ ...strong, signals: { evidenceCount: 3, uniqueSourceCount: 1, topEvidenceScore: 1 / 61 } }, "gated-1")).toBeUndefined();
-  });
-
-  it("answers a bare greeting without searching or a policy call", async () => {
-    const thread = createThread(db, workspace.id);
-    const calls: string[] = [];
-    const profile: PolicyProfile = { ...DEFAULT_POLICY_PROFILE, strategy: "gated" };
-    const handle = harness({ decide: [], answer: "안녕하세요!", onCall: (call) => calls.push(call.purpose) }, [], profile)
-      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "안녕?" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(transitions(db, handle.runId).map((transition) => transition.decision.action)).toEqual(["ANSWER"]);
-    expect(calls).toEqual(["answer"]);
-    expect(smallTalkDecision({ ...transitions(db, handle.runId)[0].state, userGoal: "안녕, 연차 규정 알려줘" }, "gated-1")).toBeUndefined();
-  });
-
-  it("calls MARU and gives its result to answer generation", async () => {
-    const thread = createThread(db, workspace.id);
-    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
-    let answerContext = "";
-    const browse: PolicyDecision = { ...base, action: "SEARCH", reasonCode: "MISSING_EVIDENCE", search: { tool: "browse_storage" } };
-    const handle = harness({
-      decide: [browse, answer],
-      answer: (input) => {
-        answerContext = input.context;
-        return "접근 가능한 스토리지는 1개입니다.";
-      },
-    }, [], DEFAULT_POLICY_PROFILE, {
-      call: async (tool, args) => {
-        calls.push({ tool, args });
-        return { summary: JSON.stringify({ storages: [{ storage_id: "s1", name: "공유 문서" }] }, null, 2), documents: [] };
-      },
-      readDocument: async () => { throw new Error("not used"); },
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "MARU 스토리지 목록 보여줘" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    expect(calls).toEqual([{ tool: "browse_storage", args: {} }]);
-    expect(answerContext).toContain('"name": "공유 문서"');
-    expect(transitions(db, handle.runId)[0].observation).toMatchObject({ kind: "external", tool: "browse_storage" });
-  });
-
-  it("renews and indexes a selected MARU document before answering from its body", async () => {
-    const thread = createThread(db, workspace.id);
-    const document = { refId: "abc123", provider: "maru" as const, storageId: "s1", storageName: "공유 문서", path: "handbook.md" };
-    const find: PolicyDecision = {
-      ...base,
-      action: "SEARCH",
-      reasonCode: "MISSING_EVIDENCE",
-      search: { tool: "find_storage", arguments: { query: "연차 정산" } },
-    };
-    const read: PolicyDecision = {
-      ...base,
-      action: "SEARCH",
-      reasonCode: "MISSING_EVIDENCE",
-      search: { tool: "read_external_document", ref_id: document.refId, query: "미사용 연차 정산" },
-    };
-    const imported = (await tomato.listSources(["work"]))[0];
-    const handle = harness({
-      decide: [find, read, answer],
-      answer: "문서 본문에 따르면 미사용 연차는 수당으로 정산합니다 [[e1]].",
-    }, [], DEFAULT_POLICY_PROFILE, {
-      call: async () => ({ summary: JSON.stringify({ results: [{ ref_id: document.refId, path: document.path }] }), documents: [document] }),
-      readDocument: async (selected) => {
-        expect(selected).toEqual(document);
-        return imported;
-      },
-    }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "MARU handbook 문서 본문에서 연차 정산을 확인해줘" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("completed");
-    const trajectory = transitions(db, handle.runId);
-    expect(trajectory.map((transition) => transition.decision.action)).toEqual(["SEARCH", "SEARCH", "ANSWER"]);
-    expect(trajectory[1].observation).toMatchObject({ kind: "search", resultIds: ["e1"] });
-    expect(trajectory[2].state.evidence[0]).toMatchObject({ title: "인사 규정" });
-  });
-
-  it("does not exceed the model-call budget for answer generation", async () => {
-    const thread = createThread(db, workspace.id);
-    const profile: PolicyProfile = { ...DEFAULT_POLICY_PROFILE, maxModelCalls: 1 };
-    const handle = harness({ decide: [answer], answer: "예산을 넘긴 답변" }, [], profile)
-      .startRun({ workspaceId: workspace.id, threadId: thread.id, text: "budget" });
-    await handle.done;
-
-    expect(getRun(db, handle.runId).status).toBe("abstained");
-    expect(transitions(db, handle.runId).at(-1)?.decision).toMatchObject({ action: "STOP", reasonCode: "BUDGET_LIMIT" });
-    expect(readTrace(db, handle.runId).filter((event) => event.type === "model.completed")).toHaveLength(1);
-  });
-
-  it("deletes a settled thread and its run data", async () => {
-    const thread = createThread(db, workspace.id);
-    const handle = harness({ decide: [search("연차"), answer], answer: "정산합니다 [[e1]]" }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "삭제할 대화" });
-    await handle.done;
-    deleteThread(db, thread.id);
-    expect(listThreads(db, workspace.id).some((item) => item.id === thread.id)).toBe(false);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE thread_id = ?").get(thread.id)).toMatchObject({ count: 0 });
-  });
-
-  it("keeps an answer that cites none of the retrieved evidence", async () => {
-    const thread = createThread(db, workspace.id);
-    const handle = harness({ decide: [search("연차"), answer], answer: "연결된 MCP는 MARU와 Trolley입니다." }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "어떤 MCP가 연결돼 있어?" });
-    await handle.done;
-    expect(getRun(db, handle.runId).status).toBe("completed");
-  });
-
-  it("uses confirmed memory in context and rejects answers without known evidence citations", async () => {
-    const id = proposeMemory(db, { workspaceId: workspace.id, kind: "preference", content: "답변은 존댓말로" });
-    confirmMemory(db, id);
-    const thread = createThread(db, workspace.id);
-    const handle = harness({ decide: [search("연차"), answer], answer: "근거 [[e7]]" }).startRun({ workspaceId: workspace.id, threadId: thread.id, text: "연차 존댓말" });
-    await handle.done;
-    expect(getRun(db, handle.runId)).toMatchObject({ status: "failed", errorCode: "INVALID_CITATION" });
-    expect(transitions(db, handle.runId)[0].state.selectedMemories[0].content).toBe("답변은 존댓말로");
-  });
-
-  it("stores the memories actually applied to an answer", async () => {
-    const scopedWorkspace = ensureWorkspace(db, "applied-context");
-    const ruleId = addMemory(db, scopedWorkspace.id, { kind: "preference", content: "불확실하면 확인 질문하기", pinned: true });
-    const factId = addMemory(db, scopedWorkspace.id, { kind: "fact", content: "답변은 존댓말로", pinned: true });
-    const thread = createThread(db, scopedWorkspace.id);
-    const events: AgentStreamEvent[] = [];
-    const handle = harness({ decide: [search("연차"), answer], answer: "정산합니다 [[e1]]" }, events)
-      .startRun({ workspaceId: scopedWorkspace.id, threadId: thread.id, text: "연차 정산" });
-    await handle.done;
-
-    expect(loadThread(db, thread.id).messages.at(-1)?.appliedContext).toEqual({
-      memories: [
-        { id: ruleId, kind: "preference", content: "불확실하면 확인 질문하기" },
-        { id: factId, kind: "fact", content: "답변은 존댓말로" },
-      ],
-    });
-    expect(events.at(-1)).toMatchObject({ type: "completed", payload: { appliedContext: { memories: [{ id: ruleId }, { id: factId }] } } });
-  });
-
-  it("cancel aborts the run", async () => {
-    const thread = createThread(db, workspace.id);
-    const events: AgentStreamEvent[] = [];
-    const instance = harness({ decide: async () => new Promise<PolicyDecision>(() => undefined) } as unknown as FixtureScript, events);
-    const handle = instance.startRun({ workspaceId: workspace.id, threadId: thread.id, text: "cancel" });
-    instance.cancelRun(handle.runId);
-    await handle.done;
-    expect(getRun(db, handle.runId).status).toBe("cancelled");
-    expect(events.at(-1)).toMatchObject({ type: "failed", payload: { code: "CANCELLED" } });
+  it("validates registrations and stops without leaving work running", async () => {
+    expect(() => harness([])).toThrow("required");
+    expect(() => harness([workflow("chat"), workflow("chat")])).toThrow("duplicate");
+    expect(() => harness([workflow("chat", "same"), workflow("doc", "same")])).toThrow("duplicate");
+    const flow = workflow("chat"); const agent = harness([flow]); const { runId } = agent.start(input());
+    await agent.stop(); expect(getRun(db, runId).status).toBe("cancelled"); expect(() => agent.start(input())).toThrow("signed out");
   });
 });

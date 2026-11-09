@@ -115,3 +115,20 @@ it("shows a friendly model failure while preserving actionable authentication me
   emit({ runId: "failed-auth", seq: 1, type: "failed", payload: { code: "MODEL_AUTH", message: "로그아웃 후 다시 인증해 주세요." } });
   expect(result.current.view.error).toContain("로그아웃 후 다시 인증해 주세요.");
 });
+
+
+it("moves between text and canvas ownership without mixing old text or resetting event order", () => {
+  const { api, emit } = fakeApi();
+  const { result } = renderHook(() => useAgentRun(api, "thread", () => undefined));
+  act(() => result.current.attach("run"));
+  emit({ runId: "run", seq: 1, type: "text_delta", payload: { text: "old draft" } });
+  emit({ runId: "run", seq: 2, type: "workflow_changed", payload: { threadId: "thread", kind: "canvas" } });
+  expect(result.current.view).toMatchObject({ runId: null, streamingText: "", isRunning: false });
+  emit({ runId: "run", seq: 3, type: "ask_user", payload: { interrupt: { type: "awaiting_edit" } } });
+  expect(result.current.view.waitingQuestion).toBeNull();
+  emit({ runId: "run", seq: 4, type: "workflow_changed", payload: { threadId: "thread", kind: "excel_work" } });
+  emit({ runId: "run", seq: 3, type: "failed", payload: { message: "stale" } });
+  expect(result.current.view).toMatchObject({ runId: "run", streamingText: "", isRunning: true, error: null });
+  emit({ runId: "other", seq: 5, type: "workflow_changed", payload: { threadId: "other-thread", kind: "canvas" } });
+  expect(result.current.view.runId).toBe("run");
+});
