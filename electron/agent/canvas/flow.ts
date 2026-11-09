@@ -8,10 +8,10 @@ import type { ContractCanvas } from "../../../src/app-types/Canvas.types.ts";
 import type { ChunkRecord, SourceRecord, TomatoSearch } from "../../tomato/tomato.ts";
 import { AgentError, LIMITS, type PolicyProfile } from "../contracts.ts";
 import type { ModelClient } from "../modelClient.ts";
-import { appendMessage, createRun, findOpenRun, getRun, getThread, setRunStatus } from "../store.ts";
+import { appendMessage, findOpenRun, getRun, getThread, setRunStatus } from "../store.ts";
 import { withTimeout } from "../tools.ts";
 import { readTrace, TraceWriter } from "../trace.ts";
-import { cancelWaitingRun, type RunHandle } from "../runLifecycle.ts";
+import { cancelWaitingRun, startWorkflowRun, type RunHandle } from "../runLifecycle.ts";
 import { DEFAULT_DOC_LABEL, getPreset, matchPresetByKeyword, matchPresetId, presetChoicesText, type DocPreset } from "./presets.ts";
 import { blockEditPrompt, CANVAS_PROMPT_VERSION, classifyPrompt, draftPrompt, parseJsonObject } from "./prompts.ts";
 import {
@@ -132,6 +132,7 @@ export class CanvasFlow {
   private readonly controllers = new Map<string, AbortController>();
   private stopped = false;
   private readonly pending = new Set<Promise<void>>();
+  private readonly pendingRuns = new Map<string, Promise<void>>();
   private readonly seqs = new Map<string, number>();
 
   constructor(options: CanvasFlowOptions) {
@@ -139,15 +140,14 @@ export class CanvasFlow {
   }
 
   /** Starts a canvas run in the thread: classify → bind → (ask) → ground → draft → awaiting_edit. */
-  start(input: StartCanvasInput): CanvasHandle {
+  start(input: StartCanvasInput & { runId?: string }): CanvasHandle {
     const { db } = this.options;
     const thread = getThread(db, input.threadId);
     if (thread.workspaceId !== input.workspaceId) throw new AgentError("INTERNAL", "대화의 작업 공간이 일치하지 않습니다.");
     if (!input.instruction.trim()) throw new AgentError("INTERNAL", "요청 내용을 입력하세요.");
-    if (findOpenRun(db, thread.id)) throw new AgentError("INTERNAL", "이 대화에 진행 중인 작업이 있습니다.");
+    if (!input.runId && findOpenRun(db, thread.id)) throw new AgentError("INTERNAL", "이 대화에 진행 중인 작업이 있습니다.");
     const instruction = input.instruction.trim();
-    const runId = createRun(db, { threadId: thread.id, goal: instruction, retrievalProfile: "canvas", policyProfile: CANVAS_PROMPT_VERSION, answerProfile: CANVAS_PROMPT_VERSION, kind: "canvas" });
-    appendMessage(db, { threadId: thread.id, runId, role: "user", content: instruction });
+    const { runId } = startWorkflowRun(db, { threadId: thread.id, goal: instruction, retrievalProfile: "canvas", policyProfile: CANVAS_PROMPT_VERSION, answerProfile: CANVAS_PROMPT_VERSION, kind: "canvas" }, input.runId);
     const trace = new TraceWriter(db, runId);
     trace.record("run.started", "input", { workspaceId: input.workspaceId, threadId: thread.id, kind: "canvas", canvasType: input.canvasType, anchorOnly: Boolean(input.anchorOnly) });
     const done = this.guard(runId, async (signal) => {
@@ -273,6 +273,8 @@ export class CanvasFlow {
     await Promise.allSettled([...this.pending]);
   }
 
+  async drain(runId: string): Promise<void> { await this.pendingRuns.get(runId); }
+
   cancel(runId: string): void {
     const controller = this.controllers.get(runId);
     if (controller) {
@@ -315,8 +317,9 @@ export class CanvasFlow {
         this.emit(runId, "failed", { code: failure.code, message: failure.message });
         this.settle(runId, status);
       })
-      .finally(() => { this.controllers.delete(runId); this.pending.delete(done); });
+      .finally(() => { this.controllers.delete(runId); this.pending.delete(done); this.pendingRuns.delete(runId); });
     this.pending.add(done);
+    this.pendingRuns.set(runId, done);
     return done;
   }
 

@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRunAction, getRun } from "./store.ts";
 import { WorkSourcesFlow, DAILY_CASH_ROUTE } from "./workSourcesFlow.ts";
-import { WorkflowDispatcher } from "./workflows.ts";
+import { Harness } from "./harness.ts";
 import { buildRunTrace } from "./telemetry.ts";
 
 it("persists input requests independently of the executor instance and excludes local runs from telemetry", async () => {
@@ -11,8 +11,10 @@ it("persists input requests independently of the executor instance and excludes 
   try {
     const workspace = ensureWorkspace(db); const thread = createThread(db, workspace.id);
     const flow = new WorkSourcesFlow(db, () => undefined);
-    const dispatcher = new WorkflowDispatcher(db, [{ ...DAILY_CASH_ROUTE, kind: "daily_cash", start: (input) => flow.start(input, "daily_cash"), resume: (id, text) => flow.resume(id, text), cancel: (id) => flow.cancel(id) }], async () => "daily_cash");
+    const dispatcher = new Harness({ db, workflows: [{ ...DAILY_CASH_ROUTE, kind: "daily_cash", start: (input) => flow.start(input, "daily_cash"), resume: (id, text) => flow.resume(id, text), cancel: (id) => flow.cancel(id) }], route: async () => "daily_cash", routingSettings: () => ({ baseURL: "https://example.test", modelAlias: "clef" }) });
     const result = await dispatcher.start({ threadId: thread.id, workspaceId: workspace.id, text: "오늘 자금일보 만들어줘" });
+    await dispatcher.drain(result.runId);
+    result.action = getRunAction(db, result.runId);
     expect(result.action?.type).toBe("work_sources");
     expect(getRunAction(db, result.runId)).toEqual(result.action);
     const restored = new WorkSourcesFlow(db, () => undefined);

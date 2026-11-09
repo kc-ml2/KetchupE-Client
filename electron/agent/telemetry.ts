@@ -94,7 +94,7 @@ export function buildRunTrace(
   if (!run) return undefined;
   const events = readTrace(db, runId);
   const started = events.find((event) => event.type === "run.started");
-  if (started?.payload.localOnly === true) return undefined;
+  if (events.some((event) => event.payload.localOnly === true)) return undefined;
   const answer = db.prepare("SELECT content FROM messages WHERE run_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1").get(runId) as { content: string } | undefined;
   const text = (value: string | undefined) => value === undefined
     ? undefined
@@ -120,7 +120,7 @@ export function buildRunTrace(
   });
   const actions = decisions.map((decision) => decision.action);
   const validated = events.find((event) => event.type === "answer.validated")?.payload;
-  const failed = events.find((event) => event.type === "run.failed")?.payload;
+  const failed = ["failed", "cancelled"].includes(run.status) ? events.filter((event) => event.type === "run.failed").at(-1)?.payload : undefined;
   const last = decisions.at(-1);
   const modelCalls = events.filter((event) => event.type === "model.completed");
   const tokens = modelCalls.reduce((sum, event) => sum + Number(event.payload.promptTokens ?? 0) + Number(event.payload.completionTokens ?? 0), 0);
@@ -195,6 +195,7 @@ export function buildRunTrace(
         : decision.search.tool === "read_external_document"
           ? { tool: decision.search.tool, ref_id: id(decision.search.ref_id), query: text(decision.search.query) }
         : { ...decision.search, ...("query" in decision.search ? { query: text(decision.search.query) } : {}) },
+    handoff: decision.handoff ? { workflow: decision.handoff.workflow, reason: usedExternal ? "[TOOL_DERIVED_REASON_OMITTED]" : text(decision.handoff.reason) } : undefined,
     question: text(decision.question),
     claimsToVerify: decision.claimsToVerify?.map((claim) => text(claim)),
     stopReason: text(decision.stopReason),

@@ -335,3 +335,18 @@ it("persists the cash form and records labeled totals instead of serialization",
   await flow.submit(runId, getRunAction(db, runId)!.id, { ...input, values: { ...input.values, cashChanges: '{"001:KRW":{"incoming":"10","outgoing":"0"}}', reset: "{}" } });
   expect(loadThread(db, threadId).messages.filter((message) => message.role === "user").at(-1)?.content).toBe("실제 입출금: 기업은행 (001:KRW) 입금 10, 출금 0\n보정 초기화: 확인 완료");
 });
+
+
+it("keeps the original submission drainable when a duplicate submission is rejected", async () => {
+  let finish!: (result: ToolResult) => void;
+  vi.mocked(tool.execute).mockImplementationOnce(() => new Promise<ToolResult>((resolve) => { finish = resolve; }));
+  const runId = start(); const actionId = getRunAction(db, runId)!.id;
+  const first = flow.submit(runId, actionId, input);
+  await vi.waitFor(() => expect(tool.execute).toHaveBeenCalledOnce());
+  await expect(flow.submit(runId, actionId, input)).rejects.toThrow("처리 중");
+  let drained = false;
+  const drain = flow.drain(runId).then(() => { drained = true; });
+  await Promise.resolve(); expect(drained).toBe(false);
+  finish(success()); await first; await drain;
+  expect(drained).toBe(true); expect(getRun(db, runId).status).toBe("completed");
+});

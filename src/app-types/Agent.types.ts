@@ -27,7 +27,7 @@ export type MessagePage = { messages: MessageRecord[]; hasMore: boolean };
 
 export type RunStatus = "running" | "waiting_user" | "completed" | "abstained" | "failed" | "cancelled";
 
-export type AgentStreamEventType = "status" | "text_delta" | "ask_user" | "citation" | "completed" | "failed" | "canvas";
+export type AgentStreamEventType = "workflow_changed" | "status" | "text_delta" | "ask_user" | "citation" | "completed" | "failed" | "canvas";
 
 export type CitationSummary = {
   evidenceId: string;
@@ -45,7 +45,7 @@ export type AgentStreamEvent = {
 
 /** auto (default) routes the message; any other mode selects a registered workflow ID. */
 export type StartRunInput = { threadId: string; workspaceId: string; text: string; mode?: string };
-/** Persisted workflow kind; built-ins are agent and canvas. */
+/** Persisted workflow kind; chat = general answer, agent = retrieval, canvas = document drafting. */
 export type RunKind = string;
 export type RunAction = { id: string; type: "work_sources"; title: string; question: string } | BusinessAction;
 export type StartRunResult = { runId: string; kind: RunKind; action?: RunAction; status?: RunStatus };
@@ -114,6 +114,7 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   startRun(input: StartRunInput): Promise<StartRunResult>;
   resumeRun(runId: string, text: string): Promise<void>;
   cancelRun(runId: string): Promise<void>;
+  switchWorkflow(runId: string, text: string, mode?: string): Promise<void>;
   onAgentEvent(listener: (event: AgentStreamEvent) => void): () => void;
   recordInteraction(runId: string, kind: InteractionKind): Promise<void>;
   openCitation(runId: string, evidenceId: string): Promise<void>;

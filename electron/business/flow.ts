@@ -2,12 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentStreamEvent, StartRunInput } from "../../src/app-types/Agent.types.ts";
+import type { AgentStreamEvent } from "../../src/app-types/Agent.types.ts";
 import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
 import { REVISE_REQUEST_TEXT } from "../../src/app-types/BusinessTool.types.ts";
-import { appendMessage, createRun, getRun, getRunAction, setRunStatus } from "../agent/store.ts";
+import { appendMessage, getRun, getRunAction, setRunStatus } from "../agent/store.ts";
 import { TraceWriter } from "../agent/trace.ts";
-import type { AgentWorkflow } from "../agent/workflows.ts";
+import { startWorkflowRun } from "../agent/runLifecycle.ts";
+import type { AgentWorkflow, WorkflowStartInput } from "../agent/workflows.ts";
 import { WorkSources } from "../work/sources.ts";
 import { businessInputSchema, type BusinessTool } from "./contracts.ts";
 
@@ -20,6 +21,7 @@ const fieldKey = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 export class BusinessFlow {
   private readonly tools = new Map<string, BusinessTool>();
   private readonly pending = new Set<Promise<void>>();
+  private readonly submissions = new Map<string, Promise<void>>();
   private readonly active = new Map<string, AbortController>();
   constructor(private readonly db: DatabaseSync, tools: BusinessTool[], private readonly outputDir: string,
     private readonly emit: (event: AgentStreamEvent) => void,
@@ -34,13 +36,12 @@ export class BusinessFlow {
 
   workflows(): AgentWorkflow[] {
     return [...this.tools.values()].map((tool) => ({ ...tool, kind: tool.id,
-      start: (input) => this.start(tool, input), resume: (id, text) => this.resume(id, text), cancel: (id) => this.cancel(id),
+      start: (input) => this.start(tool, input), resume: (id, text) => this.resume(id, text), cancel: async (id) => { this.cancel(id); await this.drain(id); },
     }));
   }
 
-  private start(tool: BusinessTool, input: StartRunInput) {
-    const runId = createRun(this.db, { threadId: input.threadId, goal: input.text, kind: tool.id, retrievalProfile: "local", policyProfile: `${tool.id}@${tool.version}`, answerProfile: "deterministic" });
-    appendMessage(this.db, { threadId: input.threadId, runId, role: "user", content: input.text });
+  private start(tool: BusinessTool, input: WorkflowStartInput) {
+    const { runId } = startWorkflowRun(this.db, { threadId: input.threadId, goal: input.text, kind: tool.id, retrievalProfile: "local", policyProfile: `${tool.id}@${tool.version}`, answerProfile: "deterministic" }, input.runId);
     new TraceWriter(this.db, runId).record("run.started", "runtime", { localOnly: true, toolId: tool.id, version: tool.version });
     let initial = emptyInput(), checkpoint: Record<string, unknown> | undefined;
     if (tool.editable) {
@@ -77,9 +78,11 @@ export class BusinessFlow {
   }
 
   submit(runId: string, actionId: string, raw: unknown): Promise<void> {
+    if (this.submissions.has(runId)) return Promise.reject(new Error("이미 처리 중인 입력 요청입니다."));
     const task = this.executeSubmission(runId, actionId, raw);
     this.pending.add(task);
-    void task.then(() => this.pending.delete(task), () => this.pending.delete(task));
+    this.submissions.set(runId, task);
+    void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
     return task;
   }
 
@@ -179,6 +182,7 @@ export class BusinessFlow {
         if (tool.updateSource) {
           const selected = input.files[tool.updateSource]; const original = files[tool.updateSource];
           if (selected?.length !== 1 || original?.length !== 1) throw new Error("갱신할 원본 XLSX를 하나 선택해야 합니다.");
+          new TraceWriter(this.db, runId).record("workflow.effect_started", "runtime", { localOnly: true, toolId: tool.id });
           await sources.replace(selected[0], original[0].fingerprint, result.file.bytes);
         }
         const artifacts = outputs.map((file) => ({ ...file, id: randomUUID() }));
@@ -208,6 +212,8 @@ export class BusinessFlow {
       if (getRun(this.db, runId).status === "running") this.retry(runId, error instanceof Error ? error.message : String(error));
     } finally { clearTimeout(timeout); this.active.delete(runId); }
   }
+
+  async drain(runId: string): Promise<void> { await this.submissions.get(runId)?.catch(() => undefined); }
 
   cancel(runId: string) {
     this.job(runId);

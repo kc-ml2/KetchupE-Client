@@ -86,6 +86,11 @@ const AgentPage = (): React.JSX.Element => {
   // Wraps whichever inline prompt (business input card or anchor choice) is waiting, so 이어가기 can bring it into view.
   const promptRef = useRef<HTMLDivElement>(null);
   const [stopping, setStopping] = useState(false);
+  const [changingWorkflow, setChangingWorkflow] = useState(false);
+  const [correction, setCorrection] = useState("");
+  const [switching, setSwitching] = useState(false);
+
+  useEffect(() => { setChangingWorkflow(false); setCorrection(""); }, [selectedId]);
   const awaitingContractRequest =
     location.state?.workflow === "doc" &&
     !view.runId &&
@@ -136,7 +141,7 @@ const AgentPage = (): React.JSX.Element => {
   }
 
   const canvasActive = Boolean(canvas.runId);
-  const busy = starting || stopping || view.isRunning || canvas.isBusy;
+  const busy = starting || stopping || switching || view.isRunning || canvas.isBusy;
   const agentPending = view.isRunning || view.waitingQuestion !== null;
   const canvasPending = canvas.isBusy || canvas.interrupt !== null;
   const activeRunId = agentPending
@@ -162,6 +167,20 @@ const AgentPage = (): React.JSX.Element => {
     } finally {
       setStopping(false);
     }
+  };
+
+  const changeWorkflow = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!activeRunId || !correction.trim() || switching) return;
+    setSwitching(true);
+    setStartError(null);
+    try {
+      await api.switchWorkflow(activeRunId, correction.trim());
+      setChangingWorkflow(false);
+      setCorrection("");
+    } catch (cause) {
+      setStartError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setSwitching(false); }
   };
 
   const continueWorkflow = () => {
@@ -557,6 +576,12 @@ const AgentPage = (): React.JSX.Element => {
                   >
                     {workflowStatus}
                   </span>
+                  {activeRunId && !starting && (
+                    <button type="button" disabled={stopping || switching || view.phase === "routing" || canvas.phase === "routing"} onClick={() => setChangingWorkflow((value) => !value)}
+                      aria-expanded={changingWorkflow} aria-controls="workflow-correction" className="rounded px-3 py-1 text-[#0066FF] disabled:opacity-40">
+                      작업 변경
+                    </button>
+                  )}
                   {canContinue && (
                     <button
                       type="button"
@@ -577,6 +602,17 @@ const AgentPage = (): React.JSX.Element => {
                     </button>
                   )}
                 </div>
+                {changingWorkflow && activeRunId && (
+                  <form id="workflow-correction" onSubmit={(event) => void changeWorkflow(event)} className="mb-3 flex flex-wrap items-end gap-2 rounded-lg border border-[#E4E4E7] dark:border-[#27272A] p-3">
+                    <label className="flex-1 min-w-48 text-sm text-[#18181B] dark:text-[#FAFAFA]">
+                      어떤 작업으로 바꿀까요?
+                      <input autoFocus value={correction} onChange={(event) => setCorrection(event.target.value)} maxLength={20000} disabled={switching}
+                        placeholder="예: 문서 작성이 아니라 엑셀 합계가 필요해요" className="mt-2 w-full rounded border border-[#D4D4D8] dark:border-[#52525B] bg-transparent p-2" />
+                    </label>
+                    <button type="submit" disabled={!correction.trim() || switching} className="rounded bg-[#0066FF] px-3 py-2 text-sm text-white disabled:opacity-40">변경하기</button>
+                    <button type="button" onClick={() => setChangingWorkflow(false)} className="rounded px-3 py-2 text-sm text-[#71717A]">닫기</button>
+                  </form>
+                )}
                 <form
                   onSubmit={submit}
                   className="flex items-end gap-2 p-2 rounded-xl border border-[#E4E4E7] dark:border-[#27272A]"

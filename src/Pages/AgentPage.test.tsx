@@ -33,6 +33,7 @@ function setup(openRun: Awaited<ReturnType<KetchupEAgentAPI["openRun"]>> = null)
     onCollectionsChanged: vi.fn(() => () => undefined),
     openRun: vi.fn().mockResolvedValue(openRun),
     loadCanvas: vi.fn().mockResolvedValue({ canvas: null, interrupt: { type: "awaiting_anchor_choice", candidates: [] } }),
+    switchWorkflow: vi.fn().mockResolvedValue(undefined),
     cancelRun: vi.fn().mockResolvedValue(undefined),
     resumeRun: vi.fn().mockResolvedValue(undefined),
     loadThread: vi.fn().mockResolvedValue({ messages: [], hasMore: false }),
@@ -269,4 +270,20 @@ describe("업무 탭의 계약서 작성 시작", () => {
       threadId: "new-thread", workspaceId: "default", text: "일일자금일보 작성하기", mode: "daily_cash",
     }));
   });
+});
+
+
+it("실행 중 작업 변경을 요청하고 같은 run의 새 실행 상태를 표시한다", async () => {
+  const api = setup({ runId: "agent-run", kind: "agent", status: "running" });
+  const bar = screen.getByRole("group", { name: "워크플로 상태" });
+  await waitFor(() => expect(within(bar).getByRole("status")).toHaveTextContent("다음 행동 결정 중"));
+  fireEvent.click(within(bar).getByRole("button", { name: "작업 변경" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "어떤 작업으로 바꿀까요?" }), { target: { value: "문서 작성이 아니라 엑셀 집계가 필요해요" } });
+  fireEvent.click(screen.getByRole("button", { name: "변경하기" }));
+  await waitFor(() => expect(api.switchWorkflow).toHaveBeenCalledWith("agent-run", "문서 작성이 아니라 엑셀 집계가 필요해요"));
+  expect(api.startRun).not.toHaveBeenCalled();
+  api.emit({ runId: "agent-run", seq: 1, type: "workflow_changed", payload: { threadId: "old-thread", kind: "excel_work" } });
+  api.emit({ runId: "agent-run", seq: 2, type: "ask_user", payload: { question: "파일을 선택하세요" } });
+  expect(within(bar).getByRole("status")).toHaveTextContent("답변 대기");
+  expect(screen.queryByRole("textbox", { name: "어떤 작업으로 바꿀까요?" })).not.toBeInTheDocument();
 });

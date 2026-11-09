@@ -43,7 +43,7 @@ beforeEach(async () => {
     return job.action.kind !== "extract" ? inspectWorkbook(book, job.fingerprint, job.action.sheet, job.action.kind === "inspect" ? job.action.headerRow : undefined) : extractRows(book, job.fingerprint, job.action.mapping);
   });
   flow = new WorkSourcesFlow(db, () => undefined);
-  registerWorkSourceHandlers({ db, assertSourcePaths: (paths: string[]) => assertPublicSources(privateRoot, paths), workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
+  registerWorkSourceHandlers({ db, harness: { assertAvailable: () => undefined }, assertSourcePaths: (paths: string[]) => assertPublicSources(privateRoot, paths), workSourcesFlow: flow, businessFlow: { artifactPath: mock.artifactPath } } as unknown as AgentRuntime, "worker");
 });
 afterEach(async () => { db.close(); mock.handlers.clear(); mock.read.mockReset(); mock.save.mockReset(); mock.artifactPath.mockReset(); mock.networkPath = false; await rm(folder, { recursive: true, force: true }); });
 

@@ -1,12 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { SelectedMemory } from "./contracts.ts";
 import { pinnedMemories, searchConfirmedMemories } from "./memory.ts";
-import { getWorkspace, recentMessages } from "./store.ts";
+import { getRun, getWorkspace, recentMessages } from "./store.ts";
+import type { RoutingContext } from "./router.ts";
 import { estimateTokens } from "../tomato/text.ts";
 
 export const MEMORY_CONTEXT_TOKEN_LIMIT = 1500;
 export const RECENT_MESSAGE_COUNT = 12;
 export const MEMORY_SEARCH_LIMIT = 5;
+
+export function selectRoutingContext(db: DatabaseSync, threadId: string): RoutingContext {
+  return { recentMessages: recentMessages(db, threadId, 6).map((message) => ({
+    role: message.role,
+    content: message.content.slice(0, 2000),
+    ...(message.runId ? { runKind: getRun(db, message.runId).kind } : {}),
+  })) };
+}
 
 export type ContextSelection = {
   memories: SelectedMemory[];

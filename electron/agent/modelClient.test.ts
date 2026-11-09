@@ -1,9 +1,23 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from "vitest";
 import { createLiteLLMClient, listModels, resolveModelAlias } from "./modelClient.ts";
-import { DEFAULT_POLICY_PROFILE } from "./policy.ts";
+import { DEFAULT_POLICY_PROFILE, GENERAL_ANSWER_SYSTEM, ANSWER_SYSTEM } from "./policy.ts";
 
 afterEach(() => vi.unstubAllGlobals());
+
+it.each(["general", "grounded"] as const)("sends the %s answer prompt to the generation model", async (answerMode) => {
+  const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "답변" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
+  vi.stubGlobal("fetch", fetcher);
+  const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
+  const events = [];
+  for await (const event of client.streamAnswer({ userGoal: "질문", context: "이전 답변", evidence: [], answerMode }, DEFAULT_POLICY_PROFILE, new AbortController().signal)) events.push(event);
+  const [, init] = fetcher.mock.calls[0];
+  const body = JSON.parse(String(init?.body));
+  expect(body.messages[0]).toEqual({ role: "system", content: answerMode === "general" ? GENERAL_ANSWER_SYSTEM : ANSWER_SYSTEM });
+  expect(body.messages[1].content).toContain("이전 답변");
+  expect(body.tools).toBeUndefined();
+  expect(events).toContainEqual({ type: "text_delta", text: "답변" });
+});
 
 it("omits temperature from LiteLLM requests", async () => {
   let body: Record<string, unknown> | undefined;

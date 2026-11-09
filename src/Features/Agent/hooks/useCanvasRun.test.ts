@@ -110,3 +110,15 @@ it("shows a friendly model failure without discarding the existing document", ()
   emit({ runId: "failed-model", seq: 2, type: "failed", payload: { code: "MODEL_PROTOCOL", message: "HTTP 400" } });
   expect(result.current.view).toMatchObject({ isBusy: false, canvas, error: "케찹이가 잠깐 쉬고 있어요. 잠시 후 다시 시도해 주세요." });
 });
+
+
+it("attaches a transferred canvas before its first payload and detaches when another workflow takes over", () => {
+  const { api, emit } = fakeApi();
+  const { result } = renderHook(() => useCanvasRun(api, "thread", () => undefined));
+  emit({ runId: "run", seq: 5, type: "workflow_changed", payload: { threadId: "thread", kind: "canvas" } });
+  emit({ runId: "run", seq: 6, type: "canvas", payload: canvas });
+  expect(result.current.view).toMatchObject({ runId: "run", isBusy: true, canvas: { canvas_id: "c1" } });
+  emit({ runId: "run", seq: 7, type: "workflow_changed", payload: { threadId: "thread", kind: "chat" } });
+  emit({ runId: "run", seq: 8, type: "ask_user", payload: { question: "text question" } });
+  expect(result.current.view).toMatchObject({ runId: null, canvas: null, interrupt: null, isBusy: false });
+});

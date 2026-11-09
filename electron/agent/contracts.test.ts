@@ -86,3 +86,15 @@ describe("normalizeBaseURL", async () => {
     expect(normalizeBaseURL("")).toBe("https://centinels.ml2-alpha.com/v1/");
   });
 });
+
+
+it("requires a registered, different handoff target and a bounded nonempty reason", () => {
+  const enabled = { ...state, workflow: { id: "chat", routes: [{ id: "chat", description: "general" }, { id: "rag", description: "lookup" }] } };
+  const handoff = { ...base, action: "HANDOFF", handoff: { workflow: "rag", reason: "Need company records" } };
+  expect(validateDecision(handoff, enabled).ok).toBe(true);
+  expect(validateDecision(handoff, state).ok).toBe(false);
+  expect(validateDecision({ ...handoff, handoff: { workflow: "chat", reason: "same" } }, enabled).ok).toBe(false);
+  expect(validateDecision({ ...handoff, handoff: { workflow: "missing", reason: "unknown" } }, enabled).ok).toBe(false);
+  expect(validateDecision({ ...handoff, handoff: { workflow: "rag", reason: " " } }, enabled).ok).toBe(false);
+  expect(validateDecision(handoff, enabled, ["ANSWER"]).ok).toBe(false);
+});
