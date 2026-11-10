@@ -146,7 +146,7 @@ it("draws dashed guides, reads a value at a given X and switches grid lines like
   expect([drawn.xAxis, ...[drawn.yAxis].flat()].map(axis => (axis!.splitLine as { show: boolean }).show)).toEqual([false, false, false]);
   expect(drawn.series[0]).toMatchObject({ markPoint: { data: [{ coord: [800, 1.48], label: { formatter: "Residue: X=800, Y=1.48" } }] }, markLine: { data: [{ xAxis: 800 }, { xAxis: 800, label: { formatter: "800" } }] } });
   expect(drawn.series[1]).toMatchObject({ markPoint: { data: [{ coord: [610, 1.15] }] }, markLine: { lineStyle: { type: "dashed" }, data: [{ xAxis: 610 }, { yAxis: 1, label: { formatter: "기준" } }] } });
-  expect(notes).toEqual(["Residue: X=800, Y=1.48", "Tmax: X=610, Y=1.15"]);
+  expect(notes).toEqual(["Residue: X=800, Y=1.48 · 요청 X=803에 가장 가까운 측정점 (X=800)", "Tmax: X=610, Y=1.15"]);
   expect(chartSvg(tga)).toContain("stroke-dasharray");
   tga.view = mergeView(tga.view, { charts: { "0": { grid: "dashed", referenceLines: [] } } });
   expect(tga.view.charts["0"]).not.toHaveProperty("referenceLines");
@@ -165,4 +165,11 @@ it("rejects guides that the chart cannot place", () => {
   expect(() => renderHtml(report(columns, sales, { type: "line" }, { annotations: [{ series: 0, kind: "valueAt", x: 2, label: "값", scope: "selectedData" }] }))).toThrow("숫자형 X축");
   expect(() => renderHtml(report(columns, sales, { type: "pie" }, { grid: "dashed" }))).toThrow("그리드·보조선");
   expect(() => renderHtml(report(columns, sales, { type: "bar" }, { grid: "dashed", referenceLines: [{ axis: "left", value: 110, label: "목표" }] }))).not.toThrow();
+});
+
+it("accepts the revision a model returns for 'show the Weight at 800℃' and tells it not to refuse", async () => {
+  const { revisionResponse, REVISION_SYSTEM } = await import("./revision.ts");
+  const parsed = revisionResponse.parse({ kind: "view", patch: { charts: { "0": { grid: "dashed", referenceLines: [{ axis: "x", value: 800 }], annotations: [{ series: 0, kind: "valueAt", x: 800, label: "Residue" }] } } } });
+  expect(parsed).toMatchObject({ kind: "view" });
+  for (const phrase of ["valueAt", "referenceLines", "가장 가까운 측정점", "unsupported로 거절하지 않는다"]) expect(REVISION_SYSTEM).toContain(phrase);
 });
