@@ -3,9 +3,10 @@ name: Build macOS
 on:
   workflow_dispatch:
 
-  push:
-    tags:
-      - "v*"
+  # 개발자 서명이 준비될 때까지 태그 푸시 자동 빌드를 꺼 둔다. 서명 설정 후 아래 주석을 해제한다.
+  # push:
+  #   tags:
+  #     - "v*"
 
 permissions:
   contents: read
