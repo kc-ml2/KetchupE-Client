@@ -54,6 +54,7 @@ export class Harness {
     if (!input.text.trim()) throw new AgentError("INTERNAL", "요청 내용을 입력하세요.");
     const open = findOpenRun(db, thread.id);
     if (open) {
+      if (input.baseArtifactId) throw new AgentError("INTERNAL", "현재 작업을 완료하거나 중단한 뒤 결과를 선택해 주세요.");
       this.resume(open.id, input.text);
       return this.result(open.id);
     }
@@ -70,7 +71,7 @@ export class Harness {
       await this.options.authorizeThread?.(thread.id, controller.signal);
       controller.signal.throwIfAborted();
       const id = explicit ?? await this.choose(runId, input.text, controller.signal);
-      await this.execute(runId, id, input.canvas, controller.signal);
+      await this.execute(runId, id, input.canvas, controller.signal, undefined, input.baseArtifactId);
     });
     return { runId, kind: "routing", status: "running" };
   }
@@ -232,7 +233,7 @@ export class Harness {
     }
   }
 
-  private async execute(runId: string, initialId: string, canvas: WorkflowStartInput["canvas"], signal: AbortSignal, reason?: string): Promise<void> {
+  private async execute(runId: string, initialId: string, canvas: WorkflowStartInput["canvas"], signal: AbortSignal, reason?: string, baseArtifactId?: string): Promise<void> {
     let id = initialId;
     while (true) {
       signal.throwIfAborted();
@@ -242,7 +243,7 @@ export class Harness {
       this.options.db.prepare("DELETE FROM run_actions WHERE run_id = ?").run(runId);
       new TraceWriter(this.options.db, runId).record("workflow.selected", "runtime", { workflow: id, kind: workflow.kind, reason });
       this.send(runId, "workflow_changed", { threadId: run.threadId, kind: workflow.kind, workflow: id, reason });
-      const handle = workflow.start({ runId, threadId: run.threadId, workspaceId: getThread(this.options.db, run.threadId).workspaceId, text: run.goal, mode: id, canvas });
+      const handle = workflow.start({ runId, threadId: run.threadId, workspaceId: getThread(this.options.db, run.threadId).workspaceId, text: run.goal, mode: id, canvas, baseArtifactId });
       if (handle.runId !== runId) throw new AgentError("INTERNAL", "Workflow did not adopt its request");
       try { await handle.done; return; }
       catch (error) {

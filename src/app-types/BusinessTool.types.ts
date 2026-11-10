@@ -19,13 +19,15 @@ export type BusinessAction = {
   fields: BusinessField[]; input: BusinessInput; lockedKeys?: string[];
   /** Files come only from the file picker and are not remembered as connected sources. */
   uploadOnly?: boolean;
+  revisionMode?: boolean;
 };
-export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string };
+export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string; revision?: number; preview?: boolean; baseArtifactId?: string; changes?: string[] };
 export interface BusinessToolAPI {
   submitBusinessInput(runId: string, actionId: string, input: BusinessInput): Promise<void>;
   listBusinessArtifacts(threadId: string): Promise<BusinessArtifact[]>;
   openBusinessArtifact(id: string): Promise<void>;
   saveBusinessArtifact(id: string): Promise<boolean>;
+  previewBusinessArtifact(id: string): Promise<string>;
 }
 /** Chat text sent by the "edit previous result" button: reopens the form instead of re-running with this text as a revision. */
 export const REVISE_REQUEST_TEXT = "이전 엑셀 결과를 수정하고 싶어. 추가 요청을 입력할게.";

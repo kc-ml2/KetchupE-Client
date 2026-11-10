@@ -6,7 +6,7 @@ import BusinessToolCard, { BusinessArtifacts } from "./BusinessToolCard";
 
 const file = { sourceId: "local", relativePath: "source.xlsx", name: "source.xlsx" };
 const action: BusinessAction = { id: "action", type: "business_tool", title: "일일자금일보", question: "자료를 지정하세요", fields: [{ key: "date", label: "기준일", type: "date", required: true }, { key: "source", label: "입출금 내역", type: "file", required: true }], input: { values: {}, files: {} } };
-const apiFixture = () => ({ listWorkSources: vi.fn().mockResolvedValue([{ id: "local" }]), listWorkFiles: vi.fn().mockResolvedValue([file]), submitBusinessInput: vi.fn().mockResolvedValue(undefined), pickWorkFiles: vi.fn().mockResolvedValue([]), listBusinessArtifacts: vi.fn().mockResolvedValue([]), openBusinessArtifact: vi.fn().mockResolvedValue(undefined), saveBusinessArtifact: vi.fn().mockResolvedValue(true) }) as unknown as KetchupEAgentAPI;
+const apiFixture = () => ({ listWorkSources: vi.fn().mockResolvedValue([{ id: "local" }]), listWorkFiles: vi.fn().mockResolvedValue([file]), submitBusinessInput: vi.fn().mockResolvedValue(undefined), pickWorkFiles: vi.fn().mockResolvedValue([]), previewBusinessArtifact: vi.fn().mockResolvedValue("data:image/png;base64,fixture"), listBusinessArtifacts: vi.fn().mockResolvedValue([]), openBusinessArtifact: vi.fn().mockResolvedValue(undefined), saveBusinessArtifact: vi.fn().mockResolvedValue(true) }) as unknown as KetchupEAgentAPI;
 
 const bindingField = { key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text" as const, required: true,
   accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "7580100" }, { key: "001234:USD", name: "기업_외화", currency: "USD", balance: "10" }] };
@@ -133,7 +133,7 @@ it("reloads completed artifacts and opens by artifact ID rather than renderer pa
   await waitFor(() => expect(api.listBusinessArtifacts).toHaveBeenCalled());
   vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "artifact", runId: "run", name: "일보.xlsx", toolId: "daily_cash", version: "1.0" }]);
   view.rerender(<BusinessArtifacts api={api} threadId="thread" running={false} />);
-  fireEvent.click(await screen.findByRole("button", { name: "일보.xlsx 열기 · v1.0" }));
+  fireEvent.click(await screen.findByRole("button", { name: "일보.xlsx 열기" }));
   expect(api.openBusinessArtifact).toHaveBeenCalledWith("artifact");
 });
 
@@ -156,10 +156,10 @@ it("offers Excel revision and disables it during a running job", async () => {
   const api = apiFixture(), onRevise = vi.fn();
   vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "result", runId: "run", name: "보고서.xlsx", toolId: "excel_work", version: "0.4" }]);
   const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevise={onRevise} />);
-  fireEvent.click(await screen.findByRole("button", { name: "엑셀 결과 수정하기" }));
-  expect(onRevise).toHaveBeenCalledTimes(1);
+  fireEvent.click(await screen.findByRole("button", { name: "이 결과 수정하기" }));
+  expect(onRevise).toHaveBeenCalledWith("result");
   view.rerender(<BusinessArtifacts api={api} threadId="thread" running={true} onRevise={onRevise} />);
-  expect(await screen.findByRole("button", { name: "엑셀 결과 수정하기" })).toBeDisabled();
+  expect(await screen.findByRole("button", { name: "이 결과 수정하기" })).toBeDisabled();
 });
 
 it.each([true, false, "저장할 수 없습니다"])("downloads a PNG by artifact ID and handles save result %s", async (result) => {
@@ -168,7 +168,7 @@ it.each([true, false, "저장할 수 없습니다"])("downloads a PNG by artifac
   let finish!: (saved: boolean) => void; let fail!: (error: Error) => void;
   vi.mocked(api.saveBusinessArtifact).mockReturnValue(new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
   render(<BusinessArtifacts api={api} threadId="thread" running={false} />);
-  const button = await screen.findByRole("button", { name: "일보.png 다운로드 · v1.0" });
+  const button = await screen.findByRole("button", { name: "일보.png 다운로드" });
   expect(screen.getAllByRole("button")).toHaveLength(1);
   fireEvent.click(button);
   expect(api.saveBusinessArtifact).toHaveBeenCalledWith("image");
@@ -277,4 +277,42 @@ it.each(["invalid", "null", '{"unknown":{"incoming":"12","outgoing":"3"}}'])("co
   fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
   await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
   expect(JSON.parse(vi.mocked(api.submitBusinessInput).mock.calls[0][2].values.cashChanges)).toEqual({ "001:KRW": { incoming: "10.5", outgoing: "0.5" }, "002:USD": { incoming: "0", outgoing: "0" } });
+});
+
+it("previews the current result, retains it while running and targets the chosen revision", async () => {
+  const api = apiFixture(), onRevise = vi.fn();
+  const items = [
+    { id: "old", runId: "one", name: "TGA_1.png", toolId: "excel_work", version: "0.4", revision: 1, preview: true },
+    { id: "new", runId: "two", name: "TGA_2.png", toolId: "excel_work", version: "0.4", revision: 2, preview: true, baseArtifactId: "old", changes: ["오른쪽 눈금 간격: 0.2"] },
+  ];
+  vi.mocked(api.listBusinessArtifacts).mockResolvedValue(items);
+  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevise={onRevise} />);
+  expect(await screen.findByRole("img", { name: /수정본 2 미리보기/ })).toHaveAttribute("src", "data:image/png;base64,fixture");
+  expect(screen.getByText("오른쪽 눈금 간격: 0.2")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "이 결과 수정하기" }));
+  expect(onRevise).toHaveBeenLastCalledWith("new");
+  fireEvent.click(screen.getByRole("button", { name: "이전 버전에서 수정" }));
+  expect(onRevise).toHaveBeenLastCalledWith("old");
+  fireEvent.change(screen.getByRole("combobox", { name: "결과 버전" }), { target: { value: "one" } });
+  expect(await screen.findByRole("img", { name: /수정본 1 미리보기/ })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "이 결과 수정하기" }));
+  expect(onRevise).toHaveBeenLastCalledWith("old");
+  view.rerender(<BusinessArtifacts api={api} threadId="thread" running onRevise={onRevise} />);
+  expect(screen.getByRole("img", { name: /수정본 1 미리보기/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "이 결과 수정하기" })).toBeDisabled();
+});
+
+it("always exposes a new revision input and lets confirmed criteria expand without losing edits", async () => {
+  const api = apiFixture();
+  const revisionAction: BusinessAction = { ...action, revisionMode: true, fields: [
+    { key: "request", label: "원래 요청", type: "text", required: true },
+    { key: "revision", label: "수정 요청", type: "text", required: false },
+  ], input: { files: {}, values: { request: "TGA 전체 측정값", revision: "" } } };
+  render(<BusinessToolCard api={api} runId="run" action={revisionAction} />);
+  expect(screen.getByLabelText("수정 요청")).toBeInTheDocument();
+  expect(screen.queryByLabelText("원래 요청 *")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("수정 요청"), { target: { value: "Tmax 표시" } });
+  fireEvent.click(screen.getByRole("button", { name: "기준 변경" }));
+  expect(screen.getByLabelText("원래 요청 *")).toHaveValue("TGA 전체 측정값");
+  expect(screen.getByLabelText("수정 요청")).toHaveValue("Tmax 표시");
 });

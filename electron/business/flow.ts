@@ -13,7 +13,7 @@ import { WorkSources } from "../work/sources.ts";
 import { businessInputSchema, businessTraceSchema, type BusinessTool } from "./contracts.ts";
 
 /** `confirmed` flips on the first accepted submission; until then every prefilled value (suggested files, today's date) stays editable. */
-type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean };
+type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean; baseArtifactId?: string; revision?: number };
 const emptyInput = (): BusinessInput => ({ values: {}, files: {} });
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fieldKey = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
@@ -44,19 +44,23 @@ export class BusinessFlow {
     const { runId } = startWorkflowRun(this.db, { threadId: input.threadId, goal: input.text, kind: tool.id, retrievalProfile: "local", policyProfile: `${tool.id}@${tool.version}`, answerProfile: "deterministic" }, input.runId);
     new TraceWriter(this.db, runId).record("run.started", "runtime", { localOnly: true, toolId: tool.id, version: tool.version });
     let initial = emptyInput(), checkpoint: Record<string, unknown> | undefined;
+    let fingerprints: Job["fingerprints"] = {}, baseArtifactId: string | undefined;
     if (tool.editable) {
-      const previous = this.db.prepare("SELECT j.payload FROM business_jobs j JOIN runs r ON r.id=j.run_id WHERE r.thread_id=? AND r.kind=? AND r.status='completed' ORDER BY r.created_at DESC LIMIT 1").get(input.threadId, tool.id);
+      if (input.baseArtifactId && !/^[a-f0-9-]{36}$/.test(input.baseArtifactId)) throw new Error("잘못된 수정 대상입니다.");
+      const previous = this.db.prepare("SELECT j.payload, a.id FROM business_jobs j JOIN runs r ON r.id=j.run_id JOIN business_artifacts a ON a.run_id=r.id WHERE r.thread_id=? AND r.kind=? AND r.status='completed' AND (? IS NULL OR a.id=?) ORDER BY r.created_at DESC, r.rowid DESC, a.rowid LIMIT 1").get(input.threadId, tool.id, input.baseArtifactId ?? null, input.baseArtifactId ?? null);
+      if (input.baseArtifactId && !previous) throw new Error("이 대화에서 완료한 결과만 수정할 수 있습니다.");
       if (previous) {
         const job = JSON.parse(String(previous.payload)) as Job;
+        fingerprints = job.fingerprints; baseArtifactId = String(previous.id);
         initial = { files: job.input.files, values: { request: job.input.values.request, format: job.input.values.format ?? "", revision: input.text === REVISE_REQUEST_TEXT ? "" : input.text } };
         checkpoint = job.checkpoint ? { excelState: job.checkpoint.excelState, clarifications: job.checkpoint.clarifications } : undefined;
       } else initial.values.request = input.text;
     }
     if (tool.defaults) initial.values = { ...initial.values, ...tool.defaults(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) };
-    this.save(runId, { toolId: tool.id, version: tool.version, input: initial, fingerprints: {}, fields: tool.fields, checkpoint });
+    this.save(runId, { toolId: tool.id, version: tool.version, input: initial, fingerprints, fields: tool.fields, checkpoint, baseArtifactId });
     if (tool.unavailableReason) { this.finish(runId, tool.unavailableReason, "abstained"); return { runId, done: Promise.resolve() }; }
-    this.ask(runId, tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
-    if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial) };
+    this.ask(runId, baseArtifactId ? "선택한 결과의 기준을 유지합니다. 바꾸고 싶은 내용을 입력해 주세요." : tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
+    if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial, input.text) };
     return { runId, done: Promise.resolve() };
   }
 
@@ -69,7 +73,7 @@ export class BusinessFlow {
       const pending = job.fields.find(field => job.pendingKeys?.includes(field.key) && field.type === "text");
       if (pending) input.values[pending.key] = text;
       else input.values.revision = [input.values.revision, text].filter(Boolean).join("\n");
-      return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, input) };
+      return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, input, text) };
     } else {
       appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: text });
       this.ask(runId, "입력 화면에서 확인 내용을 작성해 주세요. 확인되지 않은 대화 내용을 계산 입력으로 사용하지 않습니다.");
@@ -77,16 +81,16 @@ export class BusinessFlow {
     return { runId, done: Promise.resolve() };
   }
 
-  submit(runId: string, actionId: string, raw: unknown): Promise<void> {
+  submit(runId: string, actionId: string, raw: unknown, userText?: string): Promise<void> {
     if (this.submissions.has(runId)) return Promise.reject(new Error("이미 처리 중인 입력 요청입니다."));
-    const task = this.executeSubmission(runId, actionId, raw);
+    const task = this.executeSubmission(runId, actionId, raw, userText);
     this.pending.add(task);
     this.submissions.set(runId, task);
     void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
     return task;
   }
 
-  private async executeSubmission(runId: string, actionId: string, raw: unknown): Promise<void> {
+  private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string): Promise<void> {
     const job = this.job(runId);
     const tool = this.tools.get(job.toolId);
     if (!tool || tool.version !== job.version) throw new Error("업무 버전이 변경되었습니다. 현재 작업을 중단하고 새로 요청해 주세요.");
@@ -144,6 +148,7 @@ export class BusinessFlow {
       this.save(runId, job);
       new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "files" }, { startedAt: filesStarted });
       const result = await this.abortable(tool.execute({ values: input.values, files, checkpoint: job.checkpoint ?? {}, signal: controller.signal, changedKeys,
+        userText: userText ?? changedKeys.filter(key => key === "revision" || key === "revisionAnswer" || /^answer\d+$/.test(key)).map(key => input.values[key]).join("\n"),
         onTrace: (event) => {
           if (controller.signal.aborted) return;
           const safe = businessTraceSchema.parse(event);
@@ -170,10 +175,10 @@ export class BusinessFlow {
       else if (result.status === "completed") {
         if (!result.checks.length || result.checks.some((check) => check.passed !== true)) throw new Error("업무 검증을 통과하지 못했습니다.");
         const outputs = [result.file, ...(result.additionalFiles ?? [])];
-        if (outputs.length > 3 || new Set(outputs.map(file => file.name)).size !== outputs.length || outputs.reduce((size, file) => size + file.bytes.length, 0) > 60 * 1024 * 1024) throw new Error("출력 파일 수·이름·크기를 확인하세요.");
+        if (outputs.length > 14 || new Set(outputs.map(file => file.name)).size !== outputs.length || outputs.reduce((size, file) => size + file.bytes.length, 0) > 60 * 1024 * 1024) throw new Error("출력 파일 수·이름·크기를 확인하세요.");
         if (result.checkpoint && JSON.stringify(result.checkpoint).length > 1000000) throw new Error("업무 중간 상태가 너무 큽니다.");
         for (const file of outputs) {
-          if (!/^[^/\\:*?"<>|]{1,150}\.(?:xlsx|pdf|html)$/i.test(file.name) || [...file.name].some(char => char.charCodeAt(0) < 32) || !(file.bytes instanceof Uint8Array) || file.bytes.length > 20 * 1024 * 1024) throw new Error("잘못된 출력 파일입니다.");
+          if (!/^[^/\\:*?"<>|]{1,150}\.(?:xlsx|pdf|html|png|pptx)$/i.test(file.name) || [...file.name].some(char => char.charCodeAt(0) < 32) || !(file.bytes instanceof Uint8Array) || file.bytes.length > 20 * 1024 * 1024) throw new Error("잘못된 출력 파일입니다.");
           if (/\.xlsx$/i.test(file.name)) await this.abortable(this.validateWorkbook(file.bytes, result.validationSheet), controller.signal);
           else {
             if (!tool.validateOutput || tool.updateSource) throw new Error("이 업무는 XLSX 결과만 지원합니다.");
@@ -206,8 +211,10 @@ export class BusinessFlow {
           }
           controller.signal.throwIfAborted();
           this.db.exec("BEGIN"); transaction = true;
-          for (const file of artifacts) this.db.prepare("INSERT INTO business_artifacts (id, run_id, name, fingerprint, audit) VALUES (?, ?, ?, ?, ?)").run(file.id, runId, file.name, hash(file.bytes), JSON.stringify({ checks: result.checks, externalData: result.externalData ?? {} }));
+          job.revision = Number(this.db.prepare("SELECT COUNT(*) AS count FROM business_jobs j JOIN runs r ON r.id=j.run_id WHERE r.thread_id=? AND r.kind=? AND r.status='completed'").get(getRun(this.db, runId).threadId, tool.id)?.count ?? 0) + 1;
+          for (const file of artifacts) this.db.prepare("INSERT INTO business_artifacts (id, run_id, name, fingerprint, audit) VALUES (?, ?, ?, ?, ?)").run(file.id, runId, file.name, hash(file.bytes), JSON.stringify({ checks: result.checks, externalData: result.externalData ?? {}, preview: result.previews?.includes(file.name) ?? false }));
           if (result.checkpoint) { job.checkpoint = result.checkpoint; this.save(runId, job); }
+          else this.save(runId, job);
           this.finish(runId, message, "completed", false);
           this.db.exec("COMMIT"); transaction = false;
         } catch (error) {
@@ -235,9 +242,10 @@ export class BusinessFlow {
   async stop() { for (const id of this.active.keys()) this.cancel(id); await Promise.allSettled([...this.pending]); }
 
   artifacts(threadId: string): BusinessArtifact[] {
-    return this.db.prepare("SELECT a.id, a.run_id AS runId, a.name, j.payload FROM business_artifacts a JOIN runs r ON r.id = a.run_id JOIN business_jobs j ON j.run_id = r.id WHERE r.thread_id = ? AND r.status = 'completed' ORDER BY r.created_at").all(threadId).map((row) => {
+    return this.db.prepare("SELECT a.id, a.run_id AS runId, a.name, a.audit, j.payload FROM business_artifacts a JOIN runs r ON r.id = a.run_id JOIN business_jobs j ON j.run_id = r.id WHERE r.thread_id = ? AND r.status = 'completed' ORDER BY r.created_at, r.rowid, a.rowid").all(threadId).map((row) => {
       const job = JSON.parse(String(row.payload)) as Job;
-      return { id: String(row.id), runId: String(row.runId), name: String(row.name), toolId: job.toolId, version: job.version };
+      const audit = JSON.parse(String(row.audit));
+      return { id: String(row.id), runId: String(row.runId), name: String(row.name), toolId: job.toolId, version: job.version, revision: job.revision, baseArtifactId: job.baseArtifactId, preview: audit.preview === true, changes: audit.externalData?.changes };
     });
   }
   async artifactPath(id: string): Promise<string> {
@@ -286,7 +294,7 @@ export class BusinessFlow {
   }
   private ask(runId: string, question: string) {
     const job = this.job(runId);
-    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly };
+    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly, revisionMode: Boolean(job.baseArtifactId) };
     this.db.prepare("INSERT INTO run_actions (run_id, action) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET action = excluded.action").run(runId, JSON.stringify(action));
     setRunStatus(this.db, runId, "waiting_user");
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: question });

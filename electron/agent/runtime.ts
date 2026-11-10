@@ -3,7 +3,7 @@ import { createExcelTool } from "../excel/tool.ts";
 import { createExcelWorker, executeExcelJob } from "../excel/workerClient.ts";
 import type { ExcelJob } from "../excel/workerClient.ts";
 import type { ExcelJobs } from "../excel/tool.ts";
-import { printReportPdf } from "../excel/pdf.ts";
+import { printReportPdf, captureChartPng } from "../excel/pdf.ts";
 import { BusinessFlow } from "../business/flow.ts";
 import { businessTools } from "../business/registry.ts";
 import { executeBusinessJob } from "../business/workerClient.ts";
@@ -212,6 +212,8 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     ...excelJobs((job, signal) => executeExcelJob(excelWorkerPath, job, signal)),
     session: () => { const worker = createExcelWorker(excelWorkerPath); return { ...excelJobs(worker.run), close: worker.close }; },
     pdf: printReportPdf,
+    png: captureChartPng,
+    revise: (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "excel", maxOutputTokens: 2000 }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal),
   });
   const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), emit, async (bytes, sheet) => {
     await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
@@ -286,7 +288,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     workSourcesFlow,
     businessFlow,
     harness,
-    startMessage: async ({ threadId, workspaceId, text, mode }) => harness.start({ threadId, workspaceId, text, mode }),
+    startMessage: async (input) => harness.start(input),
     resumeRun: (runId, text) => { harness.resume(runId, text); },
     cancelRun: (runId) => harness.cancel(runId),
     collections: () => collections,

@@ -47,8 +47,11 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
   const [files, setFiles] = useState<WorkFile[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [editingCriteria, setEditingCriteria] = useState(false);
   const locked = new Set(action.lockedKeys ?? []);
-  const open = action.fields.filter((field) => !locked.has(field.key) && (field.key !== "revision" || Boolean(action.input.values.revision)));
+  const revising = action.revisionMode || action.fields.some(field => /^answer\d+$/.test(field.key) || field.key === "revisionAnswer");
+  const criteria = revising ? action.fields.filter(field => ["source", "request", "format"].includes(field.key) && !locked.has(field.key)) : [];
+  const open = action.fields.filter((field) => !locked.has(field.key) && (field.key !== "revision" || Boolean(action.input.values.revision) || action.revisionMode) && (editingCriteria || !criteria.includes(field)));
   const confirmed = action.fields.filter((field) => locked.has(field.key) && confirmedValue(field, input));
   const needsFiles = open.some((field) => field.type === "file");
   useEffect(() => {
@@ -71,6 +74,7 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
         <ul className="mt-2 grid gap-1 break-words">{confirmed.map((field) => <li key={field.key}>{field.label}: {confirmedValue(field, input)}</li>)}</ul>
       </details>}
       {error && <p role="alert" className="mb-4 rounded-lg bg-[#FEF2F2] px-3 py-2 text-xs leading-relaxed text-[#B91C1C] dark:bg-[#450A0A] dark:text-[#FCA5A5]">{error}</p>}
+      {criteria.length > 0 && <div className="mb-4 text-xs text-[#52525B] dark:text-[#A1A1AA]"><p className="whitespace-pre-wrap break-words">현재 기준: {criteria.map(field => confirmedValue(field, input)).filter(Boolean).join(" · ")}</p><button type="button" className={`${control} mt-2`} aria-expanded={editingCriteria} onClick={() => setEditingCriteria(value => !value)}>{editingCriteria ? "기준 접기" : "기준 변경"}</button></div>}
       <fieldset disabled={busy} className="grid min-w-0 gap-5">
         {open.map((field) => {
           const label = `${field.label}${field.required ? " *" : ""}`;
@@ -128,14 +132,27 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
   </div>;
 }
 
-export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: KetchupEAgentAPI; threadId: string; running: boolean; onRevise?: () => void }) {
+function ArtifactPreview({ api, item }: { api: KetchupEAgentAPI; item: BusinessArtifact }) {
+  const [image, setImage] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void api.previewBusinessArtifact(item.id).then(value => { if (alive) setImage(value); }).catch(() => { if (alive) setError("미리보기를 불러오지 못했습니다. 파일을 저장해 확인할 수 있습니다."); });
+    return () => { alive = false; };
+  }, [api, item.id]);
+  return image ? <img src={image} alt={`${item.name} · 수정본 ${item.revision ?? 1} 미리보기`} className="w-full h-auto rounded-lg border border-[#E4E4E7] bg-white dark:border-[#3F3F46]" /> : <p role="status" className="text-xs py-4">{error || "차트 미리보기 불러오는 중…"}</p>;
+}
+
+export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: KetchupEAgentAPI; threadId: string; running: boolean; onRevise?: (artifactId: string) => void }) {
   const [items, setItems] = useState<BusinessArtifact[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState("");
+  const [selectedRun, setSelectedRun] = useState("");
+  useEffect(() => { setItems([]); setSelectedRun(""); setError(""); setSaved(""); }, [threadId]);
   useEffect(() => {
-    let alive = true; setItems([]); setError(""); setSaved("");
-    void api.listBusinessArtifacts(threadId).then((result) => { if (alive) setItems(result); }).catch((cause) => { if (alive) setError(String(cause)); });
+    let alive = true;
+    void api.listBusinessArtifacts(threadId).then((result) => { if (alive) { setItems(result); if (!running) setSelectedRun(result.at(-1)?.runId ?? ""); } }).catch((cause) => { if (alive) setError(String(cause)); });
     return () => { alive = false; };
   }, [api, threadId, running]);
   const save = async (item: BusinessArtifact) => {
@@ -144,15 +161,22 @@ export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: K
     catch (cause) { setError(String(cause)); }
     finally { setSaving(false); }
   };
-  return <div className="flex flex-wrap gap-2 mb-2">
-    {items.map((item) => {
+  const results = items.filter((item, index) => items.findIndex(other => other.runId === item.runId) === index);
+  const selected = selectedRun || results.at(-1)?.runId;
+  const visible = items.filter(item => item.runId === selected);
+  const result = visible[0];
+  return <div className="grid gap-3 mb-2 w-full min-w-0" aria-label="업무 결과">
+    {results.length > 1 && <label className="text-xs">결과 버전 <select className={`${control} ml-2 max-w-full`} value={selected} onChange={event => setSelectedRun(event.target.value)}>{results.map((item, index) => <option key={item.runId} value={item.runId}>수정본 {item.revision ?? index + 1} · {item.name}</option>)}</select></label>}
+    {visible.filter(item => item.preview).map(item => <ArtifactPreview key={item.id} api={api} item={item} />)}
+    {result?.changes?.length ? <ul className="text-xs list-disc pl-5" aria-label="반영한 수정">{result.changes.map((change, index) => <li key={index}>{change}</li>)}</ul> : null}
+    <div className="flex flex-wrap gap-2">{visible.map((item) => {
       const isPng = /\.png$/i.test(item.name);
       return <span key={item.id} className="inline-flex gap-1"><button className={`${control} inline-flex items-center gap-1 text-black dark:text-white`} type="button" disabled={isPng && saving} onClick={() => {
         if (isPng) void save(item);
         else void api.openBusinessArtifact(item.id).catch((cause) => setError(String(cause)));
-      }}>{isPng ? <LuDownload aria-hidden /> : <LuFile aria-hidden />}{item.name} {isPng ? "다운로드" : "열기"} · v{item.version}</button>{!isPng && <button type="button" className={control} disabled={saving} aria-label={`${item.name} 저장`} onClick={() => void save(item)}><LuDownload aria-hidden /> 저장</button>}</span>;
-    })}
-    {onRevise && items.some(item => item.toolId === "excel_work") && <button type="button" className={control} disabled={running} onClick={onRevise}>엑셀 결과 수정하기</button>}
+      }}>{isPng ? <LuDownload aria-hidden /> : <LuFile aria-hidden />}{item.name} {isPng ? "다운로드" : "열기"}{item.revision ? ` · 수정본 ${item.revision}` : ""}</button>{!isPng && <button type="button" className={control} disabled={saving} aria-label={`${item.name} 저장`} onClick={() => void save(item)}><LuDownload aria-hidden /> 저장</button>}</span>;
+    })}</div>
+    {onRevise && result?.toolId === "excel_work" && <div className="flex flex-wrap gap-2"><button type="button" className={control} disabled={running} onClick={() => onRevise(result.id)}>이 결과 수정하기</button>{result.baseArtifactId && <button type="button" className={control} disabled={running} onClick={() => onRevise(result.baseArtifactId!)}>이전 버전에서 수정</button>}</div>}
     {saved && <p role="status">{saved}</p>}
     {error && <p role="alert">{error}</p>}
   </div>;

@@ -331,7 +331,8 @@ it("preserves results on export failure and changes format without rerunning the
   expect(result.status).toBe("needs_input");
   if (result.status !== "needs_input") throw new Error("not waiting");
   expect(result.checkpoint!.report).not.toHaveProperty("result");
-  expect(result.checkpoint!.excelState).toHaveProperty("latest.analysis.result");
+  expect(result.checkpoint!.excelState).not.toHaveProperty("latest");
+  expect(result.checkpoint!.excelState).toHaveProperty("resultHash");
   const calls = vi.mocked(deps.complete).mock.calls.length;
   vi.mocked(deps.export).mockRejectedValueOnce(new Error("재출력 실패"));
   const failedRetry = await tool.execute({ ...input, checkpoint: result.checkpoint!, values: { ...input.values, exportFormat: "xlsx" } });
@@ -374,7 +375,7 @@ it("profiles every file, supports multiple selection and protects every source d
   expect(exported.status).toBe("completed");
   if (exported.status === "completed") expect(Buffer.from(exported.file.bytes).toString()).toContain("[file2] 실험.xlsx / 기준: 2행");
   expect(deps.complete).toHaveBeenCalledTimes(2);
-  expect(deps.analyze).toHaveBeenCalledTimes(1);
+  expect(deps.analyze).toHaveBeenCalledTimes(2);
 });
 
 it("routes every worker job of a submission through one session and closes it, even on failure", async () => {
