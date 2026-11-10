@@ -152,14 +152,12 @@ it.each([undefined, "평균 대신 합계로 바꿔줘"])("shows the revision fi
   await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
 });
 
-it("offers Excel revision and disables it during a running job", async () => {
-  const api = apiFixture(), onRevise = vi.fn();
+it("points Excel revisions to the chat instead of a separate button", async () => {
+  const api = apiFixture();
   vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "result", runId: "run", name: "보고서.xlsx", toolId: "excel_work", version: "0.4" }]);
-  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevise={onRevise} />);
-  fireEvent.click(await screen.findByRole("button", { name: "이 결과 수정하기" }));
-  expect(onRevise).toHaveBeenCalledWith("result");
-  view.rerender(<BusinessArtifacts api={api} threadId="thread" running={true} onRevise={onRevise} />);
-  expect(await screen.findByRole("button", { name: "이 결과 수정하기" })).toBeDisabled();
+  render(<BusinessArtifacts api={api} threadId="thread" running={false} />);
+  expect(await screen.findByText("수정할 내용은 채팅에 입력하세요.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "이 결과 수정하기" })).not.toBeInTheDocument();
 });
 
 it.each([true, false, "저장할 수 없습니다"])("downloads a PNG by artifact ID and handles save result %s", async (result) => {
@@ -280,26 +278,34 @@ it.each(["invalid", "null", '{"unknown":{"incoming":"12","outgoing":"3"}}'])("co
 });
 
 it("previews the current result, retains it while running and targets the chosen revision", async () => {
-  const api = apiFixture(), onRevise = vi.fn();
+  const api = apiFixture(), onRevisionTargetChange = vi.fn();
   const items = [
     { id: "old", runId: "one", name: "TGA_1.png", toolId: "excel_work", version: "0.4", revision: 1, preview: true },
     { id: "new", runId: "two", name: "TGA_2.png", toolId: "excel_work", version: "0.4", revision: 2, preview: true, baseArtifactId: "old", changes: ["오른쪽 눈금 간격: 0.2"] },
   ];
   vi.mocked(api.listBusinessArtifacts).mockResolvedValue(items);
-  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevise={onRevise} />);
+  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onRevisionTargetChange={onRevisionTargetChange} />);
   expect(await screen.findByRole("img", { name: /수정본 2 미리보기/ })).toHaveAttribute("src", "data:image/png;base64,fixture");
   expect(screen.getByText("오른쪽 눈금 간격: 0.2")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "이 결과 수정하기" }));
-  expect(onRevise).toHaveBeenLastCalledWith("new");
-  fireEvent.click(screen.getByRole("button", { name: "이전 버전에서 수정" }));
-  expect(onRevise).toHaveBeenLastCalledWith("old");
+  expect(onRevisionTargetChange).toHaveBeenLastCalledWith(null);
   fireEvent.change(screen.getByRole("combobox", { name: "결과 버전" }), { target: { value: "one" } });
   expect(await screen.findByRole("img", { name: /수정본 1 미리보기/ })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "이 결과 수정하기" }));
-  expect(onRevise).toHaveBeenLastCalledWith("old");
-  view.rerender(<BusinessArtifacts api={api} threadId="thread" running onRevise={onRevise} />);
+  expect(onRevisionTargetChange).toHaveBeenLastCalledWith("old");
+  expect(screen.getByText("채팅에 수정 요청을 입력하면 수정본 1을 기준으로 다시 만듭니다.")).toBeInTheDocument();
+  view.rerender(<BusinessArtifacts api={api} threadId="thread" running onRevisionTargetChange={onRevisionTargetChange} />);
   expect(screen.getByRole("img", { name: /수정본 1 미리보기/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "이 결과 수정하기" })).toBeDisabled();
+});
+
+it("enlarges a preview with zoom controls and closes on Escape", async () => {
+  const api = apiFixture();
+  vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "chart", runId: "run", name: "TGA.png", toolId: "excel_work", version: "0.4", revision: 1, preview: true }]);
+  render(<BusinessArtifacts api={api} threadId="thread" running={false} />);
+  fireEvent.click(await screen.findByRole("button", { name: "TGA.png 크게 보기" }));
+  const dialog = screen.getByRole("dialog", { name: "TGA.png 확대 보기" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "확대" }));
+  expect(within(dialog).getByText("125%")).toBeInTheDocument();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 it("always exposes a new revision input and lets confirmed criteria expand without losing edits", async () => {
@@ -315,4 +321,17 @@ it("always exposes a new revision input and lets confirmed criteria expand witho
   fireEvent.click(screen.getByRole("button", { name: "기준 변경" }));
   expect(screen.getByLabelText("원래 요청 *")).toHaveValue("TGA 전체 측정값");
   expect(screen.getByLabelText("수정 요청")).toHaveValue("Tmax 표시");
+});
+
+it("shows results in a closable side panel instead of the chat column", async () => {
+  const api = apiFixture();
+  vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "artifact", runId: "run", name: "일보.xlsx", toolId: "daily_cash", version: "1.0" }]);
+  const onClose = vi.fn(); const onAvailableChange = vi.fn();
+  const view = render(<BusinessArtifacts api={api} threadId="thread" running={false} onClose={onClose} onAvailableChange={onAvailableChange} />);
+  expect(await screen.findByRole("complementary", { name: "업무 결과" })).toBeInTheDocument();
+  expect(onAvailableChange).toHaveBeenLastCalledWith(true);
+  fireEvent.click(screen.getByRole("button", { name: "업무 결과 닫기" }));
+  expect(onClose).toHaveBeenCalled();
+  view.rerender(<BusinessArtifacts api={api} threadId="thread" running={false} hidden onClose={onClose} onAvailableChange={onAvailableChange} />);
+  expect(screen.queryByRole("complementary", { name: "업무 결과" })).not.toBeInTheDocument();
 });

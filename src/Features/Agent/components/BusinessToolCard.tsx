@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LuArrowUp, LuCheck, LuChevronDown, LuDownload, LuFile, LuPaperclip, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronDown, LuDownload, LuFile, LuMaximize2, LuPanelRight, LuPaperclip, LuX, LuZoomIn, LuZoomOut } from "react-icons/lu";
 import type { KetchupEAgentAPI } from "@app-types/Agent.types";
 import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput } from "@app-types/BusinessTool.types";
 import type { WorkFile, WorkSource } from "@app-types/WorkSource.types";
@@ -140,10 +140,42 @@ function ArtifactPreview({ api, item }: { api: KetchupEAgentAPI; item: BusinessA
     void api.previewBusinessArtifact(item.id).then(value => { if (alive) setImage(value); }).catch(() => { if (alive) setError("미리보기를 불러오지 못했습니다. 파일을 저장해 확인할 수 있습니다."); });
     return () => { alive = false; };
   }, [api, item.id]);
-  return image ? <img src={image} alt={`${item.name} · 수정본 ${item.revision ?? 1} 미리보기`} className="w-full h-auto rounded-lg border border-[#E4E4E7] bg-white dark:border-[#3F3F46]" /> : <p role="status" className="text-xs py-4">{error || "차트 미리보기 불러오는 중…"}</p>;
+  const [zoom, setZoom] = useState<number | null>(null);
+  useEffect(() => {
+    if (zoom === null) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setZoom(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom]);
+  if (!image) return <p role="status" className="text-xs py-4">{error || "차트 미리보기 불러오는 중…"}</p>;
+  const alt = `${item.name} · 수정본 ${item.revision ?? 1} 미리보기`;
+  const zoomButton = "flex items-center justify-center w-8 h-8 rounded-lg text-[#E4E4E7] hover:bg-white/10 disabled:opacity-40";
+  return <>
+    <button type="button" onClick={() => setZoom(1)} aria-label={`${item.name} 크게 보기`} title="크게 보기" className="group relative block w-full cursor-zoom-in">
+      <img src={image} alt={alt} className="w-full h-auto rounded-lg border border-[#E4E4E7] bg-white dark:border-[#3F3F46]" />
+      <span aria-hidden className="absolute right-2 top-2 flex items-center justify-center w-7 h-7 rounded-md bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"><LuMaximize2 className="w-4 h-4" /></span>
+    </button>
+    {zoom !== null && <div role="dialog" aria-modal="true" aria-label={`${item.name} 확대 보기`} className="fixed inset-0 z-50 flex flex-col bg-black/85" onClick={() => setZoom(null)}>
+      <div className="flex items-center gap-1 px-4 h-12 text-sm text-[#E4E4E7]" onClick={event => event.stopPropagation()}>
+        <span className="mr-auto truncate">{item.name}{item.revision ? ` · 수정본 ${item.revision}` : ""}</span>
+        <button type="button" className={zoomButton} aria-label="축소" title="축소" disabled={zoom <= 0.5} onClick={() => setZoom(value => Math.max(0.5, (value ?? 1) - 0.25))}><LuZoomOut className="w-4 h-4" /></button>
+        <button type="button" className="min-w-14 rounded-lg px-2 h-8 hover:bg-white/10" title="화면에 맞추기" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
+        <button type="button" className={zoomButton} aria-label="확대" title="확대" disabled={zoom >= 4} onClick={() => setZoom(value => Math.min(4, (value ?? 1) + 0.25))}><LuZoomIn className="w-4 h-4" /></button>
+        <button type="button" className={zoomButton} aria-label="확대 보기 닫기" title="닫기" onClick={() => setZoom(null)}><LuX className="w-4 h-4" /></button>
+      </div>
+      <div className="flex-1 min-h-0 overflow-auto p-6" onClick={() => setZoom(null)}>
+        {/* 100% fits the screen; above that the image grows past it and the area scrolls. */}
+        <img src={image} alt={alt} onClick={event => event.stopPropagation()} style={zoom === 1 ? undefined : { width: `${zoom * 100}%`, maxWidth: "none", maxHeight: "none" }}
+          className={`mx-auto rounded-lg bg-white ${zoom === 1 ? "max-w-full max-h-full object-contain" : "h-auto"}`} />
+      </div>
+    </div>}
+  </>;
 }
 
-export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: KetchupEAgentAPI; threadId: string; running: boolean; onRevise?: (artifactId: string) => void }) {
+// Results live in a right-hand side panel (like the contract canvas) so they never cover the chat.
+// The component stays mounted while hidden so it keeps tracking results; the page shows a reopen button instead.
+// Revisions are requested from the chat input. Picking an older Excel version here makes the next chat request revise that version.
+export function BusinessArtifacts({ api, threadId, running, hidden = false, onClose, onAvailableChange, onRevisionTargetChange }: { api: KetchupEAgentAPI; threadId: string; running: boolean; hidden?: boolean; onClose?: () => void; onAvailableChange?: (available: boolean) => void; onRevisionTargetChange?: (artifactId: string | null) => void }) {
   const [items, setItems] = useState<BusinessArtifact[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -165,7 +197,20 @@ export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: K
   const selected = selectedRun || results.at(-1)?.runId;
   const visible = items.filter(item => item.runId === selected);
   const result = visible[0];
-  return <div className="grid gap-3 mb-2 w-full min-w-0" aria-label="업무 결과">
+  const available = items.length > 0 || Boolean(error);
+  useEffect(() => { onAvailableChange?.(available); }, [available, onAvailableChange]);
+  const olderTarget = result?.toolId === "excel_work" && selected !== results.at(-1)?.runId ? result.id : null;
+  useEffect(() => { onRevisionTargetChange?.(olderTarget); }, [olderTarget, onRevisionTargetChange]);
+  if (!available || hidden) return null;
+  return <aside className="relative flex w-[40%] flex-none flex-col min-w-[360px] max-w-[75vw] min-h-0 border-l border-[#E4E4E7] dark:border-[#27272A] bg-white dark:bg-[#0F0F0F]" aria-label="업무 결과">
+    <div className="flex items-center justify-between h-[60px] px-4 border-b border-[#E4E4E7] dark:border-[#27272A]">
+      <div className="flex items-center gap-2 min-w-0">
+        <LuPanelRight aria-hidden className="w-5 h-5 flex-shrink-0 text-[#18181B] dark:text-[#FAFAFA]" />
+        <span className="text-base font-semibold truncate text-[#18181B] dark:text-[#FAFAFA]">업무 결과</span>
+      </div>
+      {onClose && <button type="button" onClick={onClose} title="닫기" aria-label="업무 결과 닫기" className="flex items-center justify-center w-8 h-8 flex-shrink-0 rounded-lg text-[#71717A] hover:text-[#18181B] hover:bg-[#F4F4F5] dark:hover:text-[#FAFAFA] dark:hover:bg-[#262626] transition-colors"><LuX className="w-4 h-4" /></button>}
+    </div>
+    <div className="grid content-start gap-3 flex-1 min-h-0 overflow-y-auto p-4 w-full min-w-0 text-[#18181B] dark:text-[#FAFAFA]">
     {results.length > 1 && <label className="text-xs">결과 버전 <select className={`${control} ml-2 max-w-full`} value={selected} onChange={event => setSelectedRun(event.target.value)}>{results.map((item, index) => <option key={item.runId} value={item.runId}>수정본 {item.revision ?? index + 1} · {item.name}</option>)}</select></label>}
     {visible.filter(item => item.preview).map(item => <ArtifactPreview key={item.id} api={api} item={item} />)}
     {result?.changes?.length ? <ul className="text-xs list-disc pl-5" aria-label="반영한 수정">{result.changes.map((change, index) => <li key={index}>{change}</li>)}</ul> : null}
@@ -176,8 +221,9 @@ export function BusinessArtifacts({ api, threadId, running, onRevise }: { api: K
         else void api.openBusinessArtifact(item.id).catch((cause) => setError(String(cause)));
       }}>{isPng ? <LuDownload aria-hidden /> : <LuFile aria-hidden />}{item.name} {isPng ? "다운로드" : "열기"}{item.revision ? ` · 수정본 ${item.revision}` : ""}</button>{!isPng && <button type="button" className={control} disabled={saving} aria-label={`${item.name} 저장`} onClick={() => void save(item)}><LuDownload aria-hidden /> 저장</button>}</span>;
     })}</div>
-    {onRevise && result?.toolId === "excel_work" && <div className="flex flex-wrap gap-2"><button type="button" className={control} disabled={running} onClick={() => onRevise(result.id)}>이 결과 수정하기</button>{result.baseArtifactId && <button type="button" className={control} disabled={running} onClick={() => onRevise(result.baseArtifactId!)}>이전 버전에서 수정</button>}</div>}
+    {result?.toolId === "excel_work" && <p className="text-xs text-[#71717A] dark:text-[#A1A1AA]">{olderTarget ? `채팅에 수정 요청을 입력하면 ${result.revision ? `수정본 ${result.revision}` : "선택한 버전"}을 기준으로 다시 만듭니다.` : "수정할 내용은 채팅에 입력하세요."}</p>}
     {saved && <p role="status">{saved}</p>}
     {error && <p role="alert">{error}</p>}
-  </div>;
+    </div>
+  </aside>;
 }
