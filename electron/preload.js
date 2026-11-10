@@ -8,6 +8,7 @@ function agentAPI(sessionId) {
   listBusinessArtifacts: (threadId) => invoke('business:artifacts', threadId),
   openBusinessArtifact: (id) => invoke('business:openArtifact', id),
   saveBusinessArtifact: (id) => invoke('business:saveArtifact', id),
+  previewBusinessArtifact: (id) => invoke('business:previewArtifact', id),
   submitWorkSelection: (runId, actionId, selection) => invoke('work:submitSelection', runId, actionId, selection),
   pickWorkSources: (kind) => invoke('work:pickSources', kind),
   pickWorkFiles: (multiple, upload) => invoke('work:pickFiles', multiple, upload),

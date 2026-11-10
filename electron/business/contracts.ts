@@ -4,6 +4,7 @@ import type { WorkflowRoute } from "../agent/router.ts";
 
 export const businessTraceSchema = z.object({
   phase: z.enum(["files", "profile", "model", "analysis", "export", "error"]), durationMs: z.number().nonnegative(),
+  operation: z.enum(["revision"]).optional(),
   attempt: z.number().int().nonnegative().optional(), rowCount: z.number().int().nonnegative().optional(),
   outputBytes: z.number().int().nonnegative().optional(),
   promptTokens: z.number().nonnegative().optional(), completionTokens: z.number().nonnegative().optional(),
@@ -18,7 +19,7 @@ export const businessInputSchema = z.object({
 }).strict();
 export type ToolResult =
   | { status: "needs_input"; replaceFields?: boolean; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
-  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
+  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; previews?: string[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
   | { status: "failed"; message: string; code?: string };
 export type BusinessTool = WorkflowRoute & {
   version: string;
@@ -43,6 +44,7 @@ export type BusinessTool = WorkflowRoute & {
     checkpoint: Record<string, unknown>;
     signal: AbortSignal;
     changedKeys?: string[];
+    userText?: string;
     onTrace?: (event: BusinessTrace) => void;
     onProgress?: (phase: string) => void;
   }) => Promise<ToolResult>;

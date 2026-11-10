@@ -44,7 +44,7 @@ export type AgentStreamEvent = {
 };
 
 /** auto (default) routes the message; any other mode selects a registered workflow ID. */
-export type StartRunInput = { threadId: string; workspaceId: string; text: string; mode?: string };
+export type StartRunInput = { threadId: string; workspaceId: string; text: string; mode?: string; baseArtifactId?: string };
 /** Persisted workflow kind; chat = general answer, agent = retrieval, canvas = document drafting. */
 export type RunKind = string;
 export type RunAction = { id: string; type: "work_sources"; title: string; question: string } | BusinessAction;

@@ -165,3 +165,16 @@ it("uploads picked files for this session without registering them as connected 
   expect(invoke("listSources")).toHaveLength(0);
   expect(await invoke("inspect", file)).toMatchObject({ sheet: "자료" });
 });
+
+it("returns a verified PNG preview by ID without exposing its local path", async () => {
+  const source = join(folder, "preview.png");
+  const bytes = await (await import("sharp")).default({ create: { width: 2, height: 2, channels: 4, background: "white" } }).png().toBuffer();
+  await writeFile(source, bytes);
+  mock.artifactPath.mockResolvedValue(source);
+  const preview = await mock.handlers.get("business:previewArtifact")!({}, artifactId);
+  expect(preview).toBe(`data:image/png;base64,${bytes.toString("base64")}`);
+  expect(preview).not.toContain(folder);
+  await expect(mock.handlers.get("business:previewArtifact")!({}, "../../other")).rejects.toThrow();
+  mock.artifactPath.mockResolvedValue(join(folder, "preview.html"));
+  await expect(mock.handlers.get("business:previewArtifact")!({}, artifactId)).rejects.toThrow("PNG");
+});

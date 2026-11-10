@@ -1,4 +1,4 @@
-import { copyFile } from "node:fs/promises";
+import { copyFile, readFile } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { z } from "zod";
@@ -16,6 +16,14 @@ const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: string, handle: typeof ipcMain.handle = ipcMain.handle.bind(ipcMain), assertActive: () => void = () => undefined): void {
   handle("business:submit", (_event, runId: unknown, actionId: unknown, input: unknown) => { const id = z.string().min(1).parse(runId); runtime.harness.assertAvailable(id); return runtime.businessFlow.submit(id, z.string().min(1).parse(actionId), input); });
   handle("business:artifacts", (_event, threadId: unknown) => runtime.businessFlow.artifacts(z.string().min(1).parse(threadId)));
+  handle("business:previewArtifact", async (_event, id: unknown) => {
+    const path = await runtime.businessFlow.artifactPath(z.string().uuid().parse(id));
+    if (extname(path).toLowerCase() !== ".png") throw new Error("PNG 결과만 미리볼 수 있습니다.");
+    const bytes = await readFile(path);
+    if (bytes.length > 20 * 1024 * 1024 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error("잘못된 미리보기입니다.");
+    assertActive();
+    return `data:image/png;base64,${bytes.toString("base64")}`;
+  });
   handle("business:openArtifact", async (_event, id: unknown) => {
     const path = await runtime.businessFlow.artifactPath(z.string().uuid().parse(id));
     assertActive();

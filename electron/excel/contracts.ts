@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { EXCEL_LIMITS as L, ExcelError } from "./limits.ts";
 import type { RowSources } from "./sources.ts";
+import { reportView, type ReportView } from "./viewContracts.ts";
 
-export const outputFormat = z.enum(["pdf", "html", "xlsx"]);
+export const outputFormat = z.enum(["pdf", "html", "xlsx", "png", "pptx"]);
 export type OutputFormat = z.infer<typeof outputFormat>;
 const text = z.string().max(2000);
 const rowId = z.number().int().min(1).max(1048576);
@@ -22,12 +23,14 @@ export const analysisPlan = z.object({
   kind: z.literal("execute"),
   title: z.string().trim().min(1).max(120),
   format: outputFormat,
-  formats: z.array(outputFormat).min(1).max(3).refine(items => new Set(items).size === items.length).optional(),
+  formats: z.array(outputFormat).min(1).max(5).refine(items => new Set(items).size === items.length).optional(),
+  view: reportView.optional(),
   layout: z.enum(["report", "dashboard"]).optional(),
   inputs: z.array(sheetPlan).min(1).max(20),
   steps: z.array(text).min(1).max(8),
   assumptions: z.array(text).max(10),
   code: z.string().min(1).max(L.codeChars),
+  executionTime: z.number().int().min(0).max(8640000000000000).optional(),
   // Simple requests may finish right after a successful run instead of spending a review turn.
   summary: z.string().min(1).max(12000).optional(),
   sections: z.array(z.object({ title: z.string().max(120), text: z.string().max(6000) }).strict()).max(20).optional(),
@@ -85,7 +88,7 @@ export const analysisResult = z.object({
 }).strict();
 export type AnalysisResult = z.infer<typeof analysisResult>;
 export type Analysis = { result: AnalysisResult; rowCount: number; blankRows: number; sourceNotes?: string[]; rowSources: RowSources };
-export type Report = Analysis & { plan: AnalysisPlan; sources: SourceFile[]; summary: string; sections?: { title: string; text: string }[]; createdAt: string };
+export type Report = Analysis & { plan: AnalysisPlan; sources: SourceFile[]; summary: string; sections?: { title: string; text: string }[]; createdAt: string; view?: ReportView };
 export const reportCharts = (report: Report) => report.result.charts ?? (report.result.chart ? [report.result.chart] : []);
 
 export const chartTable = (report: Pick<Report, "result">, chart: ChartSpec) => (chart.dataset ? report.result.datasets : report.result.tables)?.[chart.table];

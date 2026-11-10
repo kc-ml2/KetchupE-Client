@@ -62,15 +62,15 @@ it("resumes export after DB reopen, keeps originals, and only publishes validate
     for (let i = 0; i < paths.length; i++) expect(await readFile(paths[i])).toEqual(Buffer.from(files[i].bytes));
     expect(await readFile(await flow.artifactPath(artifact.id), "utf8")).toContain("[file2] file2.xlsx / 기준: 2행");
     expect(emit.mock.calls.some(([event]) => event.type === "status" && event.payload.phase.includes("분석 계획"))).toBe(true);
-    complete.mockReset().mockResolvedValueOnce(JSON.stringify({ ...plan, title: "수정된 비교" })).mockResolvedValue('{"kind":"finish","summary":"수정했습니다."}');
+    complete.mockReset().mockResolvedValueOnce(JSON.stringify({ kind: "analyze", reason: "다시 비교" })).mockResolvedValueOnce(JSON.stringify({ ...plan, title: "수정된 비교" })).mockResolvedValue('{"kind":"finish","summary":"수정했습니다."}');
     const revised = flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "이 결과를 다시 비교하고 제목을 수정해줘" });
     await revised.done;
     expect(getRun(db, revised.runId).status).toBe("completed");
     expect(flow.artifacts(thread.id)).toHaveLength(2);
-    expect(JSON.parse(complete.mock.calls[0][1]).revision).toContain("다시 비교");
-    expect(JSON.parse(complete.mock.calls[0][1]).computed).not.toBeNull();
+    expect(JSON.parse(complete.mock.calls[1][1]).revision).toContain("다시 비교");
+    expect(JSON.parse(complete.mock.calls[1][1]).computed).not.toBeNull();
     const timings = db.prepare("SELECT payload, duration_ms FROM trace_events WHERE run_id=? AND type='model.completed'").all(revised.runId);
-    expect(timings).toHaveLength(2);
+    expect(timings).toHaveLength(3);
     for (const row of timings) {
       expect(JSON.parse(String(row.payload))).toMatchObject({ phase: "model", localOnly: true, durationMs: expect.any(Number) });
       expect(row.duration_ms).toBeGreaterThanOrEqual(0);
@@ -108,7 +108,7 @@ it("migrates duplicate legacy answers after restart and bounds the input card ov
     await flow.workflows()[0].resume!(runId, "전체 행으로 변경").done;
     const prompt = JSON.parse(complete.mock.calls[0][1]);
     expect(prompt.clarifications.map((item: { answer: string }) => item.answer)).toEqual(["10000행", "전체 행으로 변경"]);
-    expect(prompt.latestInstruction).toEqual({ answer3: "전체 행으로 변경" });
+    expect(prompt.latestInstruction).toEqual({ answer3: "전체 행으로 변경", userText: "전체 행으로 변경" });
     for (let i = 0; i < 32; i++) {
       const action = getRunAction(db, runId) as BusinessAction;
       expect(action.fields).toHaveLength(tool.fields.length + 1);
@@ -121,3 +121,51 @@ it("migrates duplicate legacy answers after restart and bounds the input card ov
     expect(Object.keys(saved.input.values)).toEqual(["request"]);
   } finally { await flow.stop(); db.close(); await rm(root, { recursive: true, force: true }); }
 }, 30000);
+
+it("persists cumulative views across restart, revises an explicit older artifact and rejects another thread's result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "excel-revision-flow-"));
+  let db = openAgentDb(join(root, "test.sqlite"));
+  const { files, plan } = await comparisonFixture();
+  const revise = vi.fn<ExcelDependencies["complete"]>();
+  const complete = vi.fn<ExcelDependencies["complete"]>(async () => JSON.stringify({ ...plan, summary: "비교 결과" }));
+  const make = () => new BusinessFlow(db, [createExcelTool({ complete, revise,
+    profile: (bytes, _signal, query) => profileWorkbook(bytes, query),
+    analyze: async (files, plan) => { const { rows, ...meta } = await readAnalysisInputs(files, plan); return { ...meta, rowCount: rows.length, result: await runAnalysis(plan.code, rows, undefined, plan.executionTime) }; },
+    export: async report => Buffer.from(renderHtml(report)), pdf: vi.fn(),
+  })], join(root, "output"), vi.fn(), vi.fn());
+  let flow = make();
+  try {
+    ensureWorkspace(db);
+    const thread = createThread(db, "default"), other = createThread(db, "default");
+    const paths = files.map((_, i) => join(root, `source${i}.xlsx`));
+    for (let i = 0; i < paths.length; i++) await writeFile(paths[i], files[i].bytes);
+    const sources = new WorkSources(db); await sources.register(paths, "file");
+    const chosen = [];
+    for (const path of paths) chosen.push(...await sources.files(sources.list().find(item => item.name === basename(path))!.id));
+    const { runId } = flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "비교" });
+    await flow.submit(runId, getRunAction(db, runId)!.id, { files: { source: chosen }, values: { request: "비교" } });
+    const original = flow.artifacts(thread.id)[0];
+    expect(original.revision).toBe(1);
+    revise.mockResolvedValueOnce(JSON.stringify({ kind: "view", patch: { charts: { "0": { title: "첫 수정" } } } }));
+    const first = flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "제목을 첫 수정으로", baseArtifactId: original.id });
+    await first.done;
+    expect(getRun(db, first.runId).status).toBe("completed");
+    await flow.stop(); db.close(); db = openAgentDb(join(root, "test.sqlite")); flow = make();
+    revise.mockResolvedValueOnce(JSON.stringify({ kind: "view", patch: { charts: { "0": { description: "설명 추가" } } } }));
+    await flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "설명 추가" }).done;
+    expect(JSON.parse(revise.mock.calls[1][1]).view.charts["0"].title).toBe("첫 수정");
+    const latest = flow.artifacts(thread.id).at(-1)!;
+    expect(latest.revision).toBe(3);
+    expect(await readFile(await flow.artifactPath(latest.id), "utf8")).toContain("첫 수정");
+    revise.mockResolvedValueOnce(JSON.stringify({ kind: "view", patch: { charts: { "0": { title: "원본에서 분기" } } } }));
+    await flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "제목 수정", baseArtifactId: original.id }).done;
+    expect(JSON.parse(revise.mock.calls[2][1]).view).toEqual({ charts: {} });
+    expect(flow.artifacts(thread.id).at(-1)).toMatchObject({ revision: 4, baseArtifactId: original.id });
+    expect(() => flow.workflows()[0].start({ threadId: other.id, workspaceId: "default", text: "수정", baseArtifactId: original.id })).toThrow("이 대화");
+    await writeFile(paths[0], "changed");
+    const changed = flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "다시 수정" }); await changed.done;
+    expect((getRunAction(db, changed.runId) as BusinessAction).question).toContain("원천 파일 내용이 변경");
+    expect(complete).toHaveBeenCalledOnce();
+    expect(revise).toHaveBeenCalledTimes(3);
+  } finally { await flow.stop(); db.close(); await rm(root, { recursive: true, force: true }); }
+});
