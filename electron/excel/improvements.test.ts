@@ -268,7 +268,7 @@ it("uses zero model calls for a format-only form change and produces a validated
   expect(xml).toContain("<a:t>TGA</a:t>");
   expect(xml).toContain("<p:pic>");
   expect(zip.file(/^ppt\/media\/.*png$/)).toHaveLength(1);
-});
+}, 30000); // Native SVG/font initialization can exceed 5 seconds on Windows CI.
 
 it("bounds ticks, preserves source data outside the view, and finds tied peaks in acquisition order", async () => {
   const { input, deps, tool } = await setup();
