@@ -51,7 +51,10 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
   const locked = new Set(action.lockedKeys ?? []);
   const revising = action.revisionMode || action.fields.some(field => /^answer\d+$/.test(field.key) || field.key === "revisionAnswer");
   const criteria = revising ? action.fields.filter(field => ["source", "request", "format"].includes(field.key) && !locked.has(field.key)) : [];
-  const open = action.fields.filter((field) => !locked.has(field.key) && (field.key !== "revision" || Boolean(action.input.values.revision) || action.revisionMode) && (editingCriteria || !criteria.includes(field)));
+  // A pending follow-up question is the one place to type; the optional revision box would only duplicate it.
+  const answering = action.fields.some(field => field.key === "revisionAnswer" && !locked.has(field.key));
+  const open = action.fields.filter((field) => !locked.has(field.key) && (field.key !== "revision" || !answering && (Boolean(action.input.values.revision) || action.revisionMode)) && (editingCriteria || !criteria.includes(field)));
+  const chatField = revising ? open.find(field => field.key === "revisionAnswer" || field.key === "revision")?.key : undefined;
   const confirmed = action.fields.filter((field) => locked.has(field.key) && confirmedValue(field, input));
   const needsFiles = open.some((field) => field.type === "file");
   useEffect(() => {
@@ -97,10 +100,10 @@ export default function BusinessToolCard({ api, runId, action }: { api: KetchupE
             <LuChevronDown aria-hidden className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#71717A] dark:text-[#A1A1AA]" />
             </span>
           </label>;
-          if (field.type !== "file") return <label key={field.key} className={field.type === "text" ? "grid gap-2" : "flex flex-wrap items-center justify-between gap-2"}><span className={fieldLabel}>{label}</span>
+          if (field.type !== "file") return <div key={field.key} className="grid gap-2"><label className={field.type === "text" ? "grid gap-2" : "flex flex-wrap items-center justify-between gap-2"}><span className={fieldLabel}>{label}</span>
             {field.type === "text" && field.options && <select className={fieldControl} aria-label={`${field.label} 선택지`} value={field.options.some(option => option.value === input.values[field.key]) ? input.values[field.key] : ""} onChange={event => setValue(field.key, event.target.value)}><option value="">선택하거나 아래에 직접 입력하세요</option>{field.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>}
             {field.type === "text" ? <textarea className={`${fieldControl} w-full min-h-24 resize-y rounded-xl leading-7 placeholder:text-[#71717A] dark:placeholder:text-[#A1A1AA]`} rows={3} placeholder="내용을 입력해 주세요" required={field.required} maxLength={4000} value={field.options?.find(option => option.value === input.values[field.key])?.label ?? input.values[field.key] ?? ""} onChange={(event) => setValue(field.key, event.target.value)} /> : <input className={`${fieldControl} w-full max-w-xs rounded-lg`} type={field.type} step={field.type === "number" ? "any" : undefined} inputMode={field.type === "number" ? "decimal" : undefined} required={field.required} maxLength={4000} value={input.values[field.key] ?? ""} onChange={(event) => setValue(field.key, event.target.value)} />}
-          </label>;
+          </label>{field.key === chatField && <p className="text-xs leading-5 text-[#71717A] dark:text-[#A1A1AA]">아래 메시지 입력창에 입력해도 여기에 쓴 것과 똑같이 전달됩니다. 한 곳에만 입력하면 됩니다.</p>}</div>;
           const chosen = input.files[field.key] ?? [];
           // Single-file fields replace the selection; multi-file fields append without duplicates.
           const choose = (picked: WorkFile[]) => setInput((current) => {

@@ -82,6 +82,8 @@ type WorkingState = {
   summary?: string;
   sections?: Report["sections"];
   changes?: string[];
+  /** Applied revision requests in the user's words, so "what have I changed so far" can be answered without replanning. */
+  history?: string[];
 };
 const resultHash = (analysis: Analysis) => createHash("sha256").update(JSON.stringify(analysis.result)).digest("hex");
 
@@ -345,7 +347,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
         try {
           const response = await (deps.revise ?? deps.complete)(REVISION_SYSTEM, JSON.stringify({
             charts: state.previous.charts ?? (state.chartRequest ? [{ index: 0, type: "line", title: state.chartRequest.title, x: state.chartRequest.x, series: state.chartRequest.series.map((series, index) => ({ ...series, index, column: state.chartRequest!.input.columns.find(column => column.key === series.key)?.index })) }] : []),
-            view: state.view ?? { charts: {} }, userText: instruction, pending: state.pendingRevision,
+            view: state.view ?? { charts: {} }, history: state.history ?? [], userText: instruction, pending: state.pendingRevision,
             formats: state.previous.plan.formats ?? [state.previous.plan.format], selectedFormat,
           }), signal);
           const info = deps.callInfo?.(signal);
@@ -364,6 +366,10 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
         }
       }
       if (change.kind === "unsupported") return askRevision(change.message, state.pendingRevision?.view);
+      // A question about the work is answered in the chat; nothing is recalculated and no pending change is touched.
+      if (change.kind === "answer") return { status: "needs_input", replaceFields: true, question: change.message,
+        fields: [{ key: "revisionAnswer", label: "추가·수정 의견", type: "text", required: true }],
+        checkpoint: { ...checkpoint, excelState: savedState(state), clarifications } };
       if (change.kind === "ask") {
         try { return askRevision(change.question, change.patch ? mergeView(state.pendingRevision?.view ?? state.view, change.patch) : state.pendingRevision?.view); }
         catch { return askRevision("축 범위를 해석하지 못했습니다. 최소·최대값을 확인해 주세요.", state.pendingRevision?.view); }
@@ -384,7 +390,8 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
           const changes = [...viewSummary(state.view, view), ...(change.formats ? [`출력 형식: ${formatList.join(", ")}`] : [])];
           const report: Report = { ...analysis, plan, sources, view, summary: state.summary ?? "기존 계산 기준과 데이터를 유지했습니다.", sections: state.sections, createdAt: new Date().toISOString() };
           validateView(report);
-          const nextState = { ...state, view, changes, pendingRevision: undefined, latest: { plan, analysis }, chartRequest: state.chartRequest ? { ...state.chartRequest, format: plan.format, formats: plan.formats } : undefined };
+          const applied = [state.pendingRevision?.instruction, instruction].filter(Boolean).join(" / ").slice(0, 300);
+          const nextState = { ...state, view, changes, history: [...(state.history ?? []), ...(applied ? [applied] : [])].slice(-20), pendingRevision: undefined, latest: { plan, analysis }, chartRequest: state.chartRequest ? { ...state.chartRequest, format: plan.format, formats: plan.formats } : undefined };
           return finish(report, plan.format, signal, io, nextState, clarifications, onTrace);
         } catch (error) {
           signal.throwIfAborted();
