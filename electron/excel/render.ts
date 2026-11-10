@@ -1,12 +1,13 @@
 import { validateView } from "./view.ts";
 import { ExcelError } from "./limits.ts";
 import { sourceFor } from "./sources.ts";
-import { lineChartSvg } from "./lineChart.ts";
+import { chartSvg } from "./chart.ts";
+export { chartSvg } from "./chart.ts";
 import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
 import { reportCharts, chartTable, assertChartFormat } from "./contracts.ts";
 import { addNativeCharts } from "./xlsxCharts.ts";
-import type { ChartSpec, Report } from "./contracts.ts";
+import type { Report } from "./contracts.ts";
 
 const escape = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const provenance = (report: Report) => report.sources.map(source => `[${source.id}] ${source.name} · SHA-256 ${source.fingerprint}`).join("\n");
@@ -35,49 +36,6 @@ export function evidenceText(report: Report, ids: number[]): string {
     groups.get(label)!.push(ref.row);
   }
   return [...groups].map(([label, rows]) => `${label}: ${sourceRowsText(rows)}행`).join("; ");
-}
-
-export function chartSvg(report: Report, chart: ChartSpec | undefined = reportCharts(report)[0]): string {
-  if (!chart) return "";
-  if (chart.type === "line" || chart.type === "scatter" && report.view?.charts[String(reportCharts(report).indexOf(chart))]) return lineChartSvg(report, chart);
-  const view = report.view?.charts[String(reportCharts(report).indexOf(chart))];
-  const table = chartTable(report, chart)!;
-  const values = table.rows.map(row => row.cells[chart.y] as number);
-  const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2"];
-  let marks = "";
-  if (chart.type === "pie") {
-    const scale = Math.max(...values), total = values.reduce((sum, v) => sum + v / scale, 0);
-    let angle = -Math.PI / 2;
-    marks = values.map((v, i) => {
-      const fraction = (v / scale) / total, end = angle + fraction * Math.PI * 2;
-      const arc = fraction >= 1 ? `<circle cx="220" cy="165" r="100" fill="${palette[i % palette.length]}"/>` : `<path d="M220 165 L${220 + Math.cos(angle) * 100} ${165 + Math.sin(angle) * 100} A100 100 0 ${fraction > .5 ? 1 : 0} 1 ${220 + Math.cos(end) * 100} ${165 + Math.sin(end) * 100} Z" fill="${palette[i % palette.length]}"/>`;
-      angle = end;
-      return arc + (i < 12 ? `<text x="350" y="${55 + i * 20}" font-size="12" fill="${palette[i % palette.length]}">${escape(table.rows[i].cells[chart.x])}: ${escape(v)}</text>` : "");
-    }).join("");
-  } else {
-    const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
-    const magnitude = Math.max(Math.abs(lo), Math.abs(hi), 1), bottom = lo / magnitude, span = hi / magnitude - bottom || 1;
-    const y = (v: number) => 260 - (v / magnitude - bottom) / span * 200;
-    const xs = table.rows.map((row, i) => chart.type === "scatter" ? Number(row.cells[chart.x]) : i);
-    const xScale = Math.max(1, ...xs.map(Math.abs)), xMin = Math.min(...xs) / xScale, xSpan = Math.max(...xs) / xScale - xMin || 1;
-    const x = (i: number) => chart.type === "bar" ? 80 + (i + .5) * 640 / values.length : 80 + (xs[i] / xScale - xMin) / xSpan * 640;
-    marks = values.map((v, i) => chart.type === "bar"
-      ? `<rect x="${x(i) - 160 / values.length}" y="${Math.min(y(0), y(v))}" width="${320 / values.length}" height="${Math.max(1, Math.abs(y(v) - y(0)))}" fill="#2563eb"/>`
-      : `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="#2563eb"/>`).join("");
-    if (chart.type === "scatter" && chart.trendline && xs.length > 1) {
-      const nx = xs.map(v => v / xScale), ny = values.map(v => v / magnitude);
-      const mx = nx.reduce((a,b)=>a+b,0)/nx.length, my = ny.reduce((a,b)=>a+b,0)/ny.length;
-      const denominator = nx.reduce((sum,v)=>sum+(v-mx)**2,0);
-      if (denominator > 0) {
-        const slope = nx.reduce((sum,v,i)=>sum+(v-mx)*(ny[i]-my),0)/denominator;
-        const ends = [Math.min(...nx), Math.max(...nx)].map(v => [80+(v-xMin)/xSpan*640, 260-((my+slope*(v-mx))-bottom)/span*200]);
-        if (ends.flat().every(Number.isFinite)) marks += `<path d="M${ends[0].join(" ")} L${ends[1].join(" ")}" stroke="#dc2626" stroke-dasharray="5 3"/>`;
-      }
-    }
-    marks += `<text x="8" y="65" font-size="11">${escape(hi)}</text><text x="8" y="260" font-size="11">${escape(lo)}</text><path d="M80 ${y(0)} H720" stroke="#a1a1aa"/>`;
-    marks += table.rows.filter((_,i)=>i % Math.max(1,Math.ceil(table.rows.length/12))===0).map(row => { const i=table.rows.indexOf(row); return `<text x="${x(i)}" y="285" text-anchor="middle" font-size="10">${escape(String(row.cells[chart.x] ?? "").slice(0,12))}</text>`; }).join("");
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" role="img" aria-label="${escape(view?.title ?? chart.title)}"><rect width="800" height="320" fill="white"/><g font-family="sans-serif" fill="#18181b"><text x="24" y="25" font-size="16">${escape(view?.title ?? chart.title)}</text>${marks}<text x="24" y="310" font-size="11">${escape(table.columns[chart.y])} / ${escape(table.columns[chart.x])}</text></g></svg>`;
 }
 
 const FILTER_SCRIPT = 'document.querySelectorAll("[data-filter]").forEach(input=>input.addEventListener("input",()=>{const q=input.value.toLocaleLowerCase();input.closest("section").querySelectorAll("tbody tr").forEach(row=>{row.hidden=!row.textContent.toLocaleLowerCase().includes(q);});}));';
