@@ -59,6 +59,22 @@ it("submits an explicitly chosen Excel output format", async () => {
   await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledWith("run", "action", { files: {}, values: { format: "xlsx" } }));
 });
 
+it("submits a stable clarification choice and allows replacing it with free text", async () => {
+  const api = apiFixture();
+  vi.mocked(api.submitBusinessInput).mockRejectedValue(new Error("retry"));
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [{ key: "answer4", label: "확인 내용", type: "text", required: true, options: [{ value: "weight", label: "원본 Weight (%)" }] }] }} />);
+  fireEvent.change(screen.getByLabelText("확인 내용 선택지"), { target: { value: "weight" } });
+  expect(screen.getByRole("textbox")).toHaveValue("원본 Weight (%)");
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await screen.findByRole("alert");
+  expect(vi.mocked(api.submitBusinessInput).mock.calls[0][2].values.answer4).toBe("weight");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "최초 측정값 기준 감소량으로 변경" } });
+  expect(screen.getByLabelText("확인 내용 선택지")).toHaveValue("");
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledTimes(2));
+  expect(vi.mocked(api.submitBusinessInput).mock.calls[1][2].values.answer4).toBe("최초 측정값 기준 감소량으로 변경");
+});
+
 it.each(["pdf", "html", "xlsx"])("saves a %s artifact by ID", async (extension) => {
   const api = apiFixture();
   vi.mocked(api.listBusinessArtifacts).mockResolvedValue([{ id: "output", runId: "run", name: `분석.${extension}`, toolId: "excel_work", version: "0.1" }]);

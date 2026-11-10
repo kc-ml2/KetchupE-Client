@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { reportCharts, type Report } from "./contracts.ts";
+import { reportCharts, assertChartFormat, type Report } from "./contracts.ts";
 
 const xml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[char]!);
 const chartNs = "http://schemas.openxmlformats.org/drawingml/2006/chart";
@@ -9,6 +9,7 @@ const packageNs = "http://schemas.openxmlformats.org/package/2006/relationships"
 /** ExcelJS does not author native charts; add the standard OOXML parts after it writes the workbook. */
 export async function addNativeCharts(bytes: Uint8Array, report: Report): Promise<Uint8Array> {
   const charts = reportCharts(report);
+  assertChartFormat(charts, "xlsx");
   if (!charts.length) return bytes;
   const zip = await JSZip.loadAsync(bytes);
   let types = await zip.file("[Content_Types].xml")!.async("string");

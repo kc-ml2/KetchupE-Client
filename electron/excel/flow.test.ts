@@ -7,7 +7,7 @@ import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRunAction, getRun } from "../agent/store.ts";
 import { BusinessFlow } from "../business/flow.ts";
 import { WorkSources } from "../work/sources.ts";
-import { createExcelTool } from "./tool.ts";
+import { createExcelTool, type ExcelDependencies } from "./tool.ts";
 import { comparisonFixture } from "./fixtures.ts";
 import { profileWorkbook, readAnalysisInputs } from "./workbook.ts";
 import { runAnalysis } from "./sandbox.ts";
@@ -54,7 +54,7 @@ it("resumes export after DB reopen, keeps originals, and only publishes validate
     const action = getRunAction(db, runId) as BusinessAction;
     expect(action.lockedKeys).not.toContain("source");
     expect(action.fields).toContainEqual(expect.objectContaining({ key: "exportFormat" }));
-    await flow.submit(runId, action.id, { ...answered, values: { ...answered.values, exportFormat: "html" } });
+    await flow.submit(runId, action.id, { ...action.input, values: { ...action.input.values, exportFormat: "html" } });
     expect(getRun(db, runId).status).toBe("completed");
     expect(complete).toHaveBeenCalledTimes(3);
     const [artifact] = flow.artifacts(thread.id);
@@ -69,6 +69,55 @@ it("resumes export after DB reopen, keeps originals, and only publishes validate
     expect(flow.artifacts(thread.id)).toHaveLength(2);
     expect(JSON.parse(complete.mock.calls[0][1]).revision).toContain("다시 비교");
     expect(JSON.parse(complete.mock.calls[0][1]).computed).not.toBeNull();
+    const timings = db.prepare("SELECT payload, duration_ms FROM trace_events WHERE run_id=? AND type='model.completed'").all(revised.runId);
+    expect(timings).toHaveLength(2);
+    for (const row of timings) {
+      expect(JSON.parse(String(row.payload))).toMatchObject({ phase: "model", localOnly: true, durationMs: expect.any(Number) });
+      expect(row.duration_ms).toBeGreaterThanOrEqual(0);
+      expect(String(row.payload)).not.toContain("다시 비교");
+    }
     expect(await readFile(await flow.artifactPath(artifact.id), "utf8")).not.toContain("수정된 비교");
   } finally { await flow.stop(); db.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+it("migrates duplicate legacy answers after restart and bounds the input card over many questions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "excel-answers-"));
+  let db = openAgentDb(join(root, "test.sqlite"));
+  const { files } = await comparisonFixture();
+  let question = 4;
+  const complete = vi.fn<ExcelDependencies["complete"]>(async () => JSON.stringify({ kind: "ask", reason: "criteria", question: `미확정 기준 ${question++}` }));
+  const tool = createExcelTool({ complete, profile: (bytes, _signal, query) => profileWorkbook(bytes, query), analyze: vi.fn(), export: vi.fn(), pdf: vi.fn() });
+  const make = () => new BusinessFlow(db, [tool], join(root, "output"), vi.fn(), vi.fn());
+  let flow = make();
+  try {
+    ensureWorkspace(db);
+    const thread = createThread(db, "default"), path = join(root, "source.xlsx");
+    await writeFile(path, files[0].bytes);
+    const sources = new WorkSources(db);
+    await sources.register([path], "file");
+    const selected = await sources.files(sources.list()[0].id);
+    const { runId } = flow.workflows()[0].start({ threadId: thread.id, workspaceId: "default", text: "그래프" });
+    const old = JSON.parse(String(db.prepare("SELECT payload FROM business_jobs WHERE run_id=?").get(runId)!.payload));
+    old.input = { values: { request: "그래프", answer3: "옛 답변" }, files: { source: selected } };
+    old.fields.push({ key: "answer3", type: "text", label: "확인", required: true });
+    old.pendingKeys = ["answer3"];
+    old.checkpoint = { clarifications: [{ key: "answer3", question: "이전 범위", answer: "10000행" }, { key: "answer3", question: "현재 범위", answer: "옛 답변" }] };
+    db.prepare("UPDATE business_jobs SET payload=? WHERE run_id=?").run(JSON.stringify(old), runId);
+    await flow.stop(); db.close();
+    db = openAgentDb(join(root, "test.sqlite")); flow = make();
+    await flow.workflows()[0].resume!(runId, "전체 행으로 변경").done;
+    const prompt = JSON.parse(complete.mock.calls[0][1]);
+    expect(prompt.clarifications.map((item: { answer: string }) => item.answer)).toEqual(["10000행", "전체 행으로 변경"]);
+    expect(prompt.latestInstruction).toEqual({ answer3: "전체 행으로 변경" });
+    for (let i = 0; i < 32; i++) {
+      const action = getRunAction(db, runId) as BusinessAction;
+      expect(action.fields).toHaveLength(tool.fields.length + 1);
+      expect(action.fields.at(-1)?.key).toBe(`answer${i + 4}`);
+      await flow.workflows()[0].resume!(runId, `답변 ${i}`).done;
+    }
+    expect(complete).toHaveBeenCalledTimes(33);
+    const saved = JSON.parse(String(db.prepare("SELECT payload FROM business_jobs WHERE run_id=?").get(runId)!.payload));
+    expect(saved.checkpoint.clarifications).toHaveLength(12);
+    expect(Object.keys(saved.input.values)).toEqual(["request"]);
+  } finally { await flow.stop(); db.close(); await rm(root, { recursive: true, force: true }); }
+}, 30000);

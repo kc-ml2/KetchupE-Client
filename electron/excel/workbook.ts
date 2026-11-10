@@ -1,3 +1,5 @@
+import { EXCEL_LIMITS as L, ExcelError } from "./limits.ts";
+import { compressSources } from "./sources.ts";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import { format } from "ssf";
@@ -23,7 +25,7 @@ function open(bytes: Uint8Array) {
 }
 
 async function parse(bytes: Uint8Array) {
-  if (bytes.length > 5 * 1024 * 1024) throw new Error("실험 기능은 5MB 이하 XLSX를 지원합니다.");
+  if (bytes.length > L.fileBytes) throw new Error("실험 기능은 5MB 이하 XLSX를 지원합니다.");
   const book = await loadWorkbook(bytes);
   const sheets = book.worksheets;
   if (!sheets.length || sheets.length > 100) throw new Error("시트는 1~100개까지 지원합니다.");
@@ -214,7 +216,7 @@ function extractRows(sheets: ExcelJS.Worksheet[], plan: SheetPlan): { rows: Inpu
   const headerStart = plan.headerStartRow ?? plan.headerRow;
   const firstDataRow = plan.firstDataRow ?? plan.headerRow + 1;
   const lastDataRow = plan.lastDataRow ?? sheet.rowCount;
-  if (lastDataRow < firstDataRow || lastDataRow > sheet.rowCount || lastDataRow - firstDataRow >= 10000) throw new Error("분석 범위는 시트 안의 최대 10,000행이어야 합니다.");
+  if (lastDataRow < firstDataRow || lastDataRow > sheet.rowCount || lastDataRow - firstDataRow >= L.inputRows) throw new ExcelError("LIMIT", `분석 범위는 시트 안의 최대 ${L.inputRows.toLocaleString("en-US")}행이어야 합니다.`);
   if ((plan.headerRow === 0 && headerStart !== 0) || headerStart > plan.headerRow || firstDataRow <= plan.headerRow || firstDataRow > sheet.rowCount) throw new Error("헤더 시작·끝 행과 데이터 시작 행의 순서를 확인해 주세요.");
   const indices = new Set<number>(), keys = new Map<string, number>();
   for (const column of plan.columns) {
@@ -268,7 +270,7 @@ function extractRows(sheets: ExcelJS.Worksheet[], plan: SheetPlan): { rows: Inpu
     }
     rows.push({ id: n, rangeId: plan.rangeId, fileId: plan.fileId, sheet: plan.sheet, row: n, values, sourceCells, metadata });
   }
-  if (JSON.stringify(rows).length > 8 * 1024 * 1024) throw new Error("분석 데이터는 8MB 이하로 줄여 주세요.");
+  if (JSON.stringify(rows).length > L.inputChars) throw new ExcelError("LIMIT", "분석 데이터의 직렬화 크기 한도를 초과했습니다. 범위나 열을 줄여 주세요.");
   const sourceNotes = [`원본 범위: ${plan.sheet}, 헤더 ${headerStart}-${plan.headerRow}행, 데이터 ${firstDataRow}-${lastDataRow}행.`];
   if (cellErrors.size) sourceNotes.push(`확인할 셀 ${cellErrors.size}개: ${[...cellErrors].slice(0, 20).join(", ")}. metadata.error를 확인하세요. 오류 값은 0으로 대체하지 않았습니다.`);
   if (formulas.size) sourceNotes.push(`수식 ${formulas.size}개의 저장된 계산 결과를 사용했습니다. 앱에서 재계산하지 않았으므로 원본의 마지막 저장 시점 기준입니다.`);
@@ -278,7 +280,7 @@ function extractRows(sheets: ExcelJS.Worksheet[], plan: SheetPlan): { rows: Inpu
 
 /** Parse each workbook once; row IDs are unique across files and sheets. */
 export async function readAnalysisInputs(files: WorkbookInput[], plan: AnalysisPlan) {
-  if (!files.length || files.length > 10 || new Set(files.map(f => f.id)).size !== files.length) throw new Error("엑셀 파일은 서로 다른 ID로 1~10개 지정해 주세요.");
+  if (!files.length || files.length > L.files || new Set(files.map(f => f.id)).size !== files.length) throw new Error("엑셀 파일은 서로 다른 ID로 1~10개 지정해 주세요.");
   const selected = new Set<string>();
   const rangeIds = new Set<string>();
   for (const input of plan.inputs) {
@@ -298,13 +300,13 @@ export async function readAnalysisInputs(files: WorkbookInput[], plan: AnalysisP
       for (const input of plan.inputs.filter(p => p.fileId === file.id)) {
         const data = extractRows(sheets, input);
         for (const row of data.rows) rows.push({ ...row, id: rows.length + 1 });
-        if (rows.length > 10000) throw new Error("전체 분석 대상은 합계 10,000행까지 지원합니다.");
+        if (rows.length > L.inputRows) throw new ExcelError("LIMIT", `전체 분석 대상은 합계 ${L.inputRows.toLocaleString("en-US")}행까지 지원합니다.`);
         blankRows += data.blankRows;
         sourceNotes.push(...data.sourceNotes.map(note => `[${file.id}] ${file.name}: ${note}`));
       }
-    } catch (error) { throw new Error(`[${file.id}] ${file.name}: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) { throw new ExcelError(error instanceof ExcelError ? error.code : "CONTRACT", `[${file.id}] ${file.name}: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  if (JSON.stringify(rows).length > 8 * 1024 * 1024) throw new Error("전체 분석 데이터는 8MB 이하로 줄여 주세요.");
-  const rowSources = Object.fromEntries(rows.map(({ id, fileId, sheet, row, rangeId }) => [id, { fileId, sheet, row, ...(rangeId ? { rangeId } : {}) }]));
+  if (JSON.stringify(rows).length > L.inputChars) throw new ExcelError("LIMIT", "전체 분석 데이터의 직렬화 크기 한도를 초과했습니다. 범위나 열을 줄여 주세요.");
+  const rowSources = compressSources(rows);
   return { rows, blankRows, sourceNotes, rowSources };
 }

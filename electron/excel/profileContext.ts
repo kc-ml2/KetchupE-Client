@@ -2,7 +2,7 @@ import type { WorkbookProfile } from "./contracts.ts";
 
 type Sheet = WorkbookProfile["sheets"][number];
 export type ContextSheet = Pick<Sheet, "name" | "state" | "rows" | "columns" | "firstColumn"> & Partial<Sheet> & { detailsTruncated?: boolean };
-type Profile = { fileId: string; name: string; sheets: Sheet[] };
+type Profile = { fileId: string; name: string; sheets: ContextSheet[] };
 const size = (value: unknown) => JSON.stringify(value).length;
 const inventory = (sheet: ContextSheet): ContextSheet => ({ name: sheet.name, state: sheet.state, rows: sheet.rows, columns: sheet.columns, firstColumn: sheet.firstColumn, detailsTruncated: true });
 
@@ -33,14 +33,18 @@ export function fitSheetContext(sheet: ContextSheet, budget: number): ContextShe
   return size(result) <= budget ? result : inventory(sheet);
 }
 
-export function profileContext(profiles: Profile[], budget = 100000) {
+export function profileContext(profiles: Profile[], budget = 100000, query = "") {
   const result = profiles.map(file => ({ ...file, sheets: file.sheets.map(inventory) }));
   // All sheet identities remain discoverable, even when the inventory alone exceeds the sample budget.
   let available = Math.max(0, budget - size(result));
-  let remaining = profiles.reduce((count, file) => count + file.sheets.length, 0);
+  const normalized = query.normalize("NFKC").toLowerCase();
+  const weight = (sheet: ContextSheet) => normalized.includes(sheet.name.normalize("NFKC").toLowerCase()) ? 4 : 1;
+  let remaining = profiles.reduce((count, file) => count + file.sheets.reduce((sum, sheet) => sum + weight(sheet), 0), 0);
   profiles.forEach((file, i) => file.sheets.forEach((sheet, j) => {
     const base = size(result[i].sheets[j]);
-    const fitted = fitSheetContext(sheet, base + Math.floor(available / remaining--));
+    const priority = weight(sheet);
+    const fitted = fitSheetContext(sheet, base + Math.floor(available * priority / remaining));
+    remaining -= priority;
     available -= size(fitted) - base;
     result[i].sheets[j] = fitted;
   }));

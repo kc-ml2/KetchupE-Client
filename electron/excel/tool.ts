@@ -1,4 +1,9 @@
 import { z } from "zod";
+import type { ModelCallInfo } from "../agent/modelClient.ts";
+import type { BusinessTrace } from "../business/contracts.ts";
+import { EXCEL_LIMITS as LIMITS, ExcelError } from "./limits.ts";
+import { clarificationState, readClarifications, selectedOption } from "./clarifications.ts";
+import { compileChart, preflight } from "./chartPlan.ts";
 import type { BusinessTool, ToolResult } from "../business/contracts.ts";
 import type {
   Analysis,
@@ -8,8 +13,9 @@ import type {
   Report,
   WorkbookInput,
   WorkbookProfile,
+  ChartRequest,
 } from "./contracts.ts";
-import { outputFormat, parseModelJson, planResponse } from "./contracts.ts";
+import { outputFormat, parseModelJson, planResponse, assertChartFormat, reportCharts } from "./contracts.ts";
 import { renderHtml, reportPreview, validReportHtml } from "./render.ts";
 import { fitSheetContext, profileContext } from "./profileContext.ts";
 import type { ContextSheet } from "./profileContext.ts";
@@ -38,30 +44,12 @@ export type ExcelDependencies = ExcelJobs & {
     prompt: string,
     signal: AbortSignal,
   ) => Promise<string>;
+  callInfo?: (signal: AbortSignal) => ModelCallInfo | undefined;
   pdf: (html: string, signal: AbortSignal) => Promise<Uint8Array>;
   /** Optional per-submission worker that keeps parsed workbooks between turns. */
   session?: () => ExcelJobs & { close: () => void };
 };
 
-// Per-submission budgets; the prompt quotes the same numbers.
-const LIMITS = {
-  turns: 24,
-  inspections: 12,
-  executions: 4,
-  repairs: 2,
-  inspectRows: 80,
-  contextChars: 200000,
-};
-
-const clarificationState = z
-  .array(
-    z.object({
-      key: z.string().regex(/^answer[1-3]$/),
-      question: z.string().max(2000),
-      answer: z.string().max(4000).optional(),
-    }),
-  )
-  .max(12);
 const normalizeQuestion = (text: string) =>
   text
     .normalize("NFKC")
@@ -78,7 +66,15 @@ type WorkingState = {
   request: string;
   inspections: Observation[];
   latest?: { plan: AnalysisPlan; analysis: Analysis };
+  previous?: ReturnType<typeof reviewResult>;
+  profile?: { query: string; files: ReturnType<typeof profileContext> };
+  chartRequest?: ChartRequest;
 };
+
+function savedState(state: WorkingState): WorkingState {
+  const { latest, ...rest } = state;
+  return { ...rest, ...(latest ? { previous: reviewResult(latest) } : {}) };
+}
 
 function cachedInspection(
   observations: Observation[],
@@ -144,9 +140,17 @@ metadata는 셀 주소별 표시 값 display, 원시 표시 형식 numFmt, formu
 수식은 저장된 결과를 사용하며 재계산하지 않는다. 저장 결과가 없는 수식·오류 셀을 진단하려면 allowCellErrors:true를 명시하고 null 및 metadata.error를 확인한다. 오류를 0으로 간주하지 말고 제외 이유 또는 주의사항을 남긴다. 메타데이터에서 읽을 수 있는 사항을 사용자에게 재입력시키지 않는다.
 계산 코드 입력: input.rows=[{id,fileId,sheet,rangeId,row,values:{key:문자|숫자|null},sourceCells:{key:원본셀주소},metadata:{key:셀메타데이터}}]. r.id는 전체 입력의 고유 ID, r.row는 실제 행이다. 모든 선택 범위의 전체 데이터가 주어진다. 파일·시트·범위를 나눠 연결·정규화·집계할 수 있다. 같은 원본 숫자 셀은 병합 때문에 반복되어도 중복 합산하지 않는다.
 code는 동기 JavaScript 함수 본문이다(함수 선언이나 화살표 함수로 감싸지 않는다). 본문 마지막에 반드시 return 결과객체를 쓴다. import/require/fetch/process/파일 접근은 없고 Date/Math/Map/배열을 사용할 수 있다. 실행 5초 제한. return {tables:[{title:"표",columns:["열"],rows:[{cells:[문자|유한숫자|null],sourceRows:[기여한 r.id]}]}],excluded:[{row:r.id,reason:"제외 이유"}],notes:["주의"],chart:null,charts:[{type:"bar|line|scatter|pie",table:0,x:0,y:1,title:"제목",trendline:false}]}.
-표는 최대 20개·합계 5000행·표당 20열, 차트는 최대 10개·차트당 500행이다. chart 하나 또는 charts 배열 중 하나를 사용한다. 산점도 x/y는 숫자, trendline:true는 산점도 회귀선, 원형 차트 값은 음수 없이 양수가 있어야 한다. 모든 입력 ID를 결과 sourceRows 또는 excluded 중 정확히 한 곳에 포함한다. sourceRows와 excluded.row에는 엑셀 행 번호 r.row가 아니라 r.id를 넣는다. 근거는 실제 기여 행만 참조한다. 빈 값과 0, 합계 행과 원자료, 평균의 분모를 구분한다.
+표는 최대 20개·합계 ${LIMITS.tableRows}행·표당 20열, 차트는 최대 10개다. 선·산점도는 ${LIMITS.chartRows}점, 막대·원형은 ${LIMITS.categoricalChartRows}점까지다. chart 또는 charts 중 하나를 사용하며 chart는 생략하거나 null로 둔다. 산점도 x/y는 숫자, trendline:true는 산점도 회귀선, 원형 차트 값은 음수 없이 양수가 있어야 한다. 모든 입력 ID를 결과 sourceRows 또는 excluded 중 정확히 한 곳에 포함한다. sourceRows와 excluded.row에는 엑셀 행 번호 r.row가 아니라 r.id를 넣는다. 근거는 실제 기여 행만 참조한다. 빈 값과 0, 합계 행과 원자료, 평균의 분모를 구분한다.
 computed에는 마지막 계획과 결과의 행 수·앞뒤 행·숫자 최솟값/최댓값이 있다. 전체 결과가 아니므로 더 필요하면 inspect_result한다. 검토 중 모순을 발견하면 원본 inspect 후 계획을 바꿔 execute한다. 코드가 성공했다고 수치가 정확하다고 단정하지 않는다. 실패하면 오류에 맞게 계획·코드를 수정한다. 계산·근거를 확인한 뒤 finish한다.
 출력 형식은 pdf/html/xlsx이며 formats로 여러 형식을 동시에 지정한다(생략하면 format 하나). layout은 report 또는 dashboard다. dashboard HTML은 표 검색이 있고 PDF는 정적이다. XLSX에는 편집 가능한 차트가 포함된다. sections로 요청한 보고서 목차와 상세 설명을 작성한다. 임의 HTML·스크립트는 만들지 않는다. 수식 재계산·원본 양식 그대로의 복제·지원하지 않는 포맷이 꼭 필요하면 지원 범위를 설명하고 대안을 확인한다. 통계적 유의성·인과관계를 근거 없이 만들어내지 않는다.`;
+
+const CHART_PLANNING = `기본 그래프에는 코드를 작성하지 말고 kind:"chart"를 사용한다.
+예: {"kind":"chart","title":"그래프","format":"html","steps":["전체 측정값 그래프"],"assumptions":[],"input":{"fileId":"file1","sheet":"실제 시트","headerRow":1,"firstDataRow":2,"lastDataRow":100,"columns":[{"index":2,"name":"실제 헤더","key":"x"},{"index":3,"name":"실제 헤더","key":"y1"},{"index":4,"name":"실제 헤더","key":"y2"}]},"x":{"key":"x","label":"Temperature","unit":"℃"},"series":[{"key":"y1","axis":"left","label":"Weight","unit":"%"},{"key":"y2","axis":"right","label":"Deriv. Weight","unit":"%/℃"}]}.
+input은 기존 sheetPlan과 같고 실제 헤더와 키를 사용한다. chart는 원본 순서의 전체 숫자 데이터를 그리는 HTML/PDF 전용이며 이중축과 숫자형 X축을 지원한다. XLSX 이중축을 약속하지 않는다. 시리즈는 최대 4개다. 단위·Weight와 Weight Loss 의미가 요청과 원본에서 다르면 먼저 한 번에 확인한다. series.transform은 identity(원본, 기본), loss100(100-값), lossInitial(최초값-값)이며 명시적으로 확인한 감소량 기준에만 변환을 적용한다.
+입력 합계 ${LIMITS.inputRows}행, 표 ${LIMITS.tableRows}행, 선·산점도 ${LIMITS.chartRows}점, 막대·원형 ${LIMITS.categoricalChartRows}점이다. 전체 그래프 때문에 표를 만들거나 10,000행/500점으로 줄이도록 요구하지 않는다. 파일·직렬화 한도는 별도로 검사된다. profile의 시트 행 수로 가능한 범위를 확인한다.
+ask는 options:[{value:"고유ID",label:"선택 문구",plan:완성된_chart_계획}]를 포함할 수 있다. 해당 선택만으로 조건이 확정될 때만 plan을 넣는다. 불완전한 선택지는 plan을 생략한다. 지원하지 않는 선택지를 제안하지 않는다. 사용자는 자유 텍스트로도 수정할 수 있다.
+latestInstruction은 이번 제출의 변경으로 과거 답변보다 우선한다. clarifications에는 현재 답변만 들어 있다. computed는 이전 제출 요약일 수 있으므로 최신 조건으로 실행한 뒤 완료한다. 이전 계획의 코드가 있더라도 기본 차트는 chart 계획을 사용한다.
+업무 의미 확인은 자동 완료보다 우선한다. 요청의 단위·감소량 기준과 원본이 모순되면 assumptions에 추측을 적고 진행하지 말고 ask한다. 예를 들어 원본 Weight(%)에 대해 Weight Loss(℃)를 요청했다면 원본 Weight(%), 100-Weight(%), 최초값-Weight(%) 중 무엇인지 반드시 묻는다. 최신 사용자 답변이 이를 명시적으로 해결한 뒤에는 다시 묻지 말고 해당 기준으로 실행한다. label에는 단위를 중복 포함하지 않고 unit에 한 번만 적는다.`;
 
 export function createExcelTool(deps: ExcelDependencies): BusinessTool {
   const finish = async (
@@ -156,14 +160,17 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
     io: ExcelJobs,
     state?: WorkingState,
     clarifications: z.infer<typeof clarificationState> = [],
+    onTrace?: (event: BusinessTrace) => void,
   ): Promise<ToolResult> => {
-    const { plan, sources, summary, sections, createdAt, ...analysis } = report;
+    const { plan, sources, summary, sections, createdAt } = report;
     const checkpoint = state
-      ? { excelState: { ...state, latest: { plan, analysis } }, clarifications }
+      ? { excelState: savedState({ ...state, latest: { plan, analysis: report } }), clarifications }
       : {};
+    const started = Date.now();
     try {
       const outputs = [];
       for (const kind of report.plan.formats ?? [format]) {
+        assertChartFormat(reportCharts(report), kind);
         const bytes =
           kind === "pdf"
             ? await deps.pdf(renderHtml(report, false), signal)
@@ -171,6 +178,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
         signal.throwIfAborted();
         outputs.push({ name: `${fileStem(report.plan.title)}.${kind}`, bytes });
       }
+      onTrace?.({ phase: "export", durationMs: Date.now() - started, outputBytes: outputs.reduce((size, file) => size + file.bytes.length, 0) });
       return {
         status: "completed",
         summary: reportPreview(report),
@@ -192,20 +200,27 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       };
     } catch (error) {
       signal.throwIfAborted();
+      onTrace?.({ phase: "export", durationMs: Date.now() - started, errorCode: "EXPORT" });
+      // Arbitrary generated code can use Date/Math.random; retain that result rather than replaying it.
+      const retryState = state && !state.chartRequest ? { ...savedState(state), latest: { plan, analysis: { result: report.result, rowCount: report.rowCount, blankRows: report.blankRows, rowSources: report.rowSources, sourceNotes: report.sourceNotes } } } : state && savedState(state);
+      if (JSON.stringify({ ...checkpoint, excelState: retryState }).length > 850000)
+        return { status: "failed", code: "EXPORT", message: "파일 생성에 실패했고 결과가 커서 재출력 상태를 저장할 수 없습니다. 출력 형식을 변경해 다시 실행해 주세요." };
       return {
         status: "needs_input",
-        question: `${reportPreview(report)}\n\n파일 생성 실패: ${error instanceof Error ? error.message : String(error)}\n분석 결과는 보관했습니다. 출력 형식을 선택해 다시 생성하세요.`,
+        replaceFields: true,
+        question: `${reportPreview(report)}\n\n파일 생성 실패: ${error instanceof Error ? error.message : String(error)}\n분석 계획은 보관했습니다. 출력 형식을 선택하면 원본을 확인해 다시 생성합니다.`,
         fields: [
           {
             key: "exportFormat",
             type: "select",
             label: "다시 생성할 파일 형식",
             required: true,
-            options: formats,
+            options: formats.filter(option => option.value !== "xlsx" || !state?.chartRequest),
           },
         ],
         checkpoint: {
           ...checkpoint,
+          excelState: retryState,
           report: state
             ? { plan, sources, summary, sections, createdAt }
             : report,
@@ -220,6 +235,8 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       checkpoint,
       signal,
       onProgress,
+      onTrace,
+      changedKeys,
     }: Parameters<BusinessTool["execute"]>[0],
     io: ExcelJobs,
   ): Promise<ToolResult> => {
@@ -241,40 +258,41 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       : null;
     if (checkpoint.report) {
       const state = checkpoint.excelState as WorkingState | undefined;
-      const report = {
-        ...state?.latest?.analysis,
-        ...checkpoint.report,
-      } as Report;
-      if (JSON.stringify(report.sources) !== JSON.stringify(sources))
+      const stored = checkpoint.report as Report;
+      if (JSON.stringify(stored.sources) !== JSON.stringify(sources))
         throw new Error("원본이 변경되었습니다. 새 작업을 시작해 주세요.");
-      onProgress?.("저장된 분석 결과로 파일 생성 중");
       const format = outputFormat.parse(values.exportFormat);
+      const replayPlan = state?.chartRequest ? compileChart({ ...state.chartRequest, format, formats: [format] }) : undefined;
+      const analysis = state?.latest?.analysis ?? (stored.result ? stored : replayPlan ? await io.analyze(inputs, replayPlan, signal) : undefined);
+      if (!analysis) throw new ExcelError("CONTRACT", "재출력할 분석 결과가 없습니다. 요청을 다시 실행해 주세요.");
+      const report = { ...analysis, ...stored } as Report;
+      onProgress?.("저장된 분석 결과로 파일 생성 중");
       return finish(
         { ...report, plan: { ...report.plan, format, formats: [format] } },
         format,
         signal,
         io,
         state,
-        clarificationState.parse(checkpoint.clarifications ?? []),
+        readClarifications(checkpoint.clarifications, values),
+        onTrace,
       );
     }
-    const answers = Object.entries(values)
-      .filter(([key]) => /^answer\d+$/.test(key))
-      .map(([key, answer]) => ({ key, answer }));
-    const clarifications = clarificationState
-      .parse(checkpoint.clarifications ?? [])
-      .map((item) => ({
-        ...item,
-        answer: item.answer ?? values[item.key] ?? "",
-      }));
+    const clarifications = readClarifications(checkpoint.clarifications, values);
+    const answers = clarifications.filter(item => item.answer).map(({ key, answer }) => ({ key, answer }));
+    const latestInstruction = Object.fromEntries((changedKeys ?? Object.keys(values)).filter(key => key === "revision" || key === "format" || /^answer\d+$/.test(key)).map(key => [key, values[key]]));
     const query = [
       values.request ?? "",
       values.revision ?? "",
       ...answers.map((item) => item.answer),
     ].join("\n");
+    const saved = checkpoint.excelState as WorkingState | undefined;
+    const compatible = saved && JSON.stringify(saved.sources) === JSON.stringify(sources) && saved.request === values.request;
+    const state: WorkingState = compatible ? saved : { sources, request: values.request, inspections: [] };
+    if (state.latest && (values.revision || Object.keys(latestInstruction).length)) { state.previous = reviewResult(state.latest); delete state.latest; }
     onProgress?.("엑셀 전체 시트에서 요청한 항목 확인 중");
+    const profileStarted = Date.now();
     const rawProfiles = [];
-    for (const file of inputs) {
+    for (const file of state.profile?.query === query ? [] : inputs) {
       signal.throwIfAborted();
       onProgress?.(`엑셀 구조 확인 중: ${file.name} (${file.id})`);
       try {
@@ -284,25 +302,22 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
           ...(await io.profile(file.bytes, signal, query)),
         });
       } catch (error) {
-        throw new Error(
+        const code = error instanceof ExcelError ? error.code : "CONTRACT";
+        onTrace?.({ phase: "profile", durationMs: Date.now() - profileStarted, errorCode: code });
+        throw new ExcelError(code,
           `[${file.id}] ${file.name}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
-    const profile = profileContext(rawProfiles);
+    const profile = profileContext(state.profile?.query === query ? state.profile.files : rawProfiles, LIMITS.profileChars, query);
+    state.profile = { query, files: profile };
+    onTrace?.({ phase: "profile", durationMs: Date.now() - profileStarted });
     const inspectionLimit = Math.max(
       2000,
       LIMITS.contextChars - JSON.stringify(profile).length - 1000,
     );
     let previous: unknown = null;
     let failure = "";
-    const saved = checkpoint.excelState as WorkingState | undefined;
-    const state: WorkingState =
-      saved &&
-      JSON.stringify(saved.sources) === JSON.stringify(sources) &&
-      saved.request === values.request
-        ? saved
-        : { sources, request: values.request, inspections: [] };
     const inspections = state.inspections.map((item) => ({
       ...item,
       sheets: item.sheets.map((sheet) =>
@@ -318,6 +333,9 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
     };
     trimInspections();
     state.inspections = inspections;
+    const pending = clarifications.at(-1);
+    let directPlan = compatible && !values.revision && pending ? selectedOption(pending, values[pending.key])?.plan : undefined;
+    if (directPlan && selectedFormat && directPlan.format !== selectedFormat) directPlan = undefined;
     let resultPage: unknown = null;
     let repairs = 0,
       rechecked = false,
@@ -327,31 +345,44 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       signal.throwIfAborted();
       onProgress?.(
         turn
-          ? "확인한 파일 근거로 분석 계획 검토 중"
+          ? (failure ? `분석 계획 수정 중 (${repairs}/${LIMITS.repairs})` : "확인한 파일 근거로 다음 작업 결정 중")
           : "요청에 맞는 분석 계획과 코드 작성 중",
       );
-      const response = await deps.complete(
-        SYSTEM,
+      const modelStarted = Date.now();
+      let response: string;
+      try {
+        response = directPlan ? JSON.stringify(directPlan) : await deps.complete(
+        `${SYSTEM}\n${CHART_PLANNING}`,
         JSON.stringify({
           request: values.request,
+          latestInstruction,
+          limits: { inputRows: LIMITS.inputRows, tableRows: LIMITS.tableRows, chartRows: LIMITS.chartRows },
           revision: values.revision,
           selectedFormat,
           answers,
-          clarifications,
+          clarifications: clarifications.map(({ key, question, answer }) => ({ key, question, answer })),
           profile,
           inspections,
           inspectionBudget: LIMITS.inspections - inspectionCount,
           executionBudget: LIMITS.executions - executionCount,
-          computed: state.latest ? reviewResult(state.latest) : null,
+          computed: state.latest ? reviewResult(state.latest) : state.previous ?? null,
           resultPage,
           previous,
           failure,
         }),
         signal,
-      );
+        );
+      } catch (error) {
+        onTrace?.({ phase: "model", durationMs: Date.now() - modelStarted, attempt: turn + 1, errorCode: signal.aborted ? "CANCELLED" : "MODEL_TRANSPORT" });
+        throw error;
+      }
+      const info = directPlan ? undefined : deps.callInfo?.(signal);
+      if (!directPlan) onTrace?.({ phase: "model", durationMs: Date.now() - modelStarted, attempt: turn + 1, ...(info ? { modelAlias: info.modelAlias, promptTokens: info.promptTokens, completionTokens: info.completionTokens, finishReason: info.finishReason } : {}) });
+      directPlan = undefined;
       let plan: AnalysisPlan;
       let analysis: Analysis;
       try {
+        if (info?.finishReason === "length") throw new ExcelError("MODEL_LENGTH", "모델 응답이 출력 한도에서 잘렸습니다. chart 계획 또는 더 짧은 계산 코드를 반환하세요.");
         previous = parseModelJson(response);
         const next = planResponse.parse(previous);
         if (next.kind === "inspect") {
@@ -451,6 +482,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
             io,
             state,
             clarifications,
+            onTrace,
           );
         }
         if (next.kind === "ask") {
@@ -465,7 +497,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
                 normalizeQuestion(next.question),
           );
           const location = next.reason === "location";
-          const recheck = repeated || answers.length >= 3 || location;
+          const recheck = repeated || location;
           if (recheck && !rechecked) {
             rechecked = true;
             failure = `이미 받은 답변과 outline·검색 결과를 다시 확인하세요. 행 이름을 열 헤더와 혼동하지 마세요. 다시 하려던 질문: ${next.question}. 위치는 inspect로 직접 찾고 답변된 내용이면 실행 계획을 작성하세요. 정말 결정할 수 없는 업무 의미만 구체적으로 질문하세요.`;
@@ -474,9 +506,11 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
           const question = location
             ? "파일에서 요청한 항목과 분석 범위를 아직 확정하지 못했습니다. 정리할 항목의 이름이나 원하는 결과를 설명해 주세요. 행 번호나 셀 주소는 필요하지 않습니다."
             : next.question;
-          const key = `answer${Math.min(answers.length + 1, 3)}`;
+          const key = `answer${Math.max(0, ...clarifications.map(item => Number(item.key.slice(6)))) + 1}`;
+          for (const option of next.options ?? []) if (option.plan) preflight(compileChart(option.plan), profile);
           return {
             status: "needs_input",
+            replaceFields: true,
             question: recheck
               ? `제공한 답변과 파일을 다시 확인했지만 아직 다음 내용을 판단하지 못했습니다.\n\n${question}\n\n기존 답변을 아래에서 보완해 같은 작업을 이어갈 수 있습니다.`
               : question,
@@ -486,17 +520,20 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
                 type: "text",
                 label: recheck ? "확인 내용 보완" : "확인 내용",
                 required: true,
+                options: next.options?.map(({ value, label }) => ({ value, label })),
               },
             ],
             checkpoint: {
               ...checkpoint,
-              excelState: state,
-              clarifications: [...clarifications, { key, question }].slice(-12),
+              excelState: savedState(state),
+              clarifications: [...clarifications, { key, question, options: next.options }].slice(-12),
             },
           };
         }
         // The form's format wins over the model's guess without spending another model turn.
-        const { summary, sections, ...planned } = next;
+        const { summary, sections, ...planned } = next.kind === "chart" ? compileChart(next) : next;
+        if (next.kind === "chart") state.chartRequest = next;
+        else delete state.chartRequest;
         plan =
           selectedFormat &&
           !values.revision &&
@@ -510,12 +547,16 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
             "계산 예산이 끝났습니다. 마지막 결과를 검토해 완료하거나 필요한 업무 기준을 질문하세요.",
           );
         executionCount++;
-        analysis = await io.analyze(inputs, plan, signal);
-        if (JSON.stringify(analysis).length > 700000)
-          // checkpoint row stays under BusinessFlow's 1MB cap
-          throw new Error(
-            "분석 결과가 너무 큽니다. 표를 700KB 이내로 집계해 주세요.",
-          );
+        preflight(plan, profile);
+        const analysisStarted = Date.now();
+        analysis = await io.analyze(inputs, plan, signal).catch(error => {
+          onTrace?.({ phase: "analysis", durationMs: Date.now() - analysisStarted, attempt: executionCount, errorCode: error instanceof ExcelError ? error.code : "CONTRACT" });
+          throw error;
+        });
+        onTrace?.({ phase: "analysis", durationMs: Date.now() - analysisStarted, rowCount: analysis.rowCount, attempt: executionCount });
+        for (const format of plan.formats ?? [plan.format]) assertChartFormat(reportCharts({ result: analysis.result } as Report), format);
+        if (JSON.stringify(analysis).length > LIMITS.analysisChars)
+          throw new ExcelError("LIMIT", "분석 결과가 메모리 한도를 초과했습니다. 대상 범위나 출력 구성을 줄여 주세요.");
         state.latest = { plan, analysis };
         // computed.plan already carries the code; don't send it twice next turn.
         previous = { kind: "execute", title: plan.title };
@@ -542,15 +583,18 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
             io,
             state,
             clarifications,
+            onTrace,
           );
         }
         onProgress?.("계산 완료 · 결과를 검토하고 필요한 근거를 추가 확인 중");
       } catch (error) {
         signal.throwIfAborted();
+        onTrace?.({ phase: "error", durationMs: 0, errorCode: error instanceof ExcelError ? error.code : "CONTRACT", attempt: turn + 1 });
+        if (error instanceof ExcelError && (error.code === "LIMIT" || error.code === "UNSUPPORTED")) return { status: "failed", message: error.message, code: error.code };
         failure =
           error instanceof Error ? error.message.slice(0, 3000) : String(error);
         if (repairs++ >= LIMITS.repairs)
-          throw new Error(`분석을 완료하지 못했습니다: ${failure}`);
+          throw new ExcelError(error instanceof ExcelError ? error.code : "CONTRACT", `분석을 완료하지 못했습니다: ${failure}`);
         continue;
       }
     }
@@ -561,7 +605,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
     title: "엑셀 작업하기 · 실험",
     version: "0.4",
     editable: true,
-    executionTimeoutMs: 15 * 60 * 1000,
+    executionTimeoutMs: LIMITS.submissionMs,
     description:
       "전용 기능이 없는 엑셀 업무를 사용자와 기준을 구체화하며 수행한다. 여러 로컬 엑셀의 시트를 비교·병합·집계·분석하고, 필요한 기준을 질문하고 결과를 수정한다. LLM이 코드를 만들어 실행하고 PDF, HTML 또는 XLSX 결과를 만든다. 재사용 workflow 저장·예약 실행은 지원하지 않는다.",
     examples: ["거래처별 미수금 집계표를 같이 만들어보자", "엑셀로 월별 비용을 비교하고 기준을 정하면서 보고서를 만들어줘"],
@@ -635,7 +679,7 @@ function reviewResult(latest: { plan: AnalysisPlan; analysis: Analysis }) {
     excludedCount: analysis.result.excluded.length,
     excludedSample: analysis.result.excluded.slice(0, 20),
     notes: [...(analysis.sourceNotes ?? []), ...analysis.result.notes],
-    tables: analysis.result.tables.map((table) => ({
+    tables: [...analysis.result.tables, ...(analysis.result.datasets ?? [])].map((table) => ({
       title: table.title,
       columns: table.columns,
       totalRows: table.rows.length,

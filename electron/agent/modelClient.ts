@@ -51,7 +51,7 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
 function generationModels(models: string[], excluded?: string): string[] {
   // shortcut: /models has no standard capability field; exclude known non-chat aliases until the gateway supplies one.
   const candidates = models.filter((id) => id !== excluded && id !== process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim()
-    && !/(?:^|[\/_.-])(?:clef|embed(?:ding)?s?|rerank(?:er)?|whisper|tts|dall-e)(?:$|[\/_.-])/i.test(id));
+    && !/(?:^|[/_.-])(?:clef|embed(?:ding)?s?|rerank(?:er)?|whisper|tts|dall-e)(?:$|[/_.-])/i.test(id));
   const preferred = [DEFAULT_LITELLM_MODEL_ALIAS, "loki", "odin"].flatMap((alias) => candidates.filter((id) => id.toLowerCase() === alias));
   return [...new Set([...preferred, ...candidates])];
 }
