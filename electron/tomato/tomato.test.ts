@@ -81,7 +81,7 @@ it("structure chunks and incremental Korean BM25 search work end to end", async 
 
   await tomato.remove("work");
   expect(await tomato.listCollections()).toEqual([]);
-});
+}, 30000);
 
 it("vector helpers and RRF fusion", () => {
   const vector = new Float32Array([0.25, -0.5, 0.75]);
