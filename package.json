@@ -1,7 +1,7 @@
 {
   "name": "KetchupE",
   "private": true,
-  "version": "3.0.19",
+  "version": "3.0.20",
   "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.js",
@@ -121,6 +121,7 @@
     "exceljs": "4.4.0",
     "jszip": "3.10.1",
     "kordoc": "^4.18.3",
+    "pptxgenjs": "4.0.1",
     "quickjs-emscripten": "0.32.0",
     "react": "^19.0.0",
     "react-device-detect": "^2.2.3",

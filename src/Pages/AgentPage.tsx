@@ -240,6 +240,7 @@ const AgentPage = (): React.JSX.Element => {
     text: string,
     mode: string,
     threadId: string | null,
+    baseArtifactId?: string,
   ) => {
     setStartError(null);
     setStarting(true);
@@ -258,6 +259,7 @@ const AgentPage = (): React.JSX.Element => {
         workspaceId: WORKSPACE_ID,
         text,
         mode,
+        baseArtifactId,
       });
       if (started.kind === "canvas") canvasRun.attach(started.runId);
       else attachAgent(started.runId, started.action, started.status);
@@ -558,7 +560,7 @@ const AgentPage = (): React.JSX.Element => {
                     api={api}
                     threadId={selectedId}
                     running={view.isRunning}
-                    onRevise={() => void startRequest(REVISE_REQUEST_TEXT, "excel_work", selectedId)}
+                    onRevise={(artifactId) => void startRequest(REVISE_REQUEST_TEXT, "excel_work", selectedId, artifactId)}
                   />
                 )}
                 <div

@@ -1,9 +1,9 @@
 // @vitest-environment node
 import { expect, it, vi } from "vitest";
-const mock = vi.hoisted(() => ({ create: vi.fn(), destroy: vi.fn(), requestFilter: vi.fn() }));
+const mock = vi.hoisted(() => ({ create: vi.fn(), destroy: vi.fn(), requestFilter: vi.fn(), capture: vi.fn(async () => ({ toPNG: () => Buffer.from("png") })) }));
 vi.mock("electron", () => ({ BrowserWindow: class {
   destroyed = false;
-  webContents = { session: { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn(), webRequest: { onBeforeRequest: mock.requestFilter } }, setWindowOpenHandler: vi.fn(), on: vi.fn(), printToPDF: vi.fn(async () => Buffer.from("%PDF-1.7\n%%EOF")) };
+  webContents = { capturePage: mock.capture, session: { setPermissionRequestHandler: vi.fn(), setPermissionCheckHandler: vi.fn(), webRequest: { onBeforeRequest: mock.requestFilter } }, setWindowOpenHandler: vi.fn(), on: vi.fn(), printToPDF: vi.fn(async () => Buffer.from("%PDF-1.7\n%%EOF")) };
   loadURL = vi.fn(async () => undefined);
   isDestroyed = () => this.destroyed;
   destroy = () => { this.destroyed = true; mock.destroy(); };
@@ -25,4 +25,13 @@ it("rejects pre-cancelled printing without creating a window", async () => {
   const controller = new AbortController(); controller.abort();
   await expect(printReportPdf("test", controller.signal)).rejects.toThrow();
   expect(mock.create).toHaveBeenCalledTimes(count);
+});
+
+it("captures after the hidden SVG paint and checks size/cancellation", async () => {
+  const { captureChartPng } = await import("./pdf.ts");
+  await expect(captureChartPng('<svg viewBox="0 0 1 9000"></svg>', new AbortController().signal)).rejects.toThrow("너무 큽니다");
+  await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', new AbortController().signal)).resolves.toEqual(Buffer.from("png"));
+  expect(mock.capture).toHaveBeenCalledTimes(2);
+  const controller = new AbortController(); controller.abort();
+  await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', controller.signal)).rejects.toThrow();
 });
