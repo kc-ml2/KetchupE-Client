@@ -42,13 +42,13 @@ export function chartScale(values: number[], axis: AxisView = {}) {
 }
 
 /** Explicit ticks are passed through exactly; otherwise ECharts picks rounded ticks inside any requested range. */
-function valueAxis(values: number[], view: AxisView | undefined, name: string, zeroBased: boolean): Axis {
+function valueAxis(values: number[], view: AxisView | undefined, name: string, zeroBased: boolean, grid: "none" | "solid" | "dashed" = "solid"): Axis {
   const log = view?.scale === "log";
   if (log && [...values, view.min ?? 1, ...(view.tickValues ?? [])].some(value => value <= 0)) throw new ExcelError("UNSUPPORTED", "로그 축에는 0보다 큰 값만 표시할 수 있습니다. 축 범위나 데이터를 확인해 주세요.");
   const axisLabel: Record<string, unknown> = { color: INK, fontSize: 11, hideOverlap: true, formatter: (value: number) => label(value, view) };
   const axis: Axis = {
     type: log ? "log" : "value", scale: !zeroBased, name, nameLocation: "middle", nameTextStyle: { color: INK, fontSize: 13 },
-    axisLine: { show: true, lineStyle: { color: RULE } }, axisTick: { show: true }, splitLine: { lineStyle: { color: "#e4e4e7" } }, axisLabel,
+    axisLine: { show: true, lineStyle: { color: RULE } }, axisTick: { show: true }, splitLine: { show: grid !== "none", lineStyle: grid === "dashed" ? { color: "#a1a1aa", type: "dashed" } : { color: "#e4e4e7" } }, axisLabel,
   };
   if (view?.min !== undefined) axis.min = view.min;
   if (view?.max !== undefined) axis.max = view.max;
@@ -104,7 +104,7 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
     const width = (high - low) / bins || 1, counts = Array<number>(bins).fill(0);
     for (const value of values) counts[Math.min(bins - 1, Math.floor((value - low) / width))]++;
     option.xAxis = categoryAxis(counts.map((_, i) => `${label(low + i * width)}–${label(low + (i + 1) * width)}`), view.axes?.x?.label ?? data.columns[chart.y]);
-    option.yAxis = valueAxis(counts, view.axes?.left, view.axes?.left?.label ?? "빈도", true);
+    option.yAxis = valueAxis(counts, view.axes?.left, view.axes?.left?.label ?? "빈도", true, view.grid);
     option.series = [{ type: "bar", name: "빈도", data: counts, barCategoryGap: "4%", label: valueLabel && { ...valueLabel, position: "top" } }];
     notes.push(`구간 ${bins}개 · 구간 폭 ${label(width)} · 전체 ${values.length.toLocaleString("en-US")}개 값`);
   } else if (chart.type === "boxplot") {
@@ -118,7 +118,7 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
       for (const value of sorted) if (value < q1 - reach || value > q3 + reach) outliers.push([index, value]);
     }
     option.xAxis = categoryAxis([...groups.keys()], view.axes?.x?.label ?? data.columns[chart.x]);
-    option.yAxis = valueAxis(data.rows.map(row => Number(row.cells[chart.y])), view.axes?.left, view.axes?.left?.label ?? data.columns[chart.y], false);
+    option.yAxis = valueAxis(data.rows.map(row => Number(row.cells[chart.y])), view.axes?.left, view.axes?.left?.label ?? data.columns[chart.y], false, view.grid);
     option.series = [{ type: "boxplot", name: data.columns[chart.y], data: boxes, itemStyle: { color: "#dbeafe", borderColor: colors[0] } }];
     if (outliers.length) option.series.push({ type: "scatter", name: "이상치", data: outliers, symbolSize: 5, itemStyle: { color: colors[1] } });
     notes.push(`상자는 1·3사분위수와 중앙값, 수염은 1.5×IQR 이내 범위${outliers.length ? `, 이상치 ${outliers.length}개` : ""}`);
@@ -131,9 +131,9 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
     const sides = (["left", "right"] as const).filter(side => series.some(item => item.axis === side));
     const valueAxes = sides.map(side => valueAxis(
       series.filter(item => item.axis === side).flatMap(item => data.rows.map(row => Number(row.cells[item.y]))), view.axes?.[side],
-      view.axes?.[side]?.label ?? series.filter(item => item.axis === side).map(item => data.columns[item.y]).join(" / "), chart.type === "bar" || Boolean(chart.stack),
+      view.axes?.[side]?.label ?? series.filter(item => item.axis === side).map(item => data.columns[item.y]).join(" / "), chart.type === "bar" || Boolean(chart.stack), view.grid,
     ));
-    const baseAxis = numeric ? valueAxis(xs, view.axes?.x, view.axes?.x?.label ?? data.columns[chart.x], false) : categoryAxis(names, view.axes?.x?.label ?? data.columns[chart.x]);
+    const baseAxis = numeric ? valueAxis(xs, view.axes?.x, view.axes?.x?.label ?? data.columns[chart.x], false, view.grid) : categoryAxis(names, view.axes?.x?.label ?? data.columns[chart.x]);
     option.xAxis = horizontal ? valueAxes[0] : baseAxis;
     option.yAxis = horizontal ? { ...baseAxis, inverse: true } : valueAxes;
     const refs = chart.dataset ? data.rows.map(row => sourceFor(report.rowSources, row.sourceRows[0])) : [];
@@ -174,15 +174,32 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
           notes.push(`${annotation.label}: ${data.columns[item.y]} = ${label(mean)} (${candidates.length.toLocaleString("en-US")}점)`);
           continue;
         }
-        const target = annotation.kind === "max" ? Math.max(...candidates) : Math.min(...candidates);
-        const selected = values.findIndex((value, i) => visible[i] && value === target), ties = candidates.filter(value => value === target).length;
+        let selected: number, ties = 1;
+        if (annotation.kind === "valueAt") {
+          // The nearest measured point is shown as measured; nothing is interpolated.
+          selected = xs.reduce((best, x, i) => visible[i] && (best < 0 || Math.abs(x - annotation.x!) < Math.abs(xs[best] - annotation.x!)) ? i : best, -1);
+        } else {
+          const extreme = annotation.kind === "max" ? Math.max(...candidates) : Math.min(...candidates);
+          selected = values.findIndex((value, i) => visible[i] && value === extreme);
+          ties = candidates.filter(value => value === extreme).length;
+        }
+        const target = values[selected];
         const text = `${annotation.label}: X=${numeric ? label(xs[selected], view.axes?.x) : names[selected]}, Y=${label(target)}`;
         const inside = xs[selected] >= xMin && xs[selected] <= xMax && target >= yMin && target <= yMax;
-        if (inside) marks.push({ coord: point(xs[selected], target), name: annotation.kind, label: { formatter: text } });
+        if (inside) {
+          marks.push({ coord: point(xs[selected], target), name: annotation.kind, label: { formatter: text } });
+          // A dashed guide drops from the marked point to the base axis so its position can be read off.
+          lines.push({ [horizontal ? "yAxis" : "xAxis"]: numeric ? xs[selected] : names[selected], lineStyle: { color, type: "dashed" }, label: { show: false } });
+        }
         notes.push(`${text}${ties > 1 ? ` · 동률 ${ties}점 중 첫 측정점` : ""}${inside ? "" : " · 표시 범위 밖"}`);
       }
       if (marks.length) entry.markPoint = { symbol: "circle", symbolSize: 9, itemStyle: { color, borderColor: "#fff", borderWidth: 1 }, label: { show: true, position: "top", color: INK, fontSize: 12 }, data: marks };
       if (lines.length) entry.markLine = { symbol: "none", lineStyle: { color, type: "dashed" }, data: lines };
+      const guides = (view.referenceLines ?? []).filter(line => line.axis === item.axis && series.findIndex(other => other.axis === line.axis) === index || line.axis === "x" && index === 0);
+      if (guides.length) entry.markLine = {
+        symbol: "none", lineStyle: { color, type: "dashed" },
+        data: [...lines, ...guides.map(line => ({ [(line.axis === "x") !== horizontal ? "xAxis" : "yAxis"]: line.value, lineStyle: { color: "#52525b", type: "dashed" }, label: { formatter: line.label ?? label(line.value, view.axes?.[line.axis]), position: line.axis === "x" ? "end" : "insideEndTop", color: INK, fontSize: 12 } }))],
+      };
       option.series.push(entry);
       // A lone measurement between two gaps has no segment to draw, so it gets a visible point.
       if (isolated.length && !entry.showSymbol) option.series.push({ type: "scatter", data: isolated, yAxisIndex: entry.yAxisIndex, symbolSize: 5, itemStyle: { color }, isolated: index });
