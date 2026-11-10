@@ -17,7 +17,6 @@ import Sidebar from "@Features/Sidebar/components/Sidebar";
 import NavRail from "@Features/Sidebar/components/NavRail";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
-import { REVISE_REQUEST_TEXT } from "@app-types/BusinessTool.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
 import { useThreadMessages } from "@Features/Agent/hooks/useThreadMessages";
 import {
@@ -75,6 +74,13 @@ const AgentPage = (): React.JSX.Element => {
   const [modelConfigurable, setModelConfigurable] = useState(false);
   const [input, setInput] = useState("");
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  // Business results open in their own right-hand panel; closing it leaves a reopen button above the input.
+  const [resultsHidden, setResultsHidden] = useState(false);
+  const [resultsAvailable, setResultsAvailable] = useState(false);
+  // An older Excel result picked in the results panel; the next chat request revises it instead of the latest one.
+  const [revisionTarget, setRevisionTarget] = useState<string | null>(null);
+  useEffect(() => { setResultsHidden(false); setResultsAvailable(false); }, [selectedId]);
+  useEffect(() => { if (view.isRunning) setResultsHidden(false); }, [view.isRunning]);
   const [memoryStatus, setMemoryStatus] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [dismissedActionId, setDismissedActionId] = useState<string | null>(
@@ -228,6 +234,10 @@ const AgentPage = (): React.JSX.Element => {
       return;
     }
     setInput("");
+    if (revisionTarget && !activeRunId) {
+      await startRequest(text, "excel_work", selectedId, revisionTarget);
+      return;
+    }
     await startRequest(
       text,
       awaitingContractRequest ? "doc" : "auto",
@@ -557,13 +567,15 @@ const AgentPage = (): React.JSX.Element => {
                     {canvas.canvas.title || "문서"} 다시 열기
                   </button>
                 )}
-                {selectedId && (
-                  <BusinessArtifacts
-                    api={api}
-                    threadId={selectedId}
-                    running={view.isRunning}
-                    onRevise={(artifactId) => void startRequest(REVISE_REQUEST_TEXT, "excel_work", selectedId, artifactId)}
-                  />
+                {resultsAvailable && resultsHidden && (
+                  <button
+                    type="button"
+                    onClick={() => setResultsHidden(false)}
+                    className="inline-flex items-center gap-1 mb-2 rounded border border-[#D4D4D8] dark:border-[#52525B] p-2 bg-white dark:bg-[#18181B] text-sm text-black dark:text-white"
+                  >
+                    <LuFileText aria-hidden />
+                    업무 결과 다시 열기
+                  </button>
                 )}
                 <div
                   role="group"
@@ -661,6 +673,17 @@ const AgentPage = (): React.JSX.Element => {
             </div>
           </div>
 
+          {selectedId && (
+            <BusinessArtifacts
+              api={api}
+              threadId={selectedId}
+              running={view.isRunning}
+              hidden={resultsHidden}
+              onClose={() => setResultsHidden(true)}
+              onAvailableChange={setResultsAvailable}
+              onRevisionTargetChange={setRevisionTarget}
+            />
+          )}
           {canvas.canvas && !canvas.hidden && (
             <CanvasPanel
               canvas={canvas.canvas}
