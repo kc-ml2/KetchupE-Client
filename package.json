@@ -1,7 +1,7 @@
 {
   "name": "KetchupE",
   "private": true,
-  "version": "3.0.20",
+  "version": "3.0.21",
   "license": "MIT",
   "type": "module",
   "main": "dist-electron/main.js",
@@ -52,6 +52,14 @@
       {
         "from": "electron/assets/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "third-party-licenses",
+        "to": "third-party-licenses"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
       }
     ],
     "mac": {
@@ -117,6 +125,7 @@
     "decimal.js": "10.5.0",
     "docx": "^9.7.1",
     "dotenv": "^16.4.5",
+    "echarts": "6.1.0",
     "electron-updater": "^6.8.3",
     "exceljs": "4.4.0",
     "jszip": "3.10.1",
