@@ -10,6 +10,8 @@ import { createExcelTool, type ExcelDependencies } from "./tool.ts";
 import { profileWorkbook, readAnalysisInputs } from "./workbook.ts";
 import { runAnalysis } from "./sandbox.ts";
 import { renderHtml, evidenceText, renderXlsx } from "./render.ts";
+import { chartOption, chartSvg } from "./chart.ts";
+import type { Report } from "./contracts.ts";
 import { fixtureReport } from "./fixtures.ts";
 import { EXCEL_LIMITS } from "./limits.ts";
 
@@ -18,6 +20,14 @@ const chart: ChartRequest = {
   input: { fileId: "file1", sheet: "측정", headerRow: 1, columns: [{ index: 2, name: "Temperature(℃)", key: "x" }, { index: 3, name: "Weight(%)", key: "w" }, { index: 4, name: "Deriv. Weight(%/℃)", key: "d" }] },
   x: { key: "x", label: "Temperature", unit: "℃" },
   series: [{ key: "w", label: "Weight", unit: "%", axis: "left" }, { key: "d", label: "Deriv. Weight", unit: "%/℃", axis: "right" }],
+};
+
+/** Chart assertions read the ECharts option: series data, axis settings and marks, not SVG coordinates. */
+const drawn = (report: Report, index = 0) => {
+  const { option, notes } = chartOption(report, (report.result.charts ?? [report.result.chart!])[index]);
+  const axes = { x: option.xAxis!, left: [option.yAxis!].flat()[0], right: [option.yAxis!].flat()[1] };
+  const ticks = (side: keyof typeof axes) => (axes[side].axisLabel as { customValues?: number[]; formatter: (value: number) => string });
+  return { option, notes, axes, ticks, lines: option.series.filter(series => series.type === "line") };
 };
 
 async function setup(count = 5) {
@@ -87,7 +97,8 @@ it("draws all 10,869 measurements with numeric X and two axes in one model call 
   expect(JSON.stringify(result.checkpoint).length).toBeLessThan(1000000);
   expect(result.checkpoint).not.toHaveProperty("excelState.latest");
   const dom = new JSDOM(Buffer.from(result.file.bytes).toString());
-  expect(dom.window.document.querySelectorAll('path[data-points="10869"]')).toHaveLength(2);
+  expect(drawn(report).lines.map(series => series.data.length)).toEqual([10869, 10869]);
+  expect(dom.window.document.querySelectorAll("svg path").length).toBeGreaterThan(2);
   expect(dom.window.document.querySelectorAll("tbody tr")).toHaveLength(0);
   expect(dom.window.document.body.textContent).toContain("Weight (%)");
   expect(dom.window.document.body.textContent).toContain("오른쪽 축");
@@ -102,20 +113,26 @@ it("uses numeric spacing and breaks a line across missing source rows", async ()
   const report = vi.mocked(deps.export).mock.calls[0][0];
   const data = report.result.datasets![0];
   data.rows.splice(2, 1);
-  const html = renderHtml(report), dom = new JSDOM(html);
-  const path = dom.window.document.querySelector('path[data-series="0"]')!.getAttribute("d")!;
-  expect(path.match(/M/g)).toHaveLength(2);
-  expect(path).toMatch(/^M120\.00 .* L165\.00 /); // second point is 1/16 of the numeric span, not one quarter
+  const points = drawn(report).lines[0].data as [number, number | null][];
+  expect(points.map(point => point[1] === null)).toEqual([false, false, true, false, false]); // the pen lifts once, no point is dropped
+  expect(points[1][0]).toBe(25.2); // numeric X keeps the measured spacing, not one step per row
+  expect(drawn(report).axes.x.type).toBe("value");
+  expect(chartSvg(report)).toMatch(/<path d="M[^"]*L[^"]*M[^"]*L[^"]*"[^>]*stroke="#2563eb"/);
   expect(evidenceText(report, [1, 2, 4, 5])).toContain("2-3, 5-6행");
-  dom.window.close();
 });
 
 it("shows isolated measurements instead of leaving a single-point line invisible", async () => {
   const { input, deps, tool } = await setup(1);
   await tool.execute(input);
-  const dom = new JSDOM(renderHtml(vi.mocked(deps.export).mock.calls[0][0]));
-  expect(dom.window.document.querySelectorAll('circle[cx="480.00"][cy="210.00"]')).toHaveLength(2);
-  dom.window.close();
+  const single = vi.mocked(deps.export).mock.calls[0][0];
+  expect(drawn(single).lines.map(series => series.showSymbol)).toEqual([true, true]);
+  const many = await setup(100);
+  await many.tool.execute(many.input);
+  const report = vi.mocked(many.deps.export).mock.calls[0][0];
+  report.result.datasets![0].rows.splice(51, 1);
+  report.result.datasets![0].rows.splice(49, 1); // row 51 now stands alone between two gaps
+  const isolated = drawn(report).option.series.filter(series => series.type === "scatter");
+  expect(isolated.map(series => series.data)).toEqual([[[25 + 50 * 50 / 100, 55]], [[25 + 50 * 50 / 100, .5]]]);
 });
 
 it("replays only the fixed chart template after an export failure and rejects changed sources", async () => {
@@ -212,10 +229,10 @@ it("accumulates axis, peak and title edits across 22 saved revisions without pro
   expect(prompt.length).toBeLessThan(4000);
   expect(JSON.parse(prompt)).not.toHaveProperty("computed");
   expect(prompt).not.toContain("return {");
-  const dom = new JSDOM(renderHtml(vi.mocked(deps.export).mock.calls.at(-1)![0]));
-  expect([...dom.window.document.querySelectorAll('[data-axis="right"]')].map(el => el.textContent)).toEqual(["0.0", "2.0", "4.0", "6.0", "8.0", "10.0"]);
-  expect(dom.window.document.querySelector('[data-annotation="max"]')?.getAttribute("data-x")).toBe("26.8");
-  dom.window.close();
+  const chartView = drawn(vi.mocked(deps.export).mock.calls.at(-1)![0]);
+  expect(chartView.ticks("right").customValues!.map(chartView.ticks("right").formatter)).toEqual(["0.0", "2.0", "4.0", "6.0", "8.0", "10.0"]);
+  expect(chartView.axes.right).toMatchObject({ min: 0, max: 10 });
+  expect(chartView.lines[1].markPoint).toMatchObject({ data: [{ coord: [26.8, 9], label: { formatter: "Tmax: X=26.8, Y=9" } }] });
 });
 
 it("preserves resolved changes while a mixed follow-up answers the remaining question", async () => {
@@ -284,15 +301,14 @@ it("applies integer labels on all three axes and a peak without a model-supplied
     title: "이전 제목", axes: { x: { decimals: 0 }, left: { min: 0, max: 100, decimals: 0 }, right: { decimals: 0 } }, annotations: [{ series: 1, kind: "max", label: "최대점", scope: "selectedData" }],
   } } } } } });
   if (result.status !== "completed") throw new Error("not completed");
-  const dom = new JSDOM(Buffer.from(result.file.bytes).toString());
-  for (const axis of ["x", "left", "right"]) {
-    const labels = [...dom.window.document.querySelectorAll(`[data-axis="${axis}"]`)].map(node => node.textContent!);
-    expect(labels.length).toBeGreaterThan(0);
-    expect(labels.every(text => /^-?\d+$/.test(text))).toBe(true);
-    expect(new Set(labels).size).toBe(labels.length);
+  const chartView = drawn(vi.mocked(deps.export).mock.calls.at(-1)![0]);
+  for (const axis of ["x", "left", "right"] as const) {
+    expect(chartView.axes[axis].minInterval).toBe(1); // whole-number ticks cannot repeat a rounded label
+    expect(chartView.ticks(axis).formatter(12.6)).toBe("13");
   }
-  expect(dom.window.document.querySelector('[data-annotation="max"]')?.getAttribute("data-y")).toBe("9");
-  dom.window.close();
+  expect(chartView.axes.left).toMatchObject({ min: 0, max: 100 });
+  expect(chartView.lines[1].markPoint).toMatchObject({ data: [{ coord: [26.8, 9] }] });
+  expect(Buffer.from(result.file.bytes).toString()).toContain("최대점: X=27, Y=9");
   expect(revise).toHaveBeenCalledOnce();
   expect(deps.complete).toHaveBeenCalledOnce();
   expect(deps.profile).toHaveBeenCalledOnce();
@@ -347,7 +363,7 @@ it("fixes Date and random per execution without changing explicit dates or leaki
 });
 
 it("includes the floating-point upper tick (1.2 at step 0.2) and restores automatic axes", async () => {
-  const { chartScale } = await import("./lineChart.ts");
+  const { chartScale } = await import("./chart.ts");
   const { mergeView } = await import("./view.ts");
   expect(chartScale([-.01,1.19], { min: 0, max: 1.2, tickStep: .2 }).ticks).toHaveLength(7);
   expect(chartScale([-.01,1.19], { min: 0, max: 1.2, tickStep: .2 }).ticks.at(-1)).toBe(1.2);

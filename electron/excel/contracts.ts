@@ -40,6 +40,7 @@ export const chartRequest = analysisPlan.omit({ kind: true, code: true, inputs: 
   kind: z.literal("chart"), input: sheetPlan,
   x: axisColumn,
   series: z.array(axisColumn.extend({ axis: z.enum(["left", "right"]), transform: z.enum(["identity", "loss100", "lossInitial"]).optional() }).strict()).min(1).max(4),
+  chartType: z.enum(["line", "area", "scatter"]).optional(), smooth: z.boolean().optional(), stack: z.boolean().optional(),
 }).strict();
 export type ChartRequest = z.infer<typeof chartRequest>;
 const questionOption = z.object({ value: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), label: z.string().min(1).max(500), plan: chartRequest.optional() }).strict();
@@ -68,11 +69,15 @@ export type CellMetadata = { display: string; numFmt: string; formula?: string; 
 export type InputRow = SourceRef & { id: number; values: Record<string, Cell>; sourceCells?: Record<string, string>; metadata?: Record<string, CellMetadata> };
 export type WorkbookProfile = { sheets: { name: string; state: string; rows: number; columns: number; firstColumn: number; metadata: Record<string, CellMetadata>; conditionalFormatting: unknown[]; outline: { entries: { row: number; text: string }[]; nextRow: number | null }; search: { matchedRowCount: number; shownMatchRows: number[]; truncated: boolean; requestedCells: { address: string; row: number; column: number; inBounds: boolean }[]; omittedCellCount: number }; preview: { row: number; cells: Cell[] }[]; mergedCells: Record<string, string>; formulaCells: string[]; issues: { address: string; message: string }[] }[] };
 
+export const chartTypes = ["bar", "line", "scatter", "pie", "area", "histogram", "boxplot", "heatmap"] as const;
 export const chartSpec = z.object({
-  type: z.enum(["bar", "line", "scatter", "pie"]), table: z.number().int().min(0).max(19),
+  type: z.enum(chartTypes), table: z.number().int().min(0).max(19),
   dataset: z.boolean().optional(), x: z.number().int().min(0).max(19), y: z.number().int().min(0).max(19),
   title: z.string().max(120), trendline: z.boolean().optional(), xScale: z.enum(["linear", "category"]).optional(),
   series: z.array(z.object({ y: z.number().int().min(0).max(19), axis: z.enum(["left", "right"]) }).strict()).min(1).max(4).optional(),
+  // Shape options are part of the computed chart; display edits (axes, annotations, colors) live in the view.
+  stack: z.boolean().optional(), horizontal: z.boolean().optional(), smooth: z.boolean().optional(), donut: z.boolean().optional(),
+  bins: z.number().int().min(2).max(100).optional(), value: z.number().int().min(0).max(19).optional(),
 }).strict();
 export type ChartSpec = z.infer<typeof chartSpec>;
 const resultTable = z.object({
@@ -93,9 +98,10 @@ export const reportCharts = (report: Report) => report.result.charts ?? (report.
 
 export const chartTable = (report: Pick<Report, "result">, chart: ChartSpec) => (chart.dataset ? report.result.datasets : report.result.tables)?.[chart.table];
 export const chartSeries = (chart: ChartSpec) => chart.series ?? [{ y: chart.y, axis: "left" as const }];
+/** Native Excel charts cover the single-series basics; everything else is drawn by ECharts for HTML/PDF/PNG/PPTX. */
 export function assertChartFormat(charts: ChartSpec[], format: OutputFormat) {
-  if (format === "xlsx" && charts.some(chart => chart.dataset || chart.series || chart.xScale === "linear" && chart.type === "line"))
-    throw new ExcelError("UNSUPPORTED", "숫자형 선 그래프·이중축·전체 데이터 차트는 HTML 또는 PDF로 저장해 주세요. XLSX 이중축은 아직 지원하지 않습니다.");
+  if (format === "xlsx" && charts.some(chart => chart.dataset || chart.series || chart.xScale === "linear" && chart.type === "line" || chart.type === "histogram" || chart.type === "boxplot" || chart.type === "heatmap"))
+    throw new ExcelError("UNSUPPORTED", "숫자형 선 그래프·이중축·복수 시리즈·전체 데이터 차트와 히스토그램·박스플롯·히트맵은 HTML 또는 PDF로 저장해 주세요. XLSX는 막대·선·영역·산점도·원형 단일 시리즈 차트만 지원합니다.");
 }
 
 export function parseModelJson(value: string): unknown {
@@ -134,14 +140,22 @@ export function validateResult(raw: unknown, rows: InputRow[]): AnalysisResult {
   if (missing.length) throw new Error(`r.id ${missing.slice(0, 20).join(", ")}${missing.length > 20 ? ` 외 ${missing.length - 20}개` : ""} 누락: 결과 sourceRows에도 excluded에도 없습니다. 모든 입력 행을 둘 중 하나에 넣으세요.`);
   if (result.chart && result.charts?.length) throw new Error("chart 또는 charts 중 하나만 사용하세요.");
   for (const chart of result.charts ?? (result.chart ? [result.chart] : [])) {
-    const { table: index, x, y } = chart;
+    const { table: index, x, y, type } = chart;
     const table = (chart.dataset ? result.datasets : result.tables)?.[index];
-    const series = chartSeries(chart), limit = chart.type === "bar" || chart.type === "pie" ? L.categoricalChartRows : L.chartRows;
-    if (!table || x >= table.columns.length || !table.rows.length || table.rows.length > limit || series.some(item => item.y === x || item.y >= table.columns.length || table.rows.some(row => typeof row.cells[item.y] !== "number"))) throw new ExcelError("CONTRACT", `차트는 숫자 값이 있는 1~${limit}개 행과 서로 다른 유효한 열이 필요합니다.`);
-    if (chart.series && (chart.type !== "line" || new Set(series.map(item => item.y)).size !== series.length)) throw new Error("복수 시리즈는 서로 다른 Y열의 선 그래프에서 지원합니다.");
-    if ((chart.type === "scatter" || chart.xScale === "linear") && table.rows.some(row => typeof row.cells[x] !== "number")) throw new Error("산점도의 x값은 숫자여야 합니다.");
-    if (chart.type === "pie" && (table.rows.some(row => Number(row.cells[y]) < 0) || !table.rows.some(row => Number(row.cells[y]) > 0))) throw new Error("원형 차트에는 음수 없이 양수 값이 필요합니다.");
-    if (chart.trendline && chart.type !== "scatter") throw new Error("회귀선은 산점도에서만 지원합니다.");
+    const series = chartSeries(chart), limit = type === "bar" || type === "pie" ? L.categoricalChartRows : L.chartRows;
+    const numeric = (column: number) => table!.rows.every(row => typeof row.cells[column] === "number");
+    const distinct = (column: number) => new Set(table!.rows.map(row => String(row.cells[column]))).size;
+    if (!table || x >= table.columns.length || !table.rows.length || table.rows.length > limit || series.some(item => item.y === x && type !== "histogram" || item.y >= table.columns.length || type !== "heatmap" && !numeric(item.y))) throw new ExcelError("CONTRACT", `차트는 숫자 값이 있는 1~${limit}개 행과 서로 다른 유효한 열이 필요합니다.`);
+    if (chart.series && (!["line", "area", "bar", "scatter"].includes(type) || new Set(series.map(item => item.y)).size !== series.length)) throw new Error("복수 시리즈는 서로 다른 Y열의 선·영역·막대·산점도에서 지원합니다.");
+    if ((type === "scatter" || chart.xScale === "linear") && !numeric(x)) throw new Error("산점도의 x값은 숫자여야 합니다.");
+    if (chart.xScale === "linear" && !["line", "area", "scatter"].includes(type)) throw new Error("xScale:\"linear\"는 선·영역·산점도에서 지원합니다.");
+    if (type === "pie" && (table.rows.some(row => Number(row.cells[y]) < 0) || !table.rows.some(row => Number(row.cells[y]) > 0))) throw new Error("원형 차트에는 음수 없이 양수 값이 필요합니다.");
+    if (chart.trendline && type !== "scatter") throw new Error("회귀선은 산점도에서만 지원합니다.");
+    if (chart.stack && type !== "bar" && type !== "area" || chart.horizontal && type !== "bar" || chart.smooth && type !== "line" && type !== "area" || chart.donut && type !== "pie" || chart.bins && type !== "histogram") throw new Error("stack은 막대·영역, horizontal은 막대, smooth는 선·영역, donut은 원형, bins는 히스토그램에서만 지원합니다.");
+    if (chart.horizontal && series.some(item => item.axis === "right")) throw new Error("가로 막대는 보조축을 지원하지 않습니다.");
+    if ((type === "heatmap") !== (chart.value !== undefined)) throw new Error("value 열은 히트맵에만, 히트맵에는 반드시 지정합니다.");
+    if (type === "heatmap" && (chart.value! >= table.columns.length || new Set([x, y, chart.value]).size !== 3 || !numeric(chart.value!) || distinct(x) > 100 || distinct(y) > 100)) throw new Error("히트맵은 서로 다른 x·y 범주 열(각 100종 이하)과 숫자 value 열이 필요합니다.");
+    if (type === "boxplot" && distinct(x) > 100) throw new Error("박스플롯의 x 범주는 100종 이하여야 합니다.");
   }
   return result;
 }

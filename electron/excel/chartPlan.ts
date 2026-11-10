@@ -17,7 +17,10 @@ export function compileChart(raw: ChartRequest): AnalysisPlan {
   }
   if (plan.series.some(series => series.transform && series.transform !== "identity" && series.unit !== "%"))
     throw new ExcelError("CONTRACT", "Weight Loss 변환은 원본 백분율 값에만 적용합니다.");
-  const config = JSON.stringify({ x: plan.x, series: plan.series, title: plan.title });
+  if (plan.stack && plan.chartType !== "area" || plan.smooth && plan.chartType === "scatter") throw new ExcelError("CONTRACT", "stack은 영역, smooth는 선·영역 그래프에서 지원합니다.");
+  const type = plan.chartType ?? "line";
+  const options = { ...(type === "scatter" ? {} : { xScale: "linear" }), ...(plan.smooth ? { smooth: true } : {}), ...(plan.stack ? { stack: true } : {}) };
+  const config = JSON.stringify({ x: plan.x, series: plan.series, title: plan.title, type, options });
   const code = `const p = ${config};
 const label = c => c.unit && c.label.replace(/\\s/g, '').endsWith('('+c.unit+')') ? c.label : c.label + (c.unit ? ' (' + c.unit + ')' : '');
 const rows = [], excluded = [];
@@ -27,7 +30,7 @@ for (const r of input.rows) {
   if (typeof x !== 'number' || ys.some(v => typeof v !== 'number')) { excluded.push({row:r.id,reason:'선택 열의 숫자 데이터 없음'}); continue; }
   rows.push({cells:[x,...ys.map((v,i) => p.series[i].transform === 'loss100' ? 100-v : p.series[i].transform === 'lossInitial' ? initial[i]-v : v)],sourceRows:[r.id]});
 }
-return {tables:[],datasets:[{title:p.title,columns:[label(p.x),...p.series.map(label)],rows}],excluded,notes:['원본 측정 순서를 유지하며 유효한 전체 데이터를 표시했습니다.'],charts:[{type:'line',table:0,dataset:true,x:0,y:1,xScale:'linear',title:p.title,series:p.series.map((s,i)=>({y:i+1,axis:s.axis}))}]};`;
+return {tables:[],datasets:[{title:p.title,columns:[label(p.x),...p.series.map(label)],rows}],excluded,notes:['원본 측정 순서를 유지하며 유효한 전체 데이터를 표시했습니다.'],charts:[{type:p.type,table:0,dataset:true,x:0,y:1,...p.options,title:p.title,series:p.series.map((s,i)=>({y:i+1,axis:s.axis}))}]};`;
   return analysisPlan.parse({ kind: "execute", title: plan.title, format: plan.format, formats: plan.formats, view: plan.view, layout: plan.layout, steps: plan.steps, assumptions: plan.assumptions, sections: plan.sections, inputs: [plan.input], code, summary: plan.summary ?? "선택한 열의 전체 숫자 데이터를 원본 순서대로 그렸습니다. 축과 단위는 그래프에 표시했습니다." });
 }
 
