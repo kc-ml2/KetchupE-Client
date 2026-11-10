@@ -88,7 +88,7 @@ it("applies log scale, min/mean annotations, value labels and colors as display 
   const { option: drawn, notes } = option(base);
   expect([drawn.yAxis].flat()[0]).toMatchObject({ type: "log", min: 1, max: 1000, axisLabel: { customValues: [1, 10, 100, 1000] } });
   expect((drawn.color as string[]).slice(0, 2)).toEqual(["#111111", "#2563eb"]);
-  expect(drawn.series[0]).toMatchObject({ label: { show: true }, markPoint: { data: [{ coord: [1, 10] }, { coord: [2, 1000] }] }, markLine: { data: [{ yAxis: 280 }] } });
+  expect(drawn.series[0]).toMatchObject({ label: { show: true }, markPoint: { data: [{ coord: [1, 10] }, { coord: [2, 1000] }] }, markLine: { data: [{ xAxis: 1 }, { yAxis: 280 }, { xAxis: 2 }] } }); // each marked point drops a dashed guide to the X axis
   expect(notes).toEqual(["최소점: X=1, Y=10 · 동률 2점 중 첫 측정점", "평균: y = 280 (4점)", "피크: X=2, Y=1000"]);
   expect(chartSvg(base)).toContain("피크: X=2, Y=1000");
   // Clearing a display edit restores the default; replacing one annotation keeps the others.
@@ -133,4 +133,36 @@ it("writes native Excel area, horizontal bar and doughnut charts and refuses the
   expect(xml[2]).toMatch(/<c:doughnutChart>.*<c:holeSize val="50"\/><\/c:doughnutChart>/);
   for (const chart of [{ type: "histogram" }, { type: "boxplot" }, { type: "heatmap", y: 1, value: 2 }, { type: "bar", series: [{ y: 1, axis: "left" }] }] as Partial<ChartSpec>[])
     await expect(renderXlsx(report(columns, sales, chart))).rejects.toThrow("XLSX는 막대·선·영역·산점도·원형 단일 시리즈");
+});
+
+it("draws dashed guides, reads a value at a given X and switches grid lines like a TGA figure", () => {
+  const rows = Array.from({ length: 88 }, (_, i) => { const t = 30 + i * 10; return [t, t < 500 ? 98 : t > 660 ? 1.48 : 98 - (t - 500) * .6, Math.max(0, 1.2 - Math.abs(t - 607) / 60)]; });
+  const tga = report(["Temperature (℃)", "Weight (%)", "Deriv. Weight (%/℃)"], rows, { type: "line", xScale: "linear", series: [{ y: 1, axis: "left" }, { y: 2, axis: "right" }] });
+  tga.view = mergeView(undefined, { charts: { "0": {
+    grid: "none", referenceLines: [{ axis: "x", value: 800 }, { axis: "right", value: 1, label: "기준" }],
+    annotations: [{ series: 1, kind: "max", label: "Tmax" }, { series: 0, kind: "valueAt", x: 803, label: "Residue" }],
+  } } });
+  const { option: drawn, notes } = option(tga);
+  expect([drawn.xAxis, ...[drawn.yAxis].flat()].map(axis => (axis!.splitLine as { show: boolean }).show)).toEqual([false, false, false]);
+  expect(drawn.series[0]).toMatchObject({ markPoint: { data: [{ coord: [800, 1.48], label: { formatter: "Residue: X=800, Y=1.48" } }] }, markLine: { data: [{ xAxis: 800 }, { xAxis: 800, label: { formatter: "800" } }] } });
+  expect(drawn.series[1]).toMatchObject({ markPoint: { data: [{ coord: [610, 1.15] }] }, markLine: { lineStyle: { type: "dashed" }, data: [{ xAxis: 610 }, { yAxis: 1, label: { formatter: "기준" } }] } });
+  expect(notes).toEqual(["Residue: X=800, Y=1.48", "Tmax: X=610, Y=1.15"]);
+  expect(chartSvg(tga)).toContain("stroke-dasharray");
+  tga.view = mergeView(tga.view, { charts: { "0": { grid: "dashed", referenceLines: [] } } });
+  expect(tga.view.charts["0"]).not.toHaveProperty("referenceLines");
+  expect(tga.view.charts["0"].annotations).toHaveLength(2);
+  expect([option(tga).option.yAxis].flat()[0]).toMatchObject({ splitLine: { show: true, lineStyle: { type: "dashed" } } });
+  // A second valueAt at another X is a separate annotation; the same X updates its label.
+  const more = mergeView(tga.view, { charts: { "0": { annotations: [{ series: 0, kind: "valueAt", x: 400 }, { series: 0, kind: "valueAt", x: 803, label: "잔량" }] } } }).charts["0"].annotations!;
+  expect(more.map(item => [item.kind, item.x, item.label])).toEqual([["max", undefined, "Tmax"], ["valueAt", 803, "잔량"], ["valueAt", 400, "값"]]);
+});
+
+it("rejects guides that the chart cannot place", () => {
+  expect(() => mergeView(undefined, { charts: { "0": { annotations: [{ series: 0, kind: "valueAt" }] } } })).toThrow("valueAt");
+  expect(() => mergeView(undefined, { charts: { "0": { annotations: [{ series: 0, kind: "max", x: 3 }] } } })).toThrow("valueAt");
+  expect(() => renderHtml(report(columns, sales, { type: "bar" }, { referenceLines: [{ axis: "x", value: 2 }] }))).toThrow("세로 보조선");
+  expect(() => renderHtml(report(columns, sales, { type: "bar" }, { referenceLines: [{ axis: "right", value: 2 }] }))).toThrow("오른쪽 Y축");
+  expect(() => renderHtml(report(columns, sales, { type: "line" }, { annotations: [{ series: 0, kind: "valueAt", x: 2, label: "값", scope: "selectedData" }] }))).toThrow("숫자형 X축");
+  expect(() => renderHtml(report(columns, sales, { type: "pie" }, { grid: "dashed" }))).toThrow("그리드·보조선");
+  expect(() => renderHtml(report(columns, sales, { type: "bar" }, { grid: "dashed", referenceLines: [{ axis: "left", value: 110, label: "목표" }] }))).not.toThrow();
 });

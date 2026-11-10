@@ -15,6 +15,9 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
     }
     if (patch.labels === null) delete chart.labels; else if (patch.labels !== undefined) chart.labels = patch.labels;
     if (patch.colors === null) delete chart.colors; else if (patch.colors !== undefined) chart.colors = patch.colors;
+    if (patch.grid === null) delete chart.grid; else if (patch.grid !== undefined) chart.grid = patch.grid;
+    // Reference lines have no identity to merge on, so a patch states the whole list; [] or null removes them.
+    if (patch.referenceLines === null || patch.referenceLines?.length === 0) delete chart.referenceLines; else if (patch.referenceLines) chart.referenceLines = patch.referenceLines;
     for (const side of ["x", "left", "right"] as const) {
       const update = patch.axes?.[side];
       if (update === undefined) continue;
@@ -30,7 +33,7 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
       else {
         const annotations = chart.annotations ?? [];
         for (const item of patch.annotations) {
-          const index = annotations.findIndex(old => old.series === item.series && old.scope === item.scope && old.kind === item.kind);
+          const index = annotations.findIndex(old => old.series === item.series && old.scope === item.scope && old.kind === item.kind && old.x === item.x);
           const annotation = { ...item, label: item.label ?? annotations[index]?.label ?? annotationLabels[item.kind] };
           if (index < 0) annotations.push(annotation); else annotations[index] = annotation;
         }
@@ -56,6 +59,12 @@ export function validateView(report: Report) {
     if (!numericX(chart) && settings.axes?.x && Object.keys(settings.axes.x).some(key => key !== "label")) throw new ExcelError("UNSUPPORTED", "숫자형 X축에서만 범위·눈금·로그 스케일을 수정할 수 있습니다.");
     for (const axis of Object.values(settings.axes ?? {})) if (axis?.scale === "log" && axis.tickStep !== undefined) throw new ExcelError("UNSUPPORTED", "로그 축의 눈금은 간격 대신 tickValues로 지정해 주세요.");
     if (settings.labels && (chartTable(report, chart)?.rows.length ?? 0) > 500) throw new ExcelError("UNSUPPORTED", "값 라벨은 500점 이하 차트에서 지원합니다.");
+    if ((settings.grid || settings.referenceLines) && !cartesian) throw new ExcelError("UNSUPPORTED", "원형 차트와 히트맵은 그리드·보조선을 지원하지 않습니다.");
+    for (const line of settings.referenceLines ?? []) {
+      if (line.axis === "x" && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "세로 보조선은 숫자형 X축에서 지원합니다.");
+      if (line.axis === "right" && !chartSeries(chart).some(series => series.axis === "right")) throw new ExcelError("UNSUPPORTED", "이 그래프에는 오른쪽 Y축이 없습니다.");
+    }
+    if (settings.annotations?.some(item => item.kind === "valueAt") && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "특정 X의 값 표시는 숫자형 X축에서 지원합니다.");
     for (const item of settings.annotations ?? []) if (!chartSeries(chart)[item.series]) throw new ExcelError("UNSUPPORTED", "값을 표시할 시리즈가 없습니다.");
   }
 }
@@ -72,6 +81,8 @@ export function viewSummary(before: ReportView | undefined, after: ReportView): 
       if (JSON.stringify(value) !== JSON.stringify(old.axes?.[side]?.[key])) changes.push(`${prefix} ${side === "x" ? "X" : side === "left" ? "왼쪽 Y" : "오른쪽 Y"} ${names[key]}: ${Array.isArray(value) ? value.join(", ") : value ?? "자동"}`);
     }
     if (JSON.stringify(chart.annotations) !== JSON.stringify(old.annotations)) changes.push(`${prefix} 값 표시: ${chart.annotations?.length ? chart.annotations.map(item => `${item.label} (시리즈 ${item.series + 1})`).join(", ") : "표시 해제"}`);
+    if (chart.grid !== old.grid) changes.push(`${prefix} 그리드: ${chart.grid === "none" ? "숨김" : chart.grid === "dashed" ? "점선" : chart.grid === "solid" ? "실선" : "기본값"}`);
+    if (JSON.stringify(chart.referenceLines) !== JSON.stringify(old.referenceLines)) changes.push(`${prefix} 보조선: ${chart.referenceLines?.map(line => `${line.axis === "x" ? "X" : line.axis === "left" ? "왼쪽 Y" : "오른쪽 Y"}=${line.value}`).join(", ") ?? "없음"}`);
     if (chart.labels !== old.labels) changes.push(`${prefix} 값 라벨: ${chart.labels ? "표시" : "숨김"}`);
     if (JSON.stringify(chart.colors) !== JSON.stringify(old.colors)) changes.push(`${prefix} 색상: ${chart.colors?.join(", ") ?? "기본값"}`);
   }
