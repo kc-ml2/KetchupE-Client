@@ -1,6 +1,8 @@
+import { sourceFor } from "./sources.ts";
+import { lineChartSvg } from "./lineChart.ts";
 import ExcelJS from "exceljs";
 import { createHash } from "node:crypto";
-import { reportCharts } from "./contracts.ts";
+import { reportCharts, chartTable, assertChartFormat } from "./contracts.ts";
 import { addNativeCharts } from "./xlsxCharts.ts";
 import type { ChartSpec, Report } from "./contracts.ts";
 
@@ -22,7 +24,7 @@ export function sourceRowsText(rows: number[]): string {
 export function evidenceText(report: Report, ids: number[]): string {
   const groups = new Map<string, number[]>();
   for (const id of ids) {
-    const ref = report.rowSources[id];
+    const ref = sourceFor(report.rowSources, id);
     if (!ref) throw new Error(`원본 근거가 없는 입력 행입니다: ${id}`);
     const file = report.sources.find(source => source.id === ref.fileId);
     if (!file) throw new Error(`원본 파일을 찾을 수 없습니다: ${ref.fileId}`);
@@ -35,7 +37,8 @@ export function evidenceText(report: Report, ids: number[]): string {
 
 export function chartSvg(report: Report, chart: ChartSpec | undefined = reportCharts(report)[0]): string {
   if (!chart) return "";
-  const table = report.result.tables[chart.table];
+  if (chart.type === "line") return lineChartSvg(report, chart);
+  const table = chartTable(report, chart)!;
   const values = table.rows.map(row => row.cells[chart.y] as number);
   const palette = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#d97706", "#0891b2"];
   let marks = "";
@@ -58,7 +61,6 @@ export function chartSvg(report: Report, chart: ChartSpec | undefined = reportCh
     marks = values.map((v, i) => chart.type === "bar"
       ? `<rect x="${x(i) - 160 / values.length}" y="${Math.min(y(0), y(v))}" width="${320 / values.length}" height="${Math.max(1, Math.abs(y(v) - y(0)))}" fill="#2563eb"/>`
       : `<circle cx="${x(i)}" cy="${y(v)}" r="3" fill="#2563eb"/>`).join("");
-    if (chart.type === "line") marks += `<polyline fill="none" stroke="#2563eb" stroke-width="2" points="${values.map((v, i) => `${x(i)},${y(v)}`).join(" ")}"/>`;
     if (chart.type === "scatter" && chart.trendline && xs.length > 1) {
       const nx = xs.map(v => v / xScale), ny = values.map(v => v / magnitude);
       const mx = nx.reduce((a,b)=>a+b,0)/nx.length, my = ny.reduce((a,b)=>a+b,0)/ny.length;
@@ -86,10 +88,11 @@ export function renderHtml(report: Report, interactive = true): string {
   const filtering = interactive && report.plan.layout === "dashboard";
   const list = (items: string[]) => `<ul>${items.map((s) => `<li>${escape(s)}</li>`).join("")}</ul>`;
   const tables = report.result.tables.map((table) => `<section><h2>${escape(table.title)}</h2>${filtering ? `<label>표 검색 <input data-filter aria-label="${escape(table.title)} 검색" type="search"></label>` : ""}<table><thead><tr>${[...table.columns, "원본 행"].map((c) => `<th>${escape(c)}</th>`).join("")}</tr></thead><tbody>${table.rows.map((row) => `<tr>${row.cells.map((c) => `<td>${escape(c)}</td>`).join("")}<td>${escape(evidenceText(report, row.sourceRows))}</td></tr>`).join("")}</tbody></table>${!table.rows.length ? "<p>조건에 해당하는 결과가 없습니다.</p>" : ""}</section>`).join("");
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; ${filtering ? `script-src 'sha256-${SCRIPT_HASH}'` : `script-src 'none'`}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.plan.title)}</title><style>body{font-family:Arial,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#18181b;max-width:1100px;margin:32px auto;padding:0 24px;font-size:13px;line-height:1.6}h1{font-size:26px}h2{font-size:18px;margin-top:28px}p,li,td,th{overflow-wrap:anywhere}table{width:100%;table-layout:fixed;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #d4d4d8;padding:7px;text-align:left;vertical-align:top}th{background:#f4f4f5}th:last-child,td:last-child{width:35%}thead{display:table-header-group}svg{width:100%;max-height:400px}pre{white-space:pre-wrap;font-family:inherit}.source{white-space:pre-wrap;font-size:10px;color:#52525b}@page{size:A4;margin:14mm}@media print{body{margin:0;padding:0}svg{break-inside:avoid}h2{break-after:avoid}tr{break-inside:avoid}input,label{display:none}}.charts{display:grid;grid-template-columns:${report.plan.layout === "dashboard" ? "repeat(auto-fit,minmax(320px,1fr))" : "1fr"};gap:16px}section{margin-bottom:24px}@media print{.charts{grid-template-columns:1fr}svg{max-height:260px}}</style></head><body><h1>${escape(report.plan.title)}</h1><p>${escape(counts(report))}</p><p class="source">${escape(provenance(report))}<br>${escape(report.createdAt)}</p>${report.plan.assumptions.length ? `<h2>적용 기준</h2>${list(report.plan.assumptions)}` : ""}<h2>요약</h2><pre>${escape(report.summary)}</pre>${(report.sections ?? []).map(section=>`<h2>${escape(section.title)}</h2><pre>${escape(section.text)}</pre>`).join("")}<div class="charts">${reportCharts(report).map(chart=>chartSvg(report,chart)).join("")}</div>${tables}<h2>참고 사항</h2>${list([...(report.sourceNotes ?? []), ...report.result.notes, "LLM이 생성한 분석입니다. 업무에 사용하기 전 집계 기준과 수치를 확인해 주세요."])}${report.result.excluded.length ? `<h2>제외 행</h2>${list(report.result.excluded.map((r) => `${evidenceText(report, [r.row])}: ${r.reason}`))}` : ""}${filtering ? `<script>${FILTER_SCRIPT}</script>` : ""}</body></html>`;
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; ${filtering ? `script-src 'sha256-${SCRIPT_HASH}'` : `script-src 'none'`}"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.plan.title)}</title><style>body{font-family:Arial,'Malgun Gothic','Apple SD Gothic Neo',sans-serif;color:#18181b;max-width:1100px;margin:32px auto;padding:0 24px;font-size:13px;line-height:1.6}h1{font-size:26px}h2{font-size:18px;margin-top:28px}p,li,td,th{overflow-wrap:anywhere}table{width:100%;table-layout:fixed;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #d4d4d8;padding:7px;text-align:left;vertical-align:top}th{background:#f4f4f5}th:last-child,td:last-child{width:35%}thead{display:table-header-group}svg{width:100%;max-height:400px}pre{white-space:pre-wrap;font-family:inherit}.source{white-space:pre-wrap;font-size:10px;color:#52525b}@page{size:A4;margin:14mm}@media print{body{margin:0;padding:0}svg{break-inside:avoid}h2{break-after:avoid}tr{break-inside:avoid}input,label{display:none}}.charts{display:grid;grid-template-columns:${report.plan.layout === "dashboard" ? "repeat(auto-fit,minmax(320px,1fr))" : "1fr"};gap:16px}section{margin-bottom:24px}@media print{.charts{grid-template-columns:1fr}svg{max-height:260px}}</style></head><body><h1>${escape(report.plan.title)}</h1><p>${escape(counts(report))}</p><p class="source">${escape(provenance(report))}<br>${escape(report.createdAt)}</p>${report.plan.assumptions.length ? `<h2>적용 기준</h2>${list(report.plan.assumptions)}` : ""}<h2>요약</h2><pre>${escape(report.summary)}</pre>${(report.sections ?? []).map(section=>`<h2>${escape(section.title)}</h2><pre>${escape(section.text)}</pre>`).join("")}<div class="charts">${reportCharts(report).map(chart=>`<section>${chartSvg(report,chart)}${chart.dataset ? `<p class="source">${escape(evidenceText(report, chartTable(report, chart)!.rows.flatMap(row => row.sourceRows)))}</p>` : ""}</section>`).join("")}</div>${tables}<h2>참고 사항</h2>${list([...(report.sourceNotes ?? []), ...report.result.notes, "LLM이 생성한 분석입니다. 업무에 사용하기 전 집계 기준과 수치를 확인해 주세요."])}${report.result.excluded.length ? `<h2>제외 행</h2>${list(report.result.excluded.map((r) => `${evidenceText(report, [r.row])}: ${r.reason}`))}` : ""}${filtering ? `<script>${FILTER_SCRIPT}</script>` : ""}</body></html>`;
 }
 
 export async function renderXlsx(report: Report): Promise<Uint8Array> {
+  assertChartFormat(reportCharts(report), "xlsx");
   const book = new ExcelJS.Workbook();
   const info = book.addWorksheet("분석 안내");
   info.addRows([[report.plan.title], [provenance(report)], [report.createdAt], [counts(report)], ["적용 기준"], ...report.plan.assumptions.map((s) => [s]), ["요약"], [report.summary], ...[...(report.sourceNotes ?? []), ...report.result.notes].map((s) => [s]), ["LLM 생성 분석: 업무에 사용하기 전 수치를 확인해 주세요."]]);
@@ -118,6 +121,7 @@ export async function renderXlsx(report: Report): Promise<Uint8Array> {
 export function reportPreview(report: Report): string {
   const safe = (v: unknown) => typeof v === "number" ? String(v) : String(v ?? "").replace(/[\\`*_{}[\]()<>#+.!|~-]/g, "\\$&").replace(/[\r\n]+/g, " ");
   const table = report.result.tables[0];
+  if (!table) return `${report.plan.title}\n\n${counts(report)}\n\n${report.summary}\n\n${reportCharts(report).map(chart => `${chart.title}: ${chartTable(report, chart)!.rows.length.toLocaleString("en-US")}개 점`).join("\n")}\n\n축·단위와 원본 행 근거는 결과 파일에서 확인하세요.`;
   const rows = table.rows.slice(0, 12);
   return `${report.plan.title}\n\n${counts(report)}\n\n${(report.sourceNotes ?? []).map(safe).join("\n\n")}\n\n${report.summary}\n\n| ${table.columns.map(safe).join(" | ")} |\n| ${table.columns.map(() => "---").join(" | ")} |\n${rows.map((r) => `| ${r.cells.map(safe).join(" | ")} |`).join("\n")}\n\n첫 표 ${rows.length}/${table.rows.length}행 미리보기입니다. 전체 표·차트·원본 행 근거는 결과 파일에서 확인하세요.\n\nLLM 생성 분석이므로 업무 사용 전 수치를 확인해 주세요.`;
 }

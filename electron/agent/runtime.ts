@@ -1,3 +1,4 @@
+import { EXCEL_LIMITS } from "../excel/limits.ts";
 import { createExcelTool } from "../excel/tool.ts";
 import { createExcelWorker, executeExcelJob } from "../excel/workerClient.ts";
 import type { ExcelJob } from "../excel/workerClient.ts";
@@ -206,7 +207,8 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     export: (report, format, signal) => run({ kind: "export", report, format }, signal) as ReturnType<ExcelJobs["export"]>,
   });
   const excelTool = createExcelTool({
-    complete: (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "excel", maxOutputTokens: 10000 }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal),
+    complete: (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "excel", maxOutputTokens: EXCEL_LIMITS.outputTokens }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal),
+    callInfo: signal => harnessModel.lastCallFor?.(signal),
     ...excelJobs((job, signal) => executeExcelJob(excelWorkerPath, job, signal)),
     session: () => { const worker = createExcelWorker(excelWorkerPath); return { ...excelJobs(worker.run), close: worker.close }; },
     pdf: printReportPdf,

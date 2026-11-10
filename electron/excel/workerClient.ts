@@ -1,9 +1,10 @@
+import { EXCEL_LIMITS as L, ExcelError, type ExcelErrorCode } from "./limits.ts";
 import { utilityProcess } from "electron";
 import type { UtilityProcess } from "electron";
 import type { Analysis, AnalysisPlan, ProfileInspection, Report, WorkbookInput, WorkbookProfile } from "./contracts.ts";
 
 export type ExcelJob = { kind: "profile"; bytes: Uint8Array; query?: string; inspection?: ProfileInspection } | { kind: "analyze"; files: WorkbookInput[]; plan: AnalysisPlan } | { kind: "export"; report: Report; format: "html" | "xlsx" };
-export type ExcelReply = { ok: true; result: WorkbookProfile | Analysis | Uint8Array } | { ok: false; error: string };
+export type ExcelReply = { ok: true; result: WorkbookProfile | Analysis | Uint8Array } | { ok: false; error: string; code?: ExcelErrorCode };
 type JobResult<J extends ExcelJob> = J extends { kind: "profile" } ? WorkbookProfile : J extends { kind: "analyze" } ? Analysis : Uint8Array;
 
 /** One utility process reused by sequential jobs so the worker's parsed-workbook cache survives inspect/analyze turns. Abort or timeout kills it; the next job respawns. */
@@ -35,9 +36,9 @@ export function createExcelWorker(workerPath: string) {
         if (!reply || typeof reply.ok !== "boolean") finish(new Error("잘못된 엑셀 작업 응답입니다."));
         else if (reply.ok) finish(undefined, reply.result);
         // A job error leaves the worker healthy; keep it and its cache for the next turn.
-        else finish(new Error(reply.error), undefined, true);
+        else finish(new ExcelError(reply.code ?? "CONTRACT", reply.error), undefined, true);
       };
-      const timer = setTimeout(() => finish(new Error("엑셀 작업이 30초를 초과했습니다. 데이터 범위를 줄여 주세요.")), 30000);
+      const timer = setTimeout(() => finish(new Error("엑셀 작업이 30초를 초과했습니다. 데이터 범위를 줄여 주세요.")), L.workerMs);
       signal.addEventListener("abort", abort, { once: true });
       process.on("exit", exit);
       process.on("message", message);

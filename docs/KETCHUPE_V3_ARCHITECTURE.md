@@ -1,6 +1,6 @@
 # Architecture and code map
 
-Current implementation, 2026-11-09. “v3” names the architecture; the release version lives in [package.json](../package.json).
+Current implementation, 2026-11-10. “v3” names the architecture; the release version lives in [package.json](../package.json).
 
 KetchupE is an Electron desktop app for local document search, grounded answers, document drafting, deterministic Excel tasks, and experimental LLM-planned Excel analysis. Start with the [README](../README.md) for setup, the [integration guide](WORKFLOW_INTEGRATION_GUIDE.md) to add capabilities, or [business tools](BUSINESS_TOOLS.md) for Excel contracts and Daily Cash rules. Type definitions and tests are the source of truth; this document does not duplicate their schemas.
 
@@ -124,3 +124,11 @@ BusinessFlow owns file fingerprints, input persistence, cancellation and output 
 Reports can include sections, up to 20 tables and 10 bar/line/scatter/pie charts, with optional scatter regression. PDF is static; dashboard HTML permits only the app-authored, CSP-hashed table filter. XLSX charts are native OOXML charts referencing result cells. Up to three PDF/HTML/XLSX files are validated before publication. Selected samples and computed summaries reach the configured model server. Current fixtures validate the runtime, not actual model reasoning quality, business correctness or installed Microsoft Excel compatibility.
 
 Internal plan steps stay in progress/audit data and are omitted from exported files and the chat result preview. Reports retain business assumptions and source evidence.
+
+3.0.19 adds a structured `chart` plan compiled into a fixed QuickJS program. HTML/PDF render the full numeric X series with independent left/right Y axes, preserved acquisition order, and breaks at missing measurements. Chart datasets are separate from visible report tables; the common Excel limits are in [limits.ts](../electron/excel/limits.ts): 20,000 input rows/line points, 5,000 table rows, and 500 bar/pie points, with separate serialized-size and execution budgets. Advanced chart datasets/dual axes are explicitly rejected for XLSX; legacy native XLSX charts remain supported.
+
+Clarification keys increase beyond `answer3`; only the pending question is added to the input card. Up to 12 question/answer records retain correction history in the checkpoint. The legacy duplicate-key reader applies current input only to the last matching question. A fully specified option can execute without another model call, while free-text revisions return to the planner. New revisions cannot finish from an old computed summary.
+
+Consecutive source IDs/worksheet rows share compact provenance ranges. Completed checkpoints contain a plan and bounded result summary, not the full dataset. Fixed chart plans can be replayed after export failure only after source checks; arbitrary generated code retains its small result snapshot instead because replay could change nondeterministic calculations. Exact-query profiles can be reused, and the initial model preview is limited to 20,000 characters with higher priority for named sheets and an inventory of every sheet. Explicit inspection still reads the original data.
+
+BusinessFlow records local-only phase durations, attempts, model alias/usage/finish reason, row count and error codes through a strict trace callback. A truncated model response is distinguished from a contract error. See [the implementation and validation record](EXCEL_WORK_ISSUES_AND_IMPROVEMENT_PLAN.md#11-구현-및-검증-기록-2026-11-10) for the actual TGA worker and live-model measurements and remaining limits.

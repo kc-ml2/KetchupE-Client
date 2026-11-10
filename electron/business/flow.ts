@@ -10,7 +10,7 @@ import { TraceWriter } from "../agent/trace.ts";
 import { startWorkflowRun } from "../agent/runLifecycle.ts";
 import type { AgentWorkflow, WorkflowStartInput } from "../agent/workflows.ts";
 import { WorkSources } from "../work/sources.ts";
-import { businessInputSchema, type BusinessTool } from "./contracts.ts";
+import { businessInputSchema, businessTraceSchema, type BusinessTool } from "./contracts.ts";
 
 /** `confirmed` flips on the first accepted submission; until then every prefilled value (suggested files, today's date) stays editable. */
 type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean };
@@ -92,9 +92,10 @@ export class BusinessFlow {
     if (!tool || tool.version !== job.version) throw new Error("업무 버전이 변경되었습니다. 현재 작업을 중단하고 새로 요청해 주세요.");
     if (getRunAction(this.db, runId)?.id !== actionId || this.active.has(runId)) throw new Error("이미 처리되었거나 변경된 입력 요청입니다.");
     const input = businessInputSchema.parse(raw);
+    const changedKeys = Object.keys(input.values).filter(key => input.values[key] !== job.input.values[key]);
     const sourceChanged = JSON.stringify(input.files) !== JSON.stringify(job.input.files);
     const requestChanged = input.values.request !== job.input.values.request;
-    const revised = tool.editable && (sourceChanged || requestChanged || input.values.revision !== job.input.values.revision || input.values.format !== job.input.values.format);
+    const revised = tool.editable && (sourceChanged || requestChanged || input.values.revision !== job.input.values.revision || input.values.format !== job.input.values.format || changedKeys.some(key => /^answer\d+$/.test(key)));
     if (revised) {
       if (sourceChanged || requestChanged) {
         job.checkpoint = {};
@@ -116,6 +117,7 @@ export class BusinessFlow {
     if (tool.editable) this.db.prepare("DELETE FROM run_actions WHERE run_id=?").run(runId);
     this.event(runId, "status", { phase: "원천 자료 확인 및 업무 실행 중", messagesChanged: true });
     try {
+      const filesStarted = Date.now();
       const files: Parameters<BusinessTool["execute"]>[0]["files"] = {};
       const sources = new WorkSources(this.db);
       let totalBytes = 0;
@@ -140,24 +142,31 @@ export class BusinessFlow {
       job.input = input; job.confirmed = true;
       job.fingerprints = Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((value) => value.fingerprint)]));
       this.save(runId, job);
-      const result = await this.abortable(tool.execute({ values: input.values, files, checkpoint: job.checkpoint ?? {}, signal: controller.signal, onProgress: (phase) => {
+      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "files" }, { startedAt: filesStarted });
+      const result = await this.abortable(tool.execute({ values: input.values, files, checkpoint: job.checkpoint ?? {}, signal: controller.signal, changedKeys,
+        onTrace: (event) => {
+          if (controller.signal.aborted) return;
+          const safe = businessTraceSchema.parse(event);
+          new TraceWriter(this.db, runId).record(safe.phase === "model" ? "model.completed" : "tool.completed", "runtime", { ...safe, localOnly: true }, { startedAt: Date.now() - safe.durationMs });
+        }, onProgress: (phase) => {
         if (!controller.signal.aborted && getRun(this.db, runId).status === "running") this.event(runId, "status", { phase });
       } }), controller.signal);
       controller.signal.throwIfAborted();
       if (Object.values(input.files).flat().some((file) => !sources.has(file.sourceId))) throw new Error("실행 중 자료 연결이 해제되었습니다.");
       if (result.status === "needs_input") {
         this.validateFields(result.fields);
-        const merged = new Map(job.fields.map((field) => [field.key, field]));
+        const merged = new Map((result.replaceFields ? tool.fields : job.fields).map((field) => [field.key, field]));
         for (const field of result.fields) {
           if (merged.has(field.key) && merged.get(field.key)!.type !== field.type) throw new Error("추가 입력 항목의 형식이 변경되었습니다.");
           merged.set(field.key, field);
         }
         job.fields = [...merged.values()]; this.validateFields(job.fields);
+        if (result.replaceFields) job.input.values = Object.fromEntries(Object.entries(job.input.values).filter(([key]) => merged.has(key)));
         job.pendingKeys = result.fields.map((field) => field.key);
         job.checkpoint = result.checkpoint ?? job.checkpoint;
         if (JSON.stringify(job.checkpoint ?? {}).length > 1000000) throw new Error("업무 중간 상태가 너무 큽니다.");
         this.save(runId, job); this.ask(runId, result.question);
-      } else if (result.status === "failed") this.retry(runId, result.message);
+      } else if (result.status === "failed") this.retry(runId, result.message, result.code);
       else if (result.status === "completed") {
         if (!result.checks.length || result.checks.some((check) => check.passed !== true)) throw new Error("업무 검증을 통과하지 못했습니다.");
         const outputs = [result.file, ...(result.additionalFiles ?? [])];
@@ -209,7 +218,7 @@ export class BusinessFlow {
         this.event(runId, "completed", { text: message, outcome: "success" });
       } else throw new Error("잘못된 업무 결과입니다.");
     } catch (error) {
-      if (getRun(this.db, runId).status === "running") this.retry(runId, error instanceof Error ? error.message : String(error));
+      if (getRun(this.db, runId).status === "running") this.retry(runId, error instanceof Error ? error.message : String(error), error instanceof Error && "code" in error ? String(error.code) : undefined);
     } finally { clearTimeout(timeout); this.active.delete(runId); }
   }
 
@@ -289,7 +298,11 @@ export class BusinessFlow {
     if (emit) this.event(runId, "completed", { text, outcome: status === "completed" ? "success" : "abstained" });
   }
   /** An error never ends the run by itself: the same input card comes back with the message, so answers survive and the user decides whether to fix, retry or stop. */
-  private retry(runId: string, message: string) {
+  private retry(runId: string, message: string, code?: string) {
+    if (code && !["LIMIT", "UNSUPPORTED"].includes(code)) {
+      this.ask(runId, `처리 중 내부 오류가 발생했습니다 (${code}). 입력한 답변은 보관되어 있습니다. 같은 요청으로 다시 시도하거나 추가 지시를 보낼 수 있습니다.`);
+      return;
+    }
     this.ask(runId, `${message}\n\n${this.tools.get(this.job(runId).toolId)?.editable ? "요청이나 파일 선택을 수정하거나 채팅으로 추가 지시를 보내 이어갈 수 있습니다." : "입력을 고친 뒤 다시 실행할 수 있습니다. 원천 파일이나 작업일을 바꿔야 하면 작업을 중단하고 새로 시작하세요."}`);
   }
   private event(runId: string, type: AgentStreamEvent["type"], payload: unknown) {
@@ -298,7 +311,7 @@ export class BusinessFlow {
     this.emit({ runId, seq, type, payload });
   }
   private validateFields(fields: BusinessField[]) {
-    if (fields.some((field) => field.type === "select" && (!field.options?.length || field.options.length > 20 || new Set(field.options.map((o) => o.value)).size !== field.options.length))) throw new Error("잘못된 선택 항목입니다.");
+    if (fields.some((field) => (field.type === "select" || field.options) && (!field.options?.length || field.options.length > 20 || new Set(field.options.map((o) => o.value)).size !== field.options.length))) throw new Error("잘못된 선택 항목입니다.");
     if (!fields.length || fields.length > 30 || new Set(fields.map((field) => field.key)).size !== fields.length || fields.some((field) => !fieldKey.test(field.key) || ["__proto__", "constructor", "prototype"].includes(field.key) || !["text", "date", "file", "number", "movements", "select"].includes(field.type))) throw new Error("잘못된 업무 입력 정의입니다.");
   }
   private validateInput(fields: BusinessField[], input: BusinessInput) {
