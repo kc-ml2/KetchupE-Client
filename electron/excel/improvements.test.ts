@@ -395,3 +395,30 @@ it("rejects a replay with different results instead of publishing changed number
   expect(result).toMatchObject({ status: "needs_input", question: expect.stringContaining("이전 수치와 달라") });
   expect(deps.export).toHaveBeenCalledOnce();
 });
+
+it("answers a question about earlier revisions in chat without redrawing or losing the work", async () => {
+  const { input, deps } = await setup();
+  const revise = vi.fn<ExcelDependencies["complete"]>()
+    .mockResolvedValueOnce(JSON.stringify({ kind: "view", patch: { charts: { "0": { grid: "dashed" } } } }))
+    .mockResolvedValueOnce(JSON.stringify({ kind: "answer", message: "1. 그리드를 점선으로 변경" }))
+    .mockResolvedValueOnce(JSON.stringify({ kind: "view", patch: { charts: { "0": { title: "새 제목" } } } }));
+  const tool = createExcelTool({ ...deps, revise });
+  const original = await tool.execute(input);
+  if (original.status !== "completed") throw new Error("not completed");
+  const revised = await tool.execute({ ...input, checkpoint: original.checkpoint!, userText: "그리드를 점선으로" });
+  if (revised.status !== "completed") throw new Error(JSON.stringify(revised));
+  const exports = vi.mocked(deps.export).mock.calls.length, analyses = vi.mocked(deps.analyze).mock.calls.length;
+  const answered = await tool.execute({ ...input, checkpoint: revised.checkpoint!, userText: "지금까지 수정요청사항들을 다시 모아줘" });
+  expect(answered).toMatchObject({ status: "needs_input", question: "1. 그리드를 점선으로 변경", fields: [{ key: "revisionAnswer" }] });
+  expect(JSON.parse(revise.mock.calls[1][1])).toMatchObject({ history: ["그리드를 점선으로"], userText: "지금까지 수정요청사항들을 다시 모아줘" });
+  expect(vi.mocked(deps.export).mock.calls).toHaveLength(exports);
+  expect(vi.mocked(deps.analyze).mock.calls).toHaveLength(analyses);
+  expect(deps.complete).toHaveBeenCalledOnce();
+  if (answered.status !== "needs_input") throw new Error("not waiting");
+  expect(answered.checkpoint).toMatchObject({ excelState: { view: { charts: { "0": { grid: "dashed" } } }, history: ["그리드를 점선으로"] } });
+  expect((answered.checkpoint!.excelState as { pendingRevision?: unknown }).pendingRevision).toBeUndefined();
+  // The next real change still builds on the confirmed view and is not mixed with the question.
+  const next = await tool.execute({ ...input, checkpoint: answered.checkpoint!, values: { ...input.values, revisionAnswer: "제목을 새 제목으로" }, changedKeys: ["revisionAnswer"] });
+  expect(next).toMatchObject({ status: "completed", checkpoint: { excelState: { view: { charts: { "0": { grid: "dashed", title: "새 제목" } } }, history: ["그리드를 점선으로", "제목을 새 제목으로"] } } });
+  expect(JSON.parse(revise.mock.calls[2][1]).userText).toBe("제목을 새 제목으로");
+});

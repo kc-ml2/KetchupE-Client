@@ -284,6 +284,8 @@ const AgentPage = (): React.JSX.Element => {
       return "선택한 블록 아래에 추가할 내용을 입력하세요";
     if (canvas.interrupt?.type === "awaiting_edit")
       return "문서 전체에 대한 수정 의견을 입력하세요 (재작성)";
+    if (view.action?.type === "business_tool" && (view.action.revisionMode || view.action.fields.some((field) => field.key === "revisionAnswer")))
+      return "수정할 내용이나 질문을 입력하세요 (위 카드에 입력해도 같습니다)";
     if (view.waitingQuestion !== null)
       return "에이전트의 질문에 답해 주세요...";
     return "무엇을 도와드릴까요? 예: 계약서 초안 작성, 일일자금일보 작성";
