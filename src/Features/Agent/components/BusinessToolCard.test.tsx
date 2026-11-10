@@ -335,3 +335,17 @@ it("shows results in a closable side panel instead of the chat column", async ()
   view.rerender(<BusinessArtifacts api={api} threadId="thread" running={false} hidden onClose={onClose} onAvailableChange={onAvailableChange} />);
   expect(screen.queryByRole("complementary", { name: "업무 결과" })).not.toBeInTheDocument();
 });
+
+it("shows one place to type while a follow-up question is pending and says the chat box is equivalent", () => {
+  const api = apiFixture();
+  const asking: BusinessAction = { ...action, revisionMode: true, fields: [
+    { key: "request", label: "원래 요청", type: "text", required: true },
+    { key: "revision", label: "추가·수정 요청 (선택)", type: "text", required: false },
+    { key: "revisionAnswer", label: "추가·수정 의견", type: "text", required: true },
+  ], input: { files: {}, values: { request: "TGA 전체 측정값", revision: "그리드 점선" } } };
+  render(<BusinessToolCard api={api} runId="run" action={asking} />);
+  expect(screen.getByLabelText(/추가·수정 의견/)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/추가·수정 요청/)).not.toBeInTheDocument();
+  expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  expect(screen.getByText(/아래 메시지 입력창에 입력해도/)).toBeInTheDocument();
+});

@@ -82,6 +82,8 @@ type WorkingState = {
   summary?: string;
   sections?: Report["sections"];
   changes?: string[];
+  /** Applied revision requests in the user's words, so "what have I changed so far" can be answered without replanning. */
+  history?: string[];
 };
 const resultHash = (analysis: Analysis) => createHash("sha256").update(JSON.stringify(analysis.result)).digest("hex");
 
@@ -155,14 +157,14 @@ outline은 전체 시트를 훑은 목차로 60개씩 제공하며 nextRow로 �
 metadata는 셀 주소별 표시 값 display, 원시 표시 형식 numFmt, formula, dateTime, dateSerial, 직접 지정한 fill·fontColor, error를 담는다. conditionalFormatting은 원본 조건부 서식 규칙이며 최종 표시 색상으로 계산된 것이 아니다. 테마 색상은 테마 번호일 수 있다. 날짜·시각의 ISO 표현은 Excel 저장값을 보존한 것이며 원본에 시간대가 없으면 임의 시간대 변환을 하지 않는다. 퍼센트 display가 15%여도 원시 값은 0.15이다. 숫자 문자열은 검증 후 변환한다.
 수식은 저장된 결과를 사용하며 재계산하지 않는다. 저장 결과가 없는 수식·오류 셀을 진단하려면 allowCellErrors:true를 명시하고 null 및 metadata.error를 확인한다. 오류를 0으로 간주하지 말고 제외 이유 또는 주의사항을 남긴다. 메타데이터에서 읽을 수 있는 사항을 사용자에게 재입력시키지 않는다.
 계산 코드 입력: input.rows=[{id,fileId,sheet,rangeId,row,values:{key:문자|숫자|null},sourceCells:{key:원본셀주소},metadata:{key:셀메타데이터}}]. r.id는 전체 입력의 고유 ID, r.row는 실제 행이다. 모든 선택 범위의 전체 데이터가 주어진다. 파일·시트·범위를 나눠 연결·정규화·집계할 수 있다. 같은 원본 숫자 셀은 병합 때문에 반복되어도 중복 합산하지 않는다.
-code는 동기 JavaScript 함수 본문이다(함수 선언이나 화살표 함수로 감싸지 않는다). 본문 마지막에 반드시 return 결과객체를 쓴다. import/require/fetch/process/파일 접근은 없고 Date/Math/Map/배열을 사용할 수 있다. 실행 5초 제한. return {tables:[{title:"표",columns:["열"],rows:[{cells:[문자|유한숫자|null],sourceRows:[기여한 r.id]}]}],excluded:[{row:r.id,reason:"제외 이유"}],notes:["주의"],chart:null,charts:[{type:"bar|line|scatter|pie",table:0,x:0,y:1,title:"제목",trendline:false}]}.
-표는 최대 20개·합계 ${LIMITS.tableRows}행·표당 20열, 차트는 최대 10개다. 선·산점도는 ${LIMITS.chartRows}점, 막대·원형은 ${LIMITS.categoricalChartRows}점까지다. chart 또는 charts 중 하나를 사용하며 chart는 생략하거나 null로 둔다. 산점도 x/y는 숫자, trendline:true는 산점도 회귀선, 원형 차트 값은 음수 없이 양수가 있어야 한다. 모든 입력 ID를 결과 sourceRows 또는 excluded 중 정확히 한 곳에 포함한다. sourceRows와 excluded.row에는 엑셀 행 번호 r.row가 아니라 r.id를 넣는다. 근거는 실제 기여 행만 참조한다. 빈 값과 0, 합계 행과 원자료, 평균의 분모를 구분한다.
+code는 동기 JavaScript 함수 본문이다(함수 선언이나 화살표 함수로 감싸지 않는다). 본문 마지막에 반드시 return 결과객체를 쓴다. import/require/fetch/process/파일 접근은 없고 Date/Math/Map/배열을 사용할 수 있다. 실행 5초 제한. return {tables:[{title:"표",columns:["열"],rows:[{cells:[문자|유한숫자|null],sourceRows:[기여한 r.id]}]}],excluded:[{row:r.id,reason:"제외 이유"}],notes:["주의"],chart:null,charts:[{type:"bar|line|area|scatter|pie|histogram|boxplot|heatmap",table:0,x:0,y:1,title:"제목",trendline:false}]}.
+표는 최대 20개·합계 ${LIMITS.tableRows}행·표당 20열, 차트는 최대 10개다. 선·영역·산점도·히스토그램·박스플롯·히트맵은 ${LIMITS.chartRows}점, 막대·원형은 ${LIMITS.categoricalChartRows}점까지다. chart 또는 charts 중 하나를 사용하며 chart는 생략하거나 null로 둔다. 산점도 x/y는 숫자, trendline:true는 산점도 회귀선, 원형 차트 값은 음수 없이 양수가 있어야 한다. 차트 선택 옵션: series:[{y:열,axis:"left|right"}](선·영역·막대·산점도의 복수 시리즈·보조축, 최대 4개), xScale:"linear"(선·영역의 숫자형 X축), stack(막대·영역 누적), horizontal(가로 막대), smooth(선·영역 곡선), donut(도넛형 원형), bins(히스토그램 구간 수 2~100, 생략하면 자동). 히스토그램은 y열의 원자료 숫자를 행마다 하나씩 주면 렌더러가 구간을 나눈다(미리 집계하지 않는다). 박스플롯은 x가 범주(100종 이하), y가 원자료 숫자이며 사분위수와 이상치는 렌더러가 계산한다. 히트맵은 x·y가 범주 열(각 100종 이하), value:숫자 열 index다. XLSX는 막대·선·영역·산점도·원형 단일 시리즈만 편집 가능한 차트로 저장하므로 그 밖의 차트는 HTML/PDF/PNG/PPTX로 안내한다. 모든 입력 ID를 결과 sourceRows 또는 excluded 중 정확히 한 곳에 포함한다. sourceRows와 excluded.row에는 엑셀 행 번호 r.row가 아니라 r.id를 넣는다. 근거는 실제 기여 행만 참조한다. 빈 값과 0, 합계 행과 원자료, 평균의 분모를 구분한다.
 computed에는 마지막 계획과 결과의 행 수·앞뒤 행·숫자 최솟값/최댓값이 있다. 전체 결과가 아니므로 더 필요하면 inspect_result한다. 검토 중 모순을 발견하면 원본 inspect 후 계획을 바꿔 execute한다. 코드가 성공했다고 수치가 정확하다고 단정하지 않는다. 실패하면 오류에 맞게 계획·코드를 수정한다. 계산·근거를 확인한 뒤 finish한다.
 출력 형식은 pdf/html/xlsx/png/pptx이며 formats로 여러 형식을 동시에 지정한다(생략하면 format 하나). layout은 report 또는 dashboard다. dashboard HTML은 표 검색이 있고 PDF는 정적이다. XLSX에는 편집 가능한 차트가 포함된다. sections로 요청한 보고서 목차와 상세 설명을 작성한다. 임의 HTML·스크립트는 만들지 않는다. 수식 재계산·원본 양식 그대로의 복제·지원하지 않는 포맷이 꼭 필요하면 지원 범위를 설명하고 대안을 확인한다. 통계적 유의성·인과관계를 근거 없이 만들어내지 않는다.`;
 
 const CHART_PLANNING = `기본 그래프에는 코드를 작성하지 말고 kind:"chart"를 사용한다.
-표시 설정은 chartSpec/charts 내부에 넣지 않는다. 계획 최상위의 선택값 view:{charts:{"0":{title:"제목",axes:{x:{min:0,max:800,tickStep:200,decimals:0},left:{min:0,max:100,tickStep:20},right:{min:0,max:1.2,tickStep:0.2,decimals:1}},annotations:[{series:1,kind:"max",scope:"selectedData",label:"Tmax"}]}}}로 전달한다. 차트 번호와 시리즈는 0부터 시작한다. axes 항목은 min/max/tickStep/tickValues/decimals/label, 주석은 max만 지원한다. 사용자가 요청한 설정만 포함한다. 눈금 나열은 tickValues이며 데이터 범위 제한이 아니다. currentView가 있으면 이전 설정을 유지하고 추가 변경만 반영한다. 미지원 설정을 생성 코드로 우회하지 않는다.
-예: {"kind":"chart","title":"그래프","format":"html","steps":["전체 측정값 그래프"],"assumptions":[],"input":{"fileId":"file1","sheet":"실제 시트","headerRow":1,"firstDataRow":2,"lastDataRow":100,"columns":[{"index":2,"name":"실제 헤더","key":"x"},{"index":3,"name":"실제 헤더","key":"y1"},{"index":4,"name":"실제 헤더","key":"y2"}]},"x":{"key":"x","label":"Temperature","unit":"℃"},"series":[{"key":"y1","axis":"left","label":"Weight","unit":"%"},{"key":"y2","axis":"right","label":"Deriv. Weight","unit":"%/℃"}]}.
+표시 설정은 chartSpec/charts 내부에 넣지 않는다. 계획 최상위의 선택값 view:{charts:{"0":{title:"제목",axes:{x:{min:0,max:800,tickStep:200,decimals:0},left:{min:0,max:100,tickStep:20},right:{min:0,max:1.2,tickStep:0.2,decimals:1}},annotations:[{series:1,kind:"max",scope:"selectedData",label:"Tmax"}]}}}로 전달한다. 차트 번호와 시리즈는 0부터 시작한다. axes 항목은 min/max/tickStep/tickValues/decimals/label/scale("linear"|"log"), 주석 kind는 max/min/mean(평균선)을 지원한다. 주석 kind valueAt은 x:숫자 위치의 측정값을 표시한다(숫자형 X축). grid:"dashed|solid|none"은 그리드 선, referenceLines:[{axis:"x|left|right",value:숫자,label:"선택"}]는 점선 보조선이다. labels:true는 값 라벨 표시(500점 이하), colors:["#2563eb"]는 시리즈 순서의 6자리 hex 색상이다. 축 수정은 원형·히트맵을 제외한 차트에서, 주석은 선·영역·산점도·막대에서 지원한다. 사용자가 요청한 설정만 포함한다. 눈금 나열은 tickValues이며 데이터 범위 제한이 아니다. currentView가 있으면 이전 설정을 유지하고 추가 변경만 반영한다. 미지원 설정을 생성 코드로 우회하지 않는다.
+예: {"kind":"chart","title":"그래프","format":"html","steps":["전체 측정값 그래프"],"assumptions":[],"input":{"fileId":"file1","sheet":"실제 시트","headerRow":1,"firstDataRow":2,"lastDataRow":100,"columns":[{"index":2,"name":"실제 헤더","key":"x"},{"index":3,"name":"실제 헤더","key":"y1"},{"index":4,"name":"실제 헤더","key":"y2"}]},"x":{"key":"x","label":"Temperature","unit":"℃"},"series":[{"key":"y1","axis":"left","label":"Weight","unit":"%"},{"key":"y2","axis":"right","label":"Deriv. Weight","unit":"%/℃"}]}. 선택값 chartType:"line|area|scatter"(기본 line), smooth:true(선·영역 곡선), stack:true(영역 누적)를 계획 최상위에 둘 수 있다.
 input은 기존 sheetPlan과 같고 실제 헤더와 키를 사용한다. chart는 원본 순서의 전체 숫자 데이터를 그리는 HTML/PDF/PNG/PPTX 전용이며 이중축과 숫자형 X축을 지원한다. XLSX 이중축을 약속하지 않는다. 시리즈는 최대 4개다. 단위·Weight와 Weight Loss 의미가 요청과 원본에서 다르면 먼저 한 번에 확인한다. series.transform은 identity(원본, 기본), loss100(100-값), lossInitial(최초값-값)이며 명시적으로 확인한 감소량 기준에만 변환을 적용한다.
 입력 합계 ${LIMITS.inputRows}행, 표 ${LIMITS.tableRows}행, 선·산점도 ${LIMITS.chartRows}점, 막대·원형 ${LIMITS.categoricalChartRows}점이다. 전체 그래프 때문에 표를 만들거나 10,000행/500점으로 줄이도록 요구하지 않는다. 파일·직렬화 한도는 별도로 검사된다. profile의 시트 행 수로 가능한 범위를 확인한다.
 ask는 options:[{value:"고유ID",label:"선택 문구",plan:완성된_chart_계획}]를 포함할 수 있다. 해당 선택만으로 조건이 확정될 때만 plan을 넣는다. 불완전한 선택지는 plan을 생략한다. 지원하지 않는 선택지를 제안하지 않는다. 사용자는 자유 텍스트로도 수정할 수 있다.
@@ -345,7 +347,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
         try {
           const response = await (deps.revise ?? deps.complete)(REVISION_SYSTEM, JSON.stringify({
             charts: state.previous.charts ?? (state.chartRequest ? [{ index: 0, type: "line", title: state.chartRequest.title, x: state.chartRequest.x, series: state.chartRequest.series.map((series, index) => ({ ...series, index, column: state.chartRequest!.input.columns.find(column => column.key === series.key)?.index })) }] : []),
-            view: state.view ?? { charts: {} }, userText: instruction, pending: state.pendingRevision,
+            view: state.view ?? { charts: {} }, history: state.history ?? [], userText: instruction, pending: state.pendingRevision,
             formats: state.previous.plan.formats ?? [state.previous.plan.format], selectedFormat,
           }), signal);
           const info = deps.callInfo?.(signal);
@@ -364,6 +366,10 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
         }
       }
       if (change.kind === "unsupported") return askRevision(change.message, state.pendingRevision?.view);
+      // A question about the work is answered in the chat; nothing is recalculated and no pending change is touched.
+      if (change.kind === "answer") return { status: "needs_input", replaceFields: true, question: change.message,
+        fields: [{ key: "revisionAnswer", label: "추가·수정 의견", type: "text", required: true }],
+        checkpoint: { ...checkpoint, excelState: savedState(state), clarifications } };
       if (change.kind === "ask") {
         try { return askRevision(change.question, change.patch ? mergeView(state.pendingRevision?.view ?? state.view, change.patch) : state.pendingRevision?.view); }
         catch { return askRevision("축 범위를 해석하지 못했습니다. 최소·최대값을 확인해 주세요.", state.pendingRevision?.view); }
@@ -384,7 +390,8 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
           const changes = [...viewSummary(state.view, view), ...(change.formats ? [`출력 형식: ${formatList.join(", ")}`] : [])];
           const report: Report = { ...analysis, plan, sources, view, summary: state.summary ?? "기존 계산 기준과 데이터를 유지했습니다.", sections: state.sections, createdAt: new Date().toISOString() };
           validateView(report);
-          const nextState = { ...state, view, changes, pendingRevision: undefined, latest: { plan, analysis }, chartRequest: state.chartRequest ? { ...state.chartRequest, format: plan.format, formats: plan.formats } : undefined };
+          const applied = [state.pendingRevision?.instruction, instruction].filter(Boolean).join(" / ").slice(0, 300);
+          const nextState = { ...state, view, changes, history: [...(state.history ?? []), ...(applied ? [applied] : [])].slice(-20), pendingRevision: undefined, latest: { plan, analysis }, chartRequest: state.chartRequest ? { ...state.chartRequest, format: plan.format, formats: plan.formats } : undefined };
           return finish(report, plan.format, signal, io, nextState, clarifications, onTrace);
         } catch (error) {
           signal.throwIfAborted();
