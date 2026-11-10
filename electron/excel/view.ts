@@ -29,7 +29,8 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
         const annotations = chart.annotations ?? [];
         for (const item of patch.annotations) {
           const index = annotations.findIndex(old => old.series === item.series && old.scope === item.scope);
-          if (index < 0) annotations.push(item); else annotations[index] = item;
+          const annotation = { ...item, label: item.label ?? annotations[index]?.label ?? "최대점" };
+          if (index < 0) annotations.push(annotation); else annotations[index] = annotation;
         }
         chart.annotations = annotations;
       }

@@ -341,6 +341,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       else {
         onProgress?.("추가 요청에서 바뀔 항목만 확인 중");
         const started = Date.now();
+        let errorCode = "REVISION_MODEL";
         try {
           const response = await (deps.revise ?? deps.complete)(REVISION_SYSTEM, JSON.stringify({
             charts: state.previous.charts ?? (state.chartRequest ? [{ index: 0, type: "line", title: state.chartRequest.title, x: state.chartRequest.x, series: state.chartRequest.series.map((series, index) => ({ ...series, index, column: state.chartRequest!.input.columns.find(column => column.key === series.key)?.index })) }] : []),
@@ -349,12 +350,17 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
           }), signal);
           const info = deps.callInfo?.(signal);
           onTrace?.({ phase: "model", operation: "revision", durationMs: Date.now() - started, attempt: 1, ...(info ? { modelAlias: info.modelAlias, promptTokens: info.promptTokens, completionTokens: info.completionTokens, finishReason: info.finishReason } : {}) });
+          errorCode = "REVISION_TRUNCATED";
           if (info?.finishReason === "length") throw new Error("수정 응답이 너무 깁니다.");
-          change = revisionResponse.parse(parseModelJson(response));
+          errorCode = "REVISION_JSON";
+          const parsed = parseModelJson(response);
+          errorCode = "REVISION_SCHEMA";
+          change = revisionResponse.parse(parsed);
         } catch {
           signal.throwIfAborted();
-          onTrace?.({ phase: "error", operation: "revision", durationMs: Date.now() - started, errorCode: "CONTRACT" });
-          return askRevision(`수정 내용을 해석하지 못했습니다. 기존 결과와 설정은 유지됩니다. 수정할 축·값 또는 항목을 알려주세요.`, state.pendingRevision?.view);
+          onTrace?.({ phase: "error", operation: "revision", durationMs: Date.now() - started, errorCode });
+          const reason = errorCode === "REVISION_MODEL" ? "수정 모델의 응답을 받지 못했습니다." : errorCode === "REVISION_TRUNCATED" ? "수정 모델의 응답이 길이 제한으로 중단됐습니다." : "모델이 수정 응답 형식을 맞추지 못했습니다.";
+          return askRevision(`${reason} 기존 결과와 설정은 유지됩니다. 같은 요청으로 다시 시도할 수 있습니다.`, state.pendingRevision?.view);
         }
       }
       if (change.kind === "unsupported") return askRevision(change.message, state.pendingRevision?.view);

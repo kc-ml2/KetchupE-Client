@@ -4,7 +4,10 @@ import { ExcelError } from "./limits.ts";
 import type { AxisView } from "./view.ts";
 
 const escape = (value: string) => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
-const label = (value: number, axis?: AxisView) => axis?.decimals === undefined ? Number(value.toPrecision(5)).toString() : value.toFixed(axis.decimals);
+const label = (value: number, axis?: AxisView) => {
+  const text = axis?.decimals === undefined ? Number(value.toPrecision(5)).toString() : value.toFixed(axis.decimals);
+  return Number(text) === 0 ? text.replace(/^-/, "") : text;
+};
 export function chartScale(values: number[], axis: AxisView = {}) {
   const min = axis.min ?? Math.min(...values, ...(axis.tickValues ?? []));
   const max = axis.max ?? Math.max(...values, ...(axis.tickValues ?? []));
@@ -18,7 +21,11 @@ export function chartScale(values: number[], axis: AxisView = {}) {
     if (!Number.isFinite(count) || count > 50) throw new ExcelError("UNSUPPORTED", "축 눈금은 최대 50개입니다. 눈금 간격을 늘려 주세요.");
     ticks = Array.from({ length: count }, (_, i) => Math.abs(min + i * axis.tickStep! - max) <= Math.max(1, Math.abs(max)) * 1e-12 ? max : min + i * axis.tickStep!);
   }
-  ticks ??= min === max ? [min] : Array.from({ length: 5 }, (_, i) => min * (1 - i / 4) + max * i / 4);
+  if (!ticks) {
+    ticks = min === max ? [min] : Array.from({ length: 5 }, (_, i) => min * (1 - i / 4) + max * i / 4);
+    // Rounded automatic ticks must use their real positions, without repeated labels.
+    if (axis.decimals !== undefined && min !== max) ticks = [...new Set(ticks.map(value => Number(value.toFixed(axis.decimals))))];
+  }
   return { min, max, position, ticks: ticks.filter(v => v >= min && v <= max) };
 }
 
@@ -89,10 +96,10 @@ export function lineChartSvg(report: Report, chart: ChartSpec): string {
     });
     if (selected < 0) { notes.push(`${annotation.label}: 표시 범위에 데이터 없음`); continue; }
     const cx = 120+x.position(xs[selected])*720, cy = 360-y.position(peak)*300;
-    const pointLabel = `${annotation.label}: ${numericX ? label(xs[selected], view.axes?.x) : String(data.rows[selected].cells[chart.x])}`;
+    const pointLabel = `${annotation.label}: X=${numericX ? label(xs[selected], view.axes?.x) : String(data.rows[selected].cells[chart.x])}, Y=${label(peak)}`;
     const inside = cx >= 120 && cx <= 840 && cy >= 60 && cy <= 360;
     if (inside) content += `<g data-annotation="max" data-x="${xs[selected]}" data-y="${peak}"><path d="M${cx} 360 V${cy}" stroke="${colors[annotation.series]}" stroke-dasharray="4 3"/><circle cx="${cx}" cy="${cy}" r="4" fill="${colors[annotation.series]}"/><text x="${Math.max(220,Math.min(740,cx))}" y="${Math.max(54,cy-12)}" text-anchor="middle" font-size="12">${escape(pointLabel)}</text></g>`;
-    notes.push(`${pointLabel}, 최대값 ${label(peak)}${ties > 1 ? ` · 동률 ${ties}점 중 첫 측정점` : ""}${inside ? "" : " · 표시 범위 밖"}`);
+    notes.push(`${pointLabel}${ties > 1 ? ` · 동률 ${ties}점 중 첫 측정점` : ""}${inside ? "" : " · 표시 범위 밖"}`);
   }
   const noteStart = 442 + series.length * 19;
   notes.forEach((note, i) => { content += `<text x="120" y="${noteStart+i*18}" font-size="11">${escape(note)}</text>`; });
