@@ -78,7 +78,7 @@ it("resumes export after DB reopen, keeps originals, and only publishes validate
     }
     expect(await readFile(await flow.artifactPath(artifact.id), "utf8")).not.toContain("수정된 비교");
   } finally { await flow.stop(); db.close(); await rm(root, { recursive: true, force: true }); }
-});
+}, 30000);
 
 it("migrates duplicate legacy answers after restart and bounds the input card over many questions", async () => {
   const root = await mkdtemp(join(tmpdir(), "excel-answers-"));

@@ -270,6 +270,56 @@ it("uses zero model calls for a format-only form change and produces a validated
   expect(zip.file(/^ppt\/media\/.*png$/)).toHaveLength(1);
 }, 30000); // Native SVG/font initialization can exceed 5 seconds on Windows CI.
 
+it("applies integer labels on all three axes and a peak without a model-supplied annotation label", async () => {
+  const { input, deps } = await setup();
+  vi.mocked(deps.complete).mockResolvedValue(JSON.stringify({ ...chart, view: { charts: { "0": { title: "이전 제목", axes: { left: { min: 0, max: 100 } } } } } }));
+  const revise = vi.fn<ExcelDependencies["complete"]>().mockResolvedValue(JSON.stringify({ kind: "view", patch: { charts: { "0": {
+    axes: { x: { decimals: 0 }, left: { decimals: 0 }, right: { decimals: 0 } }, annotations: [{ series: 1, kind: "max" }],
+  } } } }));
+  const tool = createExcelTool({ ...deps, revise });
+  const original = await tool.execute(input);
+  if (original.status !== "completed") throw new Error("not completed");
+  const result = await tool.execute({ ...input, checkpoint: original.checkpoint!, userText: "weight, temperature, Deriv.Weight 축 scale값들은 소수점 없이 맞춰주고, Deriv.Weight의 max peak를 그래프에 표시해줘." });
+  expect(result).toMatchObject({ status: "completed", checkpoint: { excelState: { view: { charts: { "0": {
+    title: "이전 제목", axes: { x: { decimals: 0 }, left: { min: 0, max: 100, decimals: 0 }, right: { decimals: 0 } }, annotations: [{ series: 1, kind: "max", label: "최대점", scope: "selectedData" }],
+  } } } } } });
+  if (result.status !== "completed") throw new Error("not completed");
+  const dom = new JSDOM(Buffer.from(result.file.bytes).toString());
+  for (const axis of ["x", "left", "right"]) {
+    const labels = [...dom.window.document.querySelectorAll(`[data-axis="${axis}"]`)].map(node => node.textContent!);
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels.every(text => /^-?\d+$/.test(text))).toBe(true);
+    expect(new Set(labels).size).toBe(labels.length);
+  }
+  expect(dom.window.document.querySelector('[data-annotation="max"]')?.getAttribute("data-y")).toBe("9");
+  dom.window.close();
+  expect(revise).toHaveBeenCalledOnce();
+  expect(deps.complete).toHaveBeenCalledOnce();
+  expect(deps.profile).toHaveBeenCalledOnce();
+});
+
+it.each([
+  { code: "REVISION_MODEL", response: null, finishReason: "stop", message: "응답을 받지 못했습니다" },
+  { code: "REVISION_TRUNCATED", response: "{", finishReason: "length", message: "길이 제한" },
+  { code: "REVISION_JSON", response: "invalid JSON", finishReason: "stop", message: "응답 형식" },
+  { code: "REVISION_SCHEMA", response: '{"kind":"view","patch":{"charts":{"0":{"annotations":[{"kind":"max"}]}}}}', finishReason: "stop", message: "응답 형식" },
+])("reports $code without blaming the user or replanning", async ({ code, response, finishReason, message }) => {
+  const { input, deps } = await setup();
+  const revise = vi.fn<ExcelDependencies["complete"]>(async () => { if (response === null) throw new Error("private gateway detail"); return response; });
+  const tool = createExcelTool({ ...deps, revise, callInfo: () => ({ purpose: "excel", modelAlias: "fixture", latencyMs: 1, promptTokens: 1, completionTokens: 1, finishReason: revise.mock.calls.length ? finishReason : "stop" }) });
+  const original = await tool.execute(input);
+  if (original.status !== "completed") throw new Error("not completed");
+  const before = JSON.stringify(original.checkpoint);
+  const result = await tool.execute({ ...input, checkpoint: original.checkpoint!, userText: "모든 축 소수점 제거" });
+  expect(result).toMatchObject({ status: "needs_input", question: expect.stringContaining(message) });
+  expect(JSON.stringify(original.checkpoint)).toBe(before);
+  expect(input.onTrace).toHaveBeenCalledWith(expect.objectContaining({ phase: "error", operation: "revision", errorCode: code }));
+  expect(JSON.stringify(input.onTrace.mock.calls)).not.toContain("private gateway detail");
+  expect(revise).toHaveBeenCalledOnce();
+  expect(deps.complete).toHaveBeenCalledOnce();
+  expect(deps.analyze).toHaveBeenCalledOnce();
+});
+
 it("bounds ticks, preserves source data outside the view, and finds tied peaks in acquisition order", async () => {
   const { input, deps, tool } = await setup();
   await tool.execute(input);
@@ -279,7 +329,7 @@ it("bounds ticks, preserves source data outside the view, and finds tied peaks i
   report.view = { charts: { "0": { axes: { x: { tickValues: [0,200,400,600,800] }, right: { min: 0, max: 10, tickStep: 2, decimals: 1 } }, annotations: [{ series: 1, kind: "max", label: "Tmax", scope: "selectedData" }] } } };
   const before = JSON.stringify(rows);
   const html = renderHtml(report);
-  expect(html).toContain("Tmax: 900");
+  expect(html).toContain("Tmax: X=900, Y=12");
   expect(html).toContain("동률 2점 중 첫 측정점");
   expect(html).toContain("표시 범위 밖");
   expect(JSON.stringify(rows)).toBe(before);
@@ -301,8 +351,11 @@ it("includes the floating-point upper tick (1.2 at step 0.2) and restores automa
   const { mergeView } = await import("./view.ts");
   expect(chartScale([-.01,1.19], { min: 0, max: 1.2, tickStep: .2 }).ticks).toHaveLength(7);
   expect(chartScale([-.01,1.19], { min: 0, max: 1.2, tickStep: .2 }).ticks.at(-1)).toBe(1.2);
+  expect(chartScale([-.0004,1.190857], { decimals: 0 })).toMatchObject({ min: -.0004, max: 1.190857, ticks: [0,1] });
   const view = mergeView(undefined, { charts: { "0": { axes: { right: { min: 0, max: 1.2, tickStep: .2 } } } } });
   expect(mergeView(view, { charts: { "0": { axes: { right: null } } } }).charts["0"].axes).toEqual({});
+  const named = mergeView(undefined, { charts: { "0": { annotations: [{ series: 1, kind: "max", scope: "selectedData", label: "Tmax" }] } } });
+  expect(mergeView(named, { charts: { "0": { annotations: [{ series: 1, kind: "max", scope: "selectedData" }] } } }).charts["0"].annotations?.[0].label).toBe("Tmax");
 });
 
 it("accepts an initial view outside chartSpec and carries it into the first result", async () => {

@@ -49,6 +49,7 @@ async function main() {
       export: (value, format, signal) => { report = value; return worker.run({ kind: "export", report: value, format }, signal); },
     };
     const patches = [
+      { kind: "view", patch: { charts: { "0": { axes: { x: { decimals: 0 }, left: { decimals: 0 }, right: { decimals: 0 } }, annotations: [{ series: 1, kind: "max" }] } } } },
       { kind: "view", patch: { charts: { "0": { axes: { left: { min: 0, max: 100, tickStep: 20, decimals: 0 }, right: { min: 0, max: 1.2, tickStep: .2, decimals: 1 }, x: { tickValues: [0,200,400,600,800] } } } } } },
       { kind: "view", patch: { charts: { "0": { annotations: [{ series: 1, kind: "max", label: "Tmax", scope: "selectedData" }] } } } },
       { kind: "view", patch: { charts: { "0": { title: "TGA 열분해 분석", description: "D열 최대값에서 측정한 Temperature를 Tmax로 표시했습니다." } } }, formats: ["html","pdf","png","pptx"] },
@@ -70,6 +71,7 @@ async function main() {
     assert.equal(result.status, "completed");
     if (result.status !== "completed") throw new Error("initial failed");
     const instructions = [
+      "weight, temperature, Deriv.Weight 축 scale값들은 소수점 없이 맞춰주고, Deriv.Weight의 max peak를 그래프에 표시해줘.",
       "왼쪽 Y축은 0~100 간격 20, 오른쪽 Y축은 0.0~1.2 간격 0.2 소수 한 자리. X축 눈금은 0,200,400,600,800으로 맞춰줘. 데이터는 전부 유지해줘.",
       "앞선 축 설정은 그대로 두고 D열 Deriv. Weight 최대값이 나오는 Temperature를 Tmax로 표시해줘.",
       "제목을 TGA 열분해 분석으로, 설명은 D열 최대값에서 측정한 Temperature를 Tmax로 표시했습니다. 로 바꾸고 HTML, PDF, PNG, PPTX로 저장해줘.",
@@ -81,6 +83,12 @@ async function main() {
       durations.push(Date.now()-started);
       assert.equal(result.status, "completed", JSON.stringify(result.status === "needs_input" ? result.question : result.status));
       if (result.status !== "completed") throw new Error("revision failed");
+      if (durations.length === 1) {
+        assert(report);
+        for (const side of ["x", "left", "right"] as const) assert.equal(report.view!.charts["0"].axes![side]!.decimals, 0);
+        assert.equal(report.view!.charts["0"].annotations![0].series, 1);
+        assert(chartSvg(report).includes('data-annotation="max"'));
+      }
     }
     assert(report);
     const view = report.view!.charts["0"];
@@ -115,7 +123,7 @@ async function main() {
         assert((await zip.file("ppt/slides/slide1.xml")!.async("string")).includes("TGA 열분해 분석"));
       }
     }
-    assert.equal(profiles, 1); assert.equal(planners, 1); assert.equal(revisions, 3);
+    assert.equal(profiles, 1); assert.equal(planners, 1); assert.equal(revisions, 4);
     assert.equal(createHash("sha256").update(await readFile(file)).digest("hex"), fingerprint);
     const metrics = { modelAlias, profiles, planners, revisions, rows: data.length, max, expectedX, durations, prompts, traces, checkpointChars: JSON.stringify(result.checkpoint).length };
     await writeFile(join(output, "metrics.json"), JSON.stringify(metrics, null, 2));
