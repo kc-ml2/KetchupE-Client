@@ -26,7 +26,8 @@ describe("workspace memory", () => {
     } finally {
       rmSync(temporary, { recursive: true, force: true });
     }
-  });
+    // 디스크 DB를 두 번 열어 마이그레이션하므로 느린 Windows 러너에서 기본 5초를 넘길 수 있다.
+  }, 30000);
 
   it("adds, edits, pins, disables, and deletes a user memory", () => {
     const db = openAgentDb(":memory:");
