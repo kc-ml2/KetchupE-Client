@@ -191,7 +191,8 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
           // A dashed guide drops from the marked point to the base axis so its position can be read off.
           lines.push({ [horizontal ? "yAxis" : "xAxis"]: numeric ? xs[selected] : names[selected], lineStyle: { color, type: "dashed" }, label: { show: false } });
         }
-        notes.push(`${text}${ties > 1 ? ` · 동률 ${ties}점 중 첫 측정점` : ""}${inside ? "" : " · 표시 범위 밖"}`);
+        const nearest = annotation.kind === "valueAt" && xs[selected] !== annotation.x ? ` · 요청 X=${label(annotation.x!)}에 가장 가까운 측정점 (X=${label(xs[selected])})` : "";
+        notes.push(`${text}${nearest}${ties > 1 ? ` · 동률 ${ties}점 중 첫 측정점` : ""}${inside ? "" : " · 표시 범위 밖"}`);
       }
       if (marks.length) entry.markPoint = { symbol: "circle", symbolSize: 9, itemStyle: { color, borderColor: "#fff", borderWidth: 1 }, label: { show: true, position: "top", color: INK, fontSize: 12 }, data: marks };
       if (lines.length) entry.markLine = { symbol: "none", lineStyle: { color, type: "dashed" }, data: lines };
