@@ -1,3 +1,4 @@
+import { sourceFor } from "./sources.ts";
 // @vitest-environment node
 import { expect, it, vi } from "vitest";
 import ExcelJS from "exceljs";
@@ -181,12 +182,12 @@ it("rechecks repeated clarification requests and lets the user continue the same
   expect(deps.complete).toHaveBeenCalledTimes(3);
   vi.mocked(deps.complete).mockReset().mockResolvedValue(question);
   const unresolved = await tool.execute({ ...input, values, checkpoint });
-  expect(unresolved).toMatchObject({ status: "needs_input", fields: [{ key: "answer3", label: "확인 내용 보완" }] });
+  expect(unresolved).toMatchObject({ status: "needs_input", fields: [{ key: "answer4", label: "확인 내용 보완" }] });
   if (unresolved.status !== "needs_input") throw new Error("not waiting");
   expect(unresolved.question).not.toContain("새 작업");
   expect(unresolved.checkpoint!.clarifications).toEqual([
     { key: "answer3", question: "어떤 측정값인가요?", answer: "인장강도" },
-    { key: "answer3", question: "어떤 측정값인가요?" },
+    { key: "answer4", question: "어떤 측정값인가요?", options: undefined },
   ]);
   expect(deps.complete).toHaveBeenCalledTimes(2);
 });
@@ -219,7 +220,7 @@ it.each([65, 243, 517])("searches and inspects relocated tables at row %s withou
   expect(inspected.inspections[1].sheets[0].preview[0].cells.slice(7)).toEqual(["항목", "금액"]);
   const report = vi.mocked(deps.export).mock.calls[0][0];
   expect(report.result.tables[0].rows[0].cells).toEqual(["대여금", 100]);
-  expect(report.rowSources[1].row).toBe(dataRow);
+  expect(sourceFor(report.rowSources, 1)!.row).toBe(dataRow);
 });
 
 it("bounds inspections, rejects unselected files and does not forward repeated location demands", async () => {
@@ -340,8 +341,8 @@ it("preserves results on export failure and changes format without rerunning the
   const resumed = await tool.execute({ ...input, checkpoint: failedRetry.checkpoint!, values: { ...input.values, exportFormat: "xlsx" } });
   expect(resumed).toMatchObject({ status: "completed", file: { name: `${fixturePlan.title}.xlsx` } });
   if (resumed.status !== "completed") throw new Error("not completed");
-  expect(resumed.checkpoint).toHaveProperty("excelState.latest.plan.formats", ["xlsx"]);
-  expect(resumed.checkpoint).toHaveProperty("excelState.latest.analysis.result");
+  expect(resumed.checkpoint).toHaveProperty("excelState.previous.plan.formats", ["xlsx"]);
+  expect(resumed.checkpoint).not.toHaveProperty("excelState.latest.analysis.result");
   expect(deps.complete).toHaveBeenCalledTimes(calls);
 });
 
@@ -393,7 +394,7 @@ it("finishes a simple request in one model turn when execute carries a summary",
   const { deps, input, tool } = await setup();
   vi.mocked(deps.complete).mockReset().mockResolvedValueOnce(JSON.stringify({ ...fixturePlan, summary: "실험일별 평균을 정리했습니다." }));
   const result = await tool.execute(input);
-  expect(result).toMatchObject({ status: "completed", checkpoint: { excelState: { latest: { plan: { title: fixturePlan.title } } } } });
+  expect(result).toMatchObject({ status: "completed", checkpoint: { excelState: { previous: { plan: { title: fixturePlan.title } } } } });
   expect(deps.complete).toHaveBeenCalledOnce();
   expect(vi.mocked(deps.export).mock.calls[0][0]).toMatchObject({ summary: "실험일별 평균을 정리했습니다." });
   expect(vi.mocked(deps.export).mock.calls[0][0].plan).not.toHaveProperty("summary");

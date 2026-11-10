@@ -6,7 +6,7 @@ import { DEFAULT_POLICY_PROFILE, GENERAL_ANSWER_SYSTEM, ANSWER_SYSTEM } from "./
 afterEach(() => vi.unstubAllGlobals());
 
 it.each(["general", "grounded"] as const)("sends the %s answer prompt to the generation model", async (answerMode) => {
-  const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "답변" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(`data: ${JSON.stringify({ choices: [{ delta: { role: "assistant", content: "답변" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`, { headers: { "content-type": "text/event-stream" } }));
   vi.stubGlobal("fetch", fetcher);
   const client = createLiteLLMClient({ baseURL: "https://gateway.example.com/v1/", apiKey: "test" });
   const events = [];

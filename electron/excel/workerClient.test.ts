@@ -34,7 +34,7 @@ it("reuses one worker across jobs and replaces it after a crash", async () => {
   const first = child(), worker = createExcelWorker("worker"), signal = new AbortController().signal;
   const a = worker.run(job, signal); first.emit("spawn");
   await vi.waitFor(() => expect(first.postMessage).toHaveBeenCalledOnce());
-  first.emit("message", { ok: false, error: "bad range" }); await expect(a).rejects.toThrow("bad range");
+  first.emit("message", { ok: false, error: "bad range", code: "LIMIT" }); await expect(a).rejects.toMatchObject({ message: "bad range", code: "LIMIT" });
   const b = worker.run(job, signal);
   await vi.waitFor(() => expect(first.postMessage).toHaveBeenCalledTimes(2));
   first.emit("message", { ok: true, result: { sheets: [] } }); await expect(b).resolves.toEqual({ sheets: [] });

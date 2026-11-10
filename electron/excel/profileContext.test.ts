@@ -44,3 +44,13 @@ it("keeps small previews unchanged", () => {
   const original = sheet(); original.conditionalFormatting = []; original.metadata = {};
   expect(profileContext([{ fileId: "file1", name: "파일.xlsx", sheets: [original] }])[0].sheets[0]).toEqual(original);
 });
+
+it("prioritizes a named worksheet inside the compact planner budget while retaining every sheet", () => {
+  const profiles = [{ fileId: "file1", name: "data.xlsx", sheets: [sheet("선택"), ...Array.from({ length: 6 }, (_, i) => sheet(`나머지${i}`))] }];
+  const result = profileContext(profiles, 20000, "선택 시트 전체 그래프");
+  expect(result[0].sheets.map(sheet => sheet.name)).toEqual(profiles[0].sheets.map(sheet => sheet.name));
+  expect(JSON.stringify(result).length).toBeLessThanOrEqual(20000);
+  expect(JSON.stringify(result[0].sheets[0]).length).toBeGreaterThan(JSON.stringify(result[0].sheets[1]).length);
+  expect(result[0].sheets[0].preview?.[0].row).toBe(1);
+  expect(result[0].sheets[0].detailsTruncated).toBe(true);
+});

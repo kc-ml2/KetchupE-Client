@@ -2,15 +2,24 @@ import { z } from "zod";
 import type { BusinessField } from "../../src/app-types/BusinessTool.types.ts";
 import type { WorkflowRoute } from "../agent/router.ts";
 
+export const businessTraceSchema = z.object({
+  phase: z.enum(["files", "profile", "model", "analysis", "export", "error"]), durationMs: z.number().nonnegative(),
+  attempt: z.number().int().nonnegative().optional(), rowCount: z.number().int().nonnegative().optional(),
+  outputBytes: z.number().int().nonnegative().optional(),
+  promptTokens: z.number().nonnegative().optional(), completionTokens: z.number().nonnegative().optional(),
+  modelAlias: z.string().max(200).optional(), finishReason: z.string().max(100).optional(),
+  errorCode: z.string().regex(/^[A-Z_]+$/).max(80).optional(),
+}).strict();
+export type BusinessTrace = z.infer<typeof businessTraceSchema>;
 const MAX_FILES_PER_FIELD = 50;
 export const businessInputSchema = z.object({
   values: z.record(z.string(), z.string().max(4000)),
   files: z.record(z.string(), z.array(z.object({ sourceId: z.string().min(1).max(100), relativePath: z.string().max(4096), name: z.string().max(500) }).strict()).max(MAX_FILES_PER_FIELD)),
 }).strict();
 export type ToolResult =
-  | { status: "needs_input"; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
+  | { status: "needs_input"; replaceFields?: boolean; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
   | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
-  | { status: "failed"; message: string };
+  | { status: "failed"; message: string; code?: string };
 export type BusinessTool = WorkflowRoute & {
   version: string;
   title: string;
@@ -33,6 +42,8 @@ export type BusinessTool = WorkflowRoute & {
     files: Record<string, { bytes: Buffer; fingerprint: string; name: string }[]>;
     checkpoint: Record<string, unknown>;
     signal: AbortSignal;
+    changedKeys?: string[];
+    onTrace?: (event: BusinessTrace) => void;
     onProgress?: (phase: string) => void;
   }) => Promise<ToolResult>;
 };
