@@ -59,7 +59,7 @@ npm run typecheck:electron
 
 After company email authentication, the app receives per-user LiteLLM and MARU keys from the credential broker. Development runs use the same login; shared service keys are never injected into the app. See [authentication and credentials](docs/AUTHENTICATION.md) for authentication, storage, account isolation and operational checks.
 
-`.env` can set the generation and routing model aliases and optional service settings. Never commit API keys or tokens.
+App model names are configured in `llm.config.yaml`, not `.env`. Use `.env` only for optional service settings and standalone diagnostic scripts (see `.env.sample`). App LiteLLM/MARU credentials come from email authentication. Never commit API keys or tokens.
 
 ```dotenv
 # 모델 선택은 llm.config.yaml에서 설정합니다.
