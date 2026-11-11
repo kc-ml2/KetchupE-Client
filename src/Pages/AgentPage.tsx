@@ -11,8 +11,7 @@ import {
   LuCirclePause,
   LuFileText,
 } from "react-icons/lu";
-import Sidebar from "@Features/Sidebar/components/Sidebar";
-import NavRail from "@Features/Sidebar/components/NavRail";
+import Navigation from "@Features/Sidebar/components/Navigation";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
@@ -126,7 +125,7 @@ const AgentPage = (): React.JSX.Element => {
   if (!api) {
     return (
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <Sidebar />
+        <Navigation tab={tab} onChange={setTab} />
         <div className="flex flex-1 items-center justify-center text-sm text-[#71717A]">
           케찹이는 데스크톱 앱에서만 사용할 수 있습니다.
         </div>
@@ -323,8 +322,7 @@ const AgentPage = (): React.JSX.Element => {
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden font-['Inter',sans-serif]">
-      <NavRail tab={tab} onChange={setTab} />
-      <Sidebar />
+      <Navigation tab={tab} onChange={setTab} />
 
       <div className="flex flex-col flex-1 min-w-0 min-h-0 bg-white dark:bg-[#0F0F0F]">
         <div className="flex items-center gap-3 h-[60px] px-6 border-b border-[#E4E4E7] dark:border-[#27272A]">
