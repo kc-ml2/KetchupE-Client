@@ -81,12 +81,11 @@ export function registerAgentHandlers(runtime: AgentRuntime, handle: typeof ipcM
   handle("agent:getModelSettings", async () => {
     const settings = runtime.settings();
     const modelAlias = await runtime.resolvedModelAlias().catch(() => settings.modelAlias);
-    return { baseURL: settings.baseURL, modelAlias, hasApiKey: Boolean(settings.apiKey), configurable: runtime.modelSelectable };
+    return { baseURL: settings.baseURL, modelAlias, hasApiKey: Boolean(settings.apiKey), configurable: false };
   });
   handle("agent:listModels", () => runtime.listModels());
   handle("agent:testModelConnection", async () => {
     const models = await runtime.listModels();
     return { ok: models.length > 0, models, resolvedAlias: models.length ? await runtime.resolvedModelAlias() : "" };
   });
-  handle("agent:setModelSettings", (_event, settings: { modelAlias: string }) => runtime.updateSettings({ modelAlias: String(settings?.modelAlias ?? "") }));
 }

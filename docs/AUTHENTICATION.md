@@ -51,7 +51,7 @@ userData/
 
 ## 배포와 확인
 
-CI와 Vite에서 공통 `LITELLM_API_KEY`를 주입하지 않는다. 앱은 `.env`의 LiteLLM·MARU 키를 읽어 로그인 대신 사용하지 않는다. 독립 smoke/probe 스크립트는 기존 환경변수 방식을 유지한다. Trolley와 telemetry 설정은 이 키 발급 API의 대상이 아니다.
+모든 앱 LLM 연결은 로그인 broker의 주소·키만 사용한다. 모델 이름은 `llm.config.yaml`에서 `decision.default`, `generation.default`, `generation.document`로 지정한다. 기존 Clef 호출은 decision(`/v1/systemone`), 나머지 채팅 API 호출은 generation이다. 모델/API 환경변수는 앱 연결을 덮어쓰지 않는다. YAML은 main 번들에 포함되므로 변경 후 개발 서버 재시작 또는 배포 재빌드가 필요하다. 독립 smoke/probe 스크립트의 환경변수는 유지한다. Trolley와 telemetry 설정은 이 키 발급 API의 대상이 아니다.
 
 로컬 검증: Node 22.5 이상에서 `npm test -- --run`, `npm run typecheck:electron`, `npm run build`.
 

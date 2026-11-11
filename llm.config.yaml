@@ -1,0 +1,7 @@
+# API 주소와 키는 로그인 서버에서 받은 정보만 사용합니다. 변경 후 재시작/재빌드하세요.
+decision:
+  default: clef-flash
+
+generation:
+  default: loki
+  document: loki

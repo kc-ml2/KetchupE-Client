@@ -1,5 +1,6 @@
 import type { ServiceKeys } from "../auth/broker.ts";
 import { normalizeBaseURL } from "./modelClient.ts";
+import { configuredModel, modelConfig } from "./modelConfig.ts";
 
 export type ModelSettings = { baseURL: string; modelAlias: string; apiKey?: string };
 export const TELEMETRY_CONTENT_MODES = ["ops", "redacted_eval", "internal_full"] as const;
@@ -31,12 +32,11 @@ export function loadTelemetrySettings(): TelemetrySettings {
   };
 }
 
-/** Broker credentials always win over legacy environment or saved shared keys. */
-export function accountModelSettings(keys: ServiceKeys): ModelSettings {
+/** All model connections use the authenticated account; YAML selects model names only. */
+export function accountModelSettings(keys: ServiceKeys, role: "generation" | "decision" = "generation"): ModelSettings {
   return {
     baseURL: normalizeBaseURL(keys.litellm.base_url),
     apiKey: keys.litellm.api_key,
-    // Empty → resolveModelAlias picks from what this account's gateway key exposes.
-    modelAlias: process.env.LITELLM_MODEL_ALIAS?.trim() ?? "",
+    modelAlias: role === "decision" ? configuredModel(modelConfig, "decision") : configuredModel(modelConfig, "generation"),
   };
 }

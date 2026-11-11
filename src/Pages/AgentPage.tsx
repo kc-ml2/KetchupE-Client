@@ -10,7 +10,6 @@ import {
   LuBrain,
   LuCirclePause,
   LuFileText,
-  LuSettings,
 } from "react-icons/lu";
 import Sidebar from "@Features/Sidebar/components/Sidebar";
 import NavRail from "@Features/Sidebar/components/NavRail";
@@ -36,13 +35,11 @@ import MissingTermsForm from "@Features/Agent/components/MissingTermsForm";
 import AnchorChoicePrompt from "@Features/Agent/components/AnchorChoicePrompt";
 import FolderPanel from "@Features/Agent/components/FolderPanel";
 import MemoryPanel from "@Features/Agent/components/MemoryPanel";
-import ModelSettingsForm from "@Features/Agent/components/ModelSettingsForm";
 import WorkSourcePanel from "@Features/Agent/components/WorkSourcePanel";
 // import { guideCopy } from "@config/guideCopy";
 
 const TAB_TITLES: Record<AppTab, string> = {
   home: "케찹이",
-  settings: "모델 설정",
   work: "업무",
   upload: "문서",
   context: "컨텍스트",
@@ -69,7 +66,6 @@ const AgentPage = (): React.JSX.Element => {
   const collectionsState = useCollections(api, WORKSPACE_ID);
   const memoriesState = useMemories(api, WORKSPACE_ID);
   const [tab, setTab] = useState<AppTab>("home");
-  const [modelConfigurable, setModelConfigurable] = useState(false);
   const [input, setInput] = useState("");
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   // Business results open in their own right-hand panel; closing it leaves a reopen button above the input.
@@ -108,12 +104,6 @@ const AgentPage = (): React.JSX.Element => {
   useEffect(() => {
     void api?.getWorkspace().then((workspace) => {
       setMemoryEnabled(workspace.memoryEnabled);
-    });
-  }, [api]);
-
-  useEffect(() => {
-    void api?.getModelSettings().then((settings) => {
-      setModelConfigurable(settings.configurable);
     });
   }, [api]);
 
@@ -423,27 +413,7 @@ const AgentPage = (): React.JSX.Element => {
                   />
                 </section>
               )}
-              {tab === "settings" && (
-                <>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-[#18181B] dark:text-[#FAFAFA]">
-                    <LuSettings className="h-4 w-4" />
-                    모델 연결
-                  </h3>
-                  {modelConfigurable ? (
-                    <>
-                      <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                        로그인한 계정의 LiteLLM 게이트웨이에서 사용할 모델을
-                        선택합니다.
-                      </p>
-                      <ModelSettingsForm api={api} />
-                    </>
-                  ) : (
-                    <p className="text-xs text-[#71717A]">
-                      로그인한 계정의 LiteLLM·MARU 키를 사용합니다. 연결 정보는 이메일 인증을 통해 자동으로 설정됩니다.
-                    </p>
-                  )}
-                </>
-              )}
+
             </div>
           </div>
         )}

@@ -58,11 +58,18 @@ describe("Clef workflow routing", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(body)));
     await expect(routeMessage(settings, "실행해", signal)).rejects.toMatchObject({ code: "MODEL_PROTOCOL" });
   });
-  it.each([401, 403, 404, 500])("reports HTTP %s without retrying or silently falling back", async (status) => {
+  it.each([400, 401, 403, 404, 500])("reports HTTP %s without retrying or silently falling back", async (status) => {
     const fetcher = vi.fn().mockResolvedValue(new Response("secret upstream details", { status }));
     vi.stubGlobal("fetch", fetcher);
     await expect(routeMessage(settings, "실행해", signal)).rejects.toMatchObject({ code: status === 401 || status === 403 ? "MODEL_AUTH" : "TOOL_UNAVAILABLE" });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("points HTTP 400 failures to YAML without exposing upstream details", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("secret upstream details", { status: 400 })));
+    const error = await routeMessage(settings, "실행해", signal).catch((error: Error) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("llm.config.yaml의 decision.default");
+    expect((error as Error).message).not.toContain("secret upstream details");
   });
   it("does not expose transport errors or credentials", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("secret-key")));

@@ -67,7 +67,6 @@ function agentAPI(sessionId) {
   deleteMemory: (id) => invoke('agent:deleteMemory', id),
 
   getModelSettings: () => invoke('agent:getModelSettings'),
-  setModelSettings: (settings) => invoke('agent:setModelSettings', settings),
   listModels: () => invoke('agent:listModels'),
   testModelConnection: () => invoke('agent:testModelConnection'),
   startCanvas: (input) => invoke('canvas:start', input),
