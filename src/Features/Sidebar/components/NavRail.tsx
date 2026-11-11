@@ -1,11 +1,11 @@
-import { LuBriefcase, LuHouse, LuSettings, LuUpload } from "react-icons/lu";
+import { LuBriefcase, LuHouse, LuSettings, LuFolder } from "react-icons/lu";
 import type { AppTab } from "@app-types/Navigation.types";
 
 const TABS = [
   ["home", LuHouse, "홈"],
   ["settings", LuSettings, "설정"],
   ["work", LuBriefcase, "업무"],
-  ["upload", LuUpload, "파일"],
+  ["upload", LuFolder, "문서"],
   // ponytail: 컨텍스트 탭은 화면에서만 숨김(기능·라우트 유지). 다시 보이려면 아래 줄 주석 해제 + LuLayers import 복원.
   // ["context", LuLayers, "컨텍스트"],
 ] as const;

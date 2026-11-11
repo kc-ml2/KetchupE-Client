@@ -1,6 +1,9 @@
-import { basename } from "node:path";
+import { basename, extname, join, relative, sep } from "node:path";
 import { realpath } from "node:fs/promises";
-import { BrowserWindow, dialog, ipcMain } from "electron";
+import { z } from "zod";
+import { stat } from "node:fs/promises";
+import { listFolder, resolveFolderPath, validateFolderPath } from "../folderBrowser.ts";
+import { BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type { AgentRuntime } from "../agent/runtime.ts";
 import { MARU_STORAGE_PREFIX, setCollectionActive } from "../agent/store.ts";
 import { TOMATO_LONG_CALL_TIMEOUT_MS } from "../tomato/tomatoClient.ts";
@@ -19,6 +22,70 @@ function collectionNameFor(folder: string, taken: Set<string>): string {
 }
 
 export function registerCollectionHandlers(runtime: AgentRuntime, handle: typeof ipcMain.handle = ipcMain.handle.bind(ipcMain), assertActive: () => void = () => undefined): void {
+  const locationSchema = z.object({ kind: z.enum(["local", "maru"]), id: z.string().min(1), path: z.string() });
+  const rootFor = (id: string) => {
+    const collection = runtime.collections().find((item) => item.name === id && !item.name.startsWith("maru_"));
+    if (!collection) throw new Error("등록된 폴더를 찾을 수 없습니다.");
+    return collection.path;
+  };
+  handle("folder:browse", async (_event, input: unknown) => {
+    const location = locationSchema.parse(input);
+    validateFolderPath(location.path);
+    if (location.kind === "maru") return runtime.browseMaruFolder(location.id, location.path);
+    const root = rootFor(location.id);
+    await runtime.assertSourcePaths([await resolveFolderPath(root, location.path)]);
+    assertActive();
+    const listing = await listFolder(root, location.path);
+    const sources = await runtime.tomato.listSources([location.id]);
+    const indexed = new Set(sources.map((source) => source.relativePath));
+    const state = runtime.watchers.state(location.id);
+    const failed = new Map((state?.lastReport?.failed ?? []).map((failure) => [failure.path, failure.error]));
+    for (const entry of listing.entries) {
+      if (entry.kind === "directory") {
+        const prefix = `${entry.path}/`;
+        const failedPaths = new Set((state?.lastReport?.failed ?? []).map((failure) => relative(root, failure.path).split(sep).join("/")));
+        entry.counts = { searchable: sources.filter((source) => source.relativePath.startsWith(prefix) && !failedPaths.has(source.relativePath)).length, failed: [...failedPaths].filter((path) => path.startsWith(prefix)).length };
+      }
+      if (entry.kind !== "file" || entry.searchStatus === "ignored") continue;
+      const failure = failed.get(join(root, entry.path));
+      entry.searchStatus = state?.retryingFile === entry.path ? "analyzing" : failure ? "failed" : indexed.has(entry.path) ? "searchable" : "pending";
+      entry.statusReason = failure;
+    }
+    assertActive();
+    return listing;
+  });
+  handle("folder:retry", async (_event, input: unknown) => {
+    const location = locationSchema.parse(input);
+    if (location.kind !== "local") throw new Error("로컬 파일만 재시도할 수 있습니다.");
+    const path = await resolveFolderPath(rootFor(location.id), location.path);
+    await runtime.assertSourcePaths([path]);
+    assertActive();
+    await runtime.watchers.retryFile(location.id, location.path);
+  });
+  handle("folder:openLocal", async (_event, input: unknown) => {
+    const location = locationSchema.parse(input);
+    if (location.kind !== "local") throw new Error("로컬 문서만 직접 열 수 있습니다.");
+    const path = await resolveFolderPath(rootFor(location.id), location.path);
+    await runtime.assertSourcePaths([path]);
+    // Only document/media formats may launch their default application, never scripts or executables.
+    const extensions = new Set([".pdf", ".txt", ".md", ".csv", ".tsv", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".hwp", ".hwpx", ".odt", ".ods", ".odp", ".rtf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"]);
+    if (!extensions.has(extname(path).toLowerCase()) || !(await stat(path)).isFile()) throw new Error("직접 열 수 없는 파일 형식입니다. 파일 위치 보기를 이용해 주세요.");
+    assertActive();
+    const error = await shell.openPath(path);
+    if (error) throw new Error("문서를 열지 못했습니다. 연결된 기본 앱을 확인해 주세요.");
+  });
+  // Reveal, rather than execute, arbitrary user files in the OS file manager.
+  handle("folder:reveal", async (_event, input: unknown) => {
+    const location = locationSchema.parse(input);
+    validateFolderPath(location.path);
+    const path = location.kind === "maru"
+      ? await runtime.downloadMaruFile(location.id, location.path)
+      : await resolveFolderPath(rootFor(location.id), location.path);
+    if (location.kind === "local") await runtime.assertSourcePaths([path]);
+    if (!(await stat(path)).isFile()) throw new Error("파일을 선택해 주세요.");
+    assertActive();
+    shell.showItemInFolder(path);
+  });
   handle("collection:list", (_event, workspaceId: string) => runtime.collectionSummaries(workspaceId));
   handle("collection:setActive", (_event, workspaceId: string, name: string, active: boolean) => setCollectionActive(runtime.db, workspaceId, name, active));
   handle("maru:listStorages", (_event, workspaceId: string) => runtime.maruStorages(workspaceId));
@@ -49,12 +116,12 @@ export function registerCollectionHandlers(runtime: AgentRuntime, handle: typeof
 
     const taken = new Set(runtime.collections().map((collection) => collection.name));
     const name = collectionNameFor(folder, taken);
-    const collection = await runtime.tomato.call("registerCollection", [folder, name, "auto"], { timeoutMs: TOMATO_LONG_CALL_TIMEOUT_MS });
+    const collection = await runtime.tomato.call("registerCollection", [folder, name, "auto", true], { timeoutMs: TOMATO_LONG_CALL_TIMEOUT_MS });
     // One folder concept for the user: a search folder is also where Excel business tools look for their source files.
     await new WorkSources(runtime.db).register([folder], "folder");
     await runtime.refreshCollections();
     runtime.watchers.watch(collection);
-    void runtime.watchers.syncNow(name);
+    runtime.watchers.requestSync(name);
     const summaries = await runtime.collectionSummaries("default");
     return summaries.find((summary) => summary.name === name) ?? null;
   });

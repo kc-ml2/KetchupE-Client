@@ -42,6 +42,10 @@ function agentAPI(sessionId) {
   recordInteraction: (runId, kind) => invoke('agent:recordInteraction', runId, kind),
   openCitation: (runId, evidenceId) => invoke('agent:openCitation', runId, evidenceId),
 
+  retryFolderFile: (location) => invoke('folder:retry', location),
+  browseFolder: (location) => invoke('folder:browse', location),
+  revealFolderFile: (location) => invoke('folder:reveal', location),
+  openLocalFolderFile: (location) => invoke('folder:openLocal', location),
   addCollection: () => invoke('collection:add'),
   removeCollection: (name) => invoke('collection:remove', name),
   syncCollection: (name) => invoke('collection:sync', name),

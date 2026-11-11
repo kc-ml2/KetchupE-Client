@@ -10,7 +10,6 @@ import {
   LuBrain,
   LuCirclePause,
   LuFileText,
-  LuFolderSearch,
   LuSettings,
 } from "react-icons/lu";
 import Sidebar from "@Features/Sidebar/components/Sidebar";
@@ -35,10 +34,9 @@ import AgentMessages from "@Features/Agent/components/AgentMessages";
 import CanvasPanel from "@Features/Agent/components/CanvasPanel";
 import MissingTermsForm from "@Features/Agent/components/MissingTermsForm";
 import AnchorChoicePrompt from "@Features/Agent/components/AnchorChoicePrompt";
-import CollectionPanel from "@Features/Agent/components/CollectionPanel";
+import FolderPanel from "@Features/Agent/components/FolderPanel";
 import MemoryPanel from "@Features/Agent/components/MemoryPanel";
 import ModelSettingsForm from "@Features/Agent/components/ModelSettingsForm";
-import MaruStoragePanel from "@Features/Agent/components/MaruStoragePanel";
 import WorkSourcePanel from "@Features/Agent/components/WorkSourcePanel";
 // import { guideCopy } from "@config/guideCopy";
 
@@ -46,7 +44,7 @@ const TAB_TITLES: Record<AppTab, string> = {
   home: "케찹이",
   settings: "모델 설정",
   work: "업무",
-  upload: "파일 업로드",
+  upload: "문서",
   context: "컨텍스트",
 };
 
@@ -356,9 +354,9 @@ const AgentPage = (): React.JSX.Element => {
         {tab !== "home" && (
           <div
             role="tabpanel"
-            className="flex-1 overflow-y-auto px-6 md:px-8 py-6"
+            className={`flex-1 min-h-0 px-6 md:px-8 py-6 ${tab === "upload" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
           >
-            <div className="mx-auto w-full max-w-3xl">
+            <div className={`mx-auto w-full max-w-3xl ${tab === "upload" ? "flex min-h-0 flex-1 flex-col" : ""}`}>
               {tab === "work" && (
                 <>
                   <p className="mb-4 text-sm text-[#71717A]">
@@ -381,25 +379,10 @@ const AgentPage = (): React.JSX.Element => {
               )}
               {tab === "upload" && (
                 <>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-[#18181B] dark:text-[#FAFAFA]">
-                    <LuFolderSearch className="h-4 w-4" />
-                    검색 폴더
-                  </h3>
-                  <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                    활성화한 폴더만 검색하며, 답변에는 실제 인용한 문서가
-                    표시됩니다.
-                  </p>
-                  <CollectionPanel
-                    collections={collectionsState.collections}
-                    error={collectionsState.error}
+                  <FolderPanel api={api} workspaceId={WORKSPACE_ID}
+                    collections={collectionsState.collections} error={collectionsState.error}
                     onAdd={() => void collectionsState.add()}
-                    onRemove={(name) => void collectionsState.remove(name)}
-                    onSync={(name) => void collectionsState.sync(name)}
-                    onToggle={(name, active) =>
-                      void collectionsState.setActive(name, active)
-                    }
-                  />
-                  {api && <MaruStoragePanel api={api} workspaceId={WORKSPACE_ID} />}
+                    onRemove={collectionsState.remove} onSync={collectionsState.sync} />
                 </>
               )}
               {tab === "context" && (

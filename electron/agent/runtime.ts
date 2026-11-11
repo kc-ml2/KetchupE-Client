@@ -13,7 +13,7 @@ import type { AccountCredentials } from "../auth/storage.ts";
 import { accountId } from "../auth/storage.ts";
 import { assertPublicSources } from "../auth/sourcePaths.ts";
 import { AgentError } from "./contracts.ts";
-import { dirname } from "node:path";
+import { dirname, relative, sep } from "node:path";
 import { WorkSourcesFlow, WORK_SOURCES_ROUTE } from "./workSourcesFlow.ts";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -61,6 +61,8 @@ export type AgentRuntime = {
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
   /** MARU storages the account can read, with this workspace's on/off state (default on). */
   maruStorages: (workspaceId: string) => Promise<MaruStorageSummary[]>;
+  downloadMaruFile: (storageId: string, path: string) => Promise<string>;
+  browseMaruFolder: (storageId: string, path: string) => Promise<import("../../src/app-types/Agent.types.ts").FolderListing>;
   settings: () => ModelSettings;
   /** Development builds may switch the generation model; credentials always come from the account. */
   modelSelectable: boolean;
@@ -318,10 +320,16 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
           chunks: item.chunks,
           embedded: item.embedded,
           syncing: state?.syncing ?? false,
+          analysisStatus: state?.syncing || state?.embedding ? "analyzing" : state?.pending ? "pending" : "idle",
+          retryingFile: state?.retryingFile,
           lastError: state?.lastError,
+          syncCounts: state?.lastReport ? { succeeded: Math.max(0, state.lastReport.scanned - state.lastReport.failed.length), failed: state.lastReport.failed.length } : undefined,
+          failedFiles: state?.lastReport?.failed.map((failure) => ({ path: relative(item.path, failure.path).split(sep).join("/"), error: failure.error })) ?? [],
         };
       });
     },
+    downloadMaruFile: (storageId, path) => maru.downloadFolderFile(storageId, path, accessSignal()),
+    browseMaruFolder: (storageId, path) => maru.browseFolder(storageId, path, accessSignal()),
     async maruStorages(workspaceId) {
       const excluded = new Set(excludedMaruStorages(db, workspaceId));
       return (await maru.listStorages(accessSignal())).map((storage) => ({ ...storage, active: !excluded.has(storage.storageId) }));

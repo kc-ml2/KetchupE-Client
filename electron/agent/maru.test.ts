@@ -8,6 +8,19 @@ import type { TomatoClient } from "../tomato/tomatoClient.ts";
 import { McpConnection } from "./mcp.ts";
 import { excerptAround, MARU_EXCERPT_CHARS, MaruClient, maruKeywords, normalizeMaruFindResult, sanitizeMaruResult } from "./maru.ts";
 
+it("browses MARU directories with nullable sizes and nanosecond timestamps", async () => {
+  const call = vi.spyOn(McpConnection.prototype, "callTool").mockResolvedValueOnce({ content: [], structuredContent: {
+    results: [{ path: "docs/folder", type: "directory", size: null, modified_at_ns: 1700000000000000000 }, { path: "docs/file.txt", type: "file", size: 5 }], truncated: true,
+  } });
+  try {
+    const client = new MaruClient("test", "test", "/tmp/maru-test", {} as TomatoClient);
+    const listing = await client.browseFolder("storage", "docs", new AbortController().signal);
+    expect(listing.truncated).toBe(true);
+    expect(listing.entries[0]).toMatchObject({ name: "folder", path: "docs/folder", kind: "directory", modifiedAt: "2023-11-14T22:13:20.000Z" });
+    expect(call).toHaveBeenCalledWith("browse_storage", { storage_id: "storage", path: "docs", max_depth: 1, max_results: 1000 }, expect.any(AbortSignal));
+  } finally { call.mockRestore(); }
+});
+
 it("removes credentials and download URLs from connection diagnostics", () => {
   expect(sanitizeMaruResult({
     storage_id: "storage-a",

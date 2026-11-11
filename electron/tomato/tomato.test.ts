@@ -35,6 +35,21 @@ afterAll(async () => {
   await rm(temporary, { recursive: true, force: true });
 });
 
+it("can register a collection before analysis starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tomato-deferred-"));
+  try {
+    const docs = join(root, "docs");
+    await mkdir(docs);
+    await writeFile(join(docs, "note.md"), "# 문서\n분석 대기 테스트입니다.");
+    const tomato = new Tomato(join(root, "index"));
+    await tomato.registerCollection(docs, "deferred", "off", true);
+    expect((await tomato.status())[0].sources).toBe(0);
+    const report = await tomato.sync("deferred");
+    expect(report.updated).toBe(1);
+    expect((await tomato.status())[0].sources).toBe(1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 it("structure chunks and incremental Korean BM25 search work end to end", async () => {
   const chunks = chunkMarkdown("source", "fallback", await readFile(handbook, "utf8"));
   expect(chunks.some((chunk) => chunk.type === "table" && chunk.body.includes("종료 확인서"))).toBe(true);
