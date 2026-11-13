@@ -230,6 +230,24 @@ it("edits planned movements in a table and submits the amount changes and added 
   expect(JSON.parse(submitted.values.actualEdits)).toEqual({ changes: [{ index: 2, amount: "55550" }], add: [{ direction: "in", description: "현금반납", party: "박정경", amount: "48200" }] });
 });
 
+it("preserves selected transaction accounts when changing amounts and adding payments", async () => {
+  const api = apiFixture();
+  const rows = [{ index: 1, direction: "in" as const, description: "자금대체", party: "", amount: "100" }];
+  render(<BusinessToolCard api={api} runId="run" action={{ ...action, fields: [{ key: "actualEdits", label: "실적", type: "movements", required: true, rows, movementAccounts: [{ value: "H10", label: "신한" }, { value: "H12", label: "삼성증권" }] }], input: { values: {}, files: {} } }} />);
+  expect(screen.getByLabelText("1번 거래 계좌")).toHaveValue("");
+  fireEvent.change(screen.getByLabelText("1번 거래 계좌"), { target: { value: "H12" } });
+  fireEvent.change(screen.getByLabelText("1번 실제 금액"), { target: { value: "200" } });
+  fireEvent.change(screen.getByLabelText("1번 실제 금액"), { target: { value: "100" } });
+  expect(screen.getByLabelText("1번 거래 계좌")).toHaveValue("H12");
+  fireEvent.click(screen.getByRole("button", { name: "계획에 없는 거래 추가" }));
+  fireEvent.change(screen.getByLabelText("추가 거래 적요"), { target: { value: "자금대체 지급" } });
+  fireEvent.change(screen.getByLabelText("추가 거래 계좌"), { target: { value: "H10" } });
+  fireEvent.change(screen.getByLabelText("추가 거래 금액"), { target: { value: "100" } });
+  fireEvent.click(screen.getByRole("button", { name: "확인하고 계속" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalled());
+  expect(JSON.parse(vi.mocked(api.submitBusinessInput).mock.calls[0][2].values.actualEdits)).toEqual({ changes: [{ index: 1, amount: "100", account: "H12" }], add: [{ direction: "out", description: "자금대체 지급", party: "", amount: "100", account: "H10" }] });
+});
+
 it("adds a work-date plan separately from actuals and keeps it editable at final review", async () => {
   const api = apiFixture();
   const table: BusinessAction = { ...action, fields: [

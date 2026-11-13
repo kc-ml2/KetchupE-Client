@@ -111,6 +111,7 @@ To switch accounts, log out and authenticate again. MARU currently supports stor
 | Architecture, lifecycle, code map, limitations     | [Architecture and code map](docs/KETCHUPE_V3_ARCHITECTURE.md) |
 | Add a workflow or connect an external MCP provider | [Integration guide](docs/WORKFLOW_INTEGRATION_GUIDE.md)       |
 | Excel execution contract and Daily Cash rules      | [Business tools and Daily Cash](docs/BUSINESS_TOOLS.md)       |
+| Daily Cash formulas to preserve and values to fill | [Daily Cash README](electron/business/dailyCash/README.md)   |
 | Natural-language Excel work design and status      | [Excel work plan](execl%20workflow.md)                        |
 
 ## License

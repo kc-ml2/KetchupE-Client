@@ -172,6 +172,35 @@ export class SelectiveWorkbook {
     return this.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
   }
 
+  /** Print constants from the final caches so Excel cannot mark formulas as stale. Never deliver this copy. */
+  async withCachedValuesForPrint(name: string): Promise<Uint8Array> {
+    const part = this.sheet(name).path, sheet = await document(this.zip, part);
+    for (const cell of elements(sheet, "c")) {
+      const formulas = elements(cell, "f");
+      if (!formulas.length) continue;
+      const value = elements(cell, "v")[0], type = cell.getAttribute("t") || "n";
+      const valid = value && (type === "str" || (type === "b" && /^[01]$/.test(value.textContent ?? "")) || (type === "n" && value.textContent?.trim() && Number.isFinite(Number(value.textContent))));
+      if (!valid) throw new Error(`${cell.getAttribute("r")}: 출력할 수식의 저장 결과를 확인할 수 없습니다.`);
+      for (const formula of formulas) cell.removeChild(formula);
+      if (type === "str") {
+        cell.removeChild(value); cell.setAttribute("t", "inlineStr");
+        const text = append(sheet, append(sheet, cell, MAIN, "is", {}), MAIN, "t", { "xml:space": "preserve" });
+        text.textContent = value.textContent;
+      }
+    }
+    this.zip.file(part, xml(sheet));
+    // Calculation-chain references no longer describe this temporary print sheet.
+    for (const rel of elements(this.relationships, "Relationship").filter((rel) => rel.getAttribute("Type")?.endsWith("/calcChain"))) {
+      const path = targetPath("xl/workbook.xml", rel.getAttribute("Target")!);
+      this.zip.remove(path); rel.parentNode!.removeChild(rel);
+      const types = await document(this.zip, "[Content_Types].xml");
+      for (const entry of elements(types, "Override").filter((entry) => entry.getAttribute("PartName") === `/${path}`)) entry.parentNode!.removeChild(entry);
+      this.zip.file("[Content_Types].xml", xml(types));
+    }
+    this.zip.file("xl/_rels/workbook.xml.rels", xml(this.relationships));
+    return this.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  }
+
   /** Import validated caches and measured text fits; archived sheets and unrelated styles stay untouched. */
   async withCalculatedValues(calculated: ExcelJS.Worksheet, checks: string[], engine: "Excel" | "LibreOffice" = "Excel", fitted: string[] = []): Promise<Uint8Array> {
     const expected = (await this.loadSheet(calculated.name)).getWorksheet(calculated.name)!;

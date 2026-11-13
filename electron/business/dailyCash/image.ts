@@ -9,7 +9,7 @@ import { ExcelExportError, exportWithExcel } from "./nativeExcel.ts";
 import { exportWithLibreOffice } from "./libreOffice.ts";
 import { textFitArea } from "../../work/textFit.ts";
 
-const MAX_PDF_PAGES = 30, MAX_IMAGE_PIXELS = 96_000_000, RENDER_SCALE = 2;
+const MAX_PDF_PAGES = 30, MAX_IMAGE_PIXELS = 96_000_000, RENDER_DPI = 300, RENDER_SCALE = RENDER_DPI / 72;
 
 export async function pdfImage(pdf: Uint8Array, signal: AbortSignal): Promise<Buffer> {
   const library = await PDFiumLibrary.init();
@@ -28,7 +28,7 @@ export async function pdfImage(pdf: Uint8Array, signal: AbortSignal): Promise<Bu
         pages.push({ input: Buffer.from(image.data), top: height, left: 0 });
         width = Math.max(width, image.width); height += image.height;
       }
-      return await sharp({ create: { width, height, channels: 4, background: "white" } }).composite(pages).png().toBuffer();
+      return await sharp({ create: { width, height, channels: 4, background: "white" } }).composite(pages).withMetadata({ density: RENDER_DPI }).png().toBuffer();
     } finally { document.destroy(); }
   } finally { library.destroy(); }
 }

@@ -1,32 +1,62 @@
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-const mock = vi.hoisted(() => ({ execute: vi.fn() }));
+import ExcelJS from "exceljs";
+import { basename, join } from "node:path";
+import { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
+const mock = vi.hoisted(() => ({ execute: vi.fn(), read: vi.fn(), write: vi.fn(), remove: vi.fn() }));
 vi.mock("node:child_process", () => ({ execFile: mock.execute }));
-vi.mock("node:fs/promises", () => ({ access: vi.fn(async () => {}) }));
+vi.mock("node:fs/promises", () => ({ access: vi.fn(async () => {}), readFile: mock.read, writeFile: mock.write, rm: mock.remove, mkdtemp: vi.fn(async () => "/tmp/print-test") }));
 import { exportWithExcel } from "./nativeExcel.ts";
 
 const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-beforeEach(() => { mock.execute.mockReset().mockImplementation((_file, _args, _options, callback) => callback(null, "", "")); });
+beforeEach(async () => {
+  mock.execute.mockReset().mockImplementation((_file, _args, _options, callback) => callback(null, "", ""));
+  const book = new ExcelJS.Workbook();
+  for (const name of ["sheet", "a'; throw evil"]) book.addWorksheet(name).getCell("A1").value = { formula: "1+1", result: 2 };
+  mock.read.mockReset().mockResolvedValue(Buffer.from(await book.xlsx.writeBuffer()));
+  mock.write.mockReset().mockResolvedValue(undefined); mock.remove.mockReset().mockResolvedValue(undefined);
+});
 afterEach(() => { Object.defineProperty(process, "platform", platform); });
 
 it.each([["darwin", "calculate"], ["darwin", "pdf"], ["win32", "calculate"], ["win32", "pdf"]] as const)("passes paths and sheet names as data on %s (%s)", async (os, operation) => {
   Object.defineProperty(process, "platform", { value: os });
   const input = '/tmp/한글 " quote $name.xlsx', name = "a'; throw evil", pdf = "/tmp/한글.pdf";
   await exportWithExcel(input, name, pdf, new AbortController().signal, operation);
+  const opened = operation === "pdf" ? join("/tmp/print-test", basename(input)) : input;
   const [executable, args, options] = mock.execute.mock.calls[0];
   expect(options.shell).toBeUndefined();
   if (os === "darwin") {
     expect(executable).toBe("/usr/bin/osascript");
-    expect(args.slice(-5)).toEqual([input, name, pdf, operation, ""]);
+    expect(args.slice(-5)).toEqual([opened, name, pdf, operation, ""]);
     expect(args[1]).not.toContain(name);
   } else {
     const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
     expect(args).toEqual(expect.arrayContaining(["-Sta", "-OutputFormat", "Text"]));
     expect(script).not.toContain(name);
     expect(options.env.KETCHUPE_EXCEL_SHEET).toBe(name);
-    expect(options.env.KETCHUPE_EXCEL_INPUT).toBe(input);
+    expect(options.env.KETCHUPE_EXCEL_INPUT).toBe(opened);
     expect(options.env.KETCHUPE_EXCEL_OPERATION).toBe(operation);
   }
+});
+
+it("prints cached constants from a disposable copy without overwriting the formula workbook", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  await exportWithExcel("/tmp/final.xlsx", "sheet", "/tmp/report.pdf", new AbortController().signal, "pdf");
+  expect(mock.read).toHaveBeenCalledWith("/tmp/final.xlsx");
+  expect(mock.write).toHaveBeenCalledOnce();
+  const [path, bytes] = mock.write.mock.calls[0];
+  expect(path).toBe("/tmp/print-test/final.xlsx");
+  const print = (await (await SelectiveWorkbook.open(bytes)).loadSheet("sheet")).getWorksheet("sheet")!;
+  expect(print.getCell("A1").value).toBe(2);
+  expect(print.getCell("A1").formula).toBeUndefined();
+  expect(mock.remove).toHaveBeenCalledWith("/tmp/print-test", { recursive: true, force: true });
+});
+
+it("removes the print copy after an Excel PDF failure", async () => {
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  mock.execute.mockImplementationOnce((_file, _args, _options, callback) => callback(new Error("PDF failed")));
+  await expect(exportWithExcel("/tmp/final.xlsx", "sheet", "/tmp/report.pdf", new AbortController().signal, "pdf")).rejects.toThrow("PDF failed");
+  expect(mock.remove).toHaveBeenCalledWith("/tmp/print-test", { recursive: true, force: true });
 });
 
 it("reports native failures without dumping script source", async () => {

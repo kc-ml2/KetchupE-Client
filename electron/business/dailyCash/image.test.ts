@@ -11,6 +11,7 @@ import { ExcelExportError, exportWithExcel } from "./nativeExcel.ts";
 import { LibreOfficeExportError, exportWithLibreOffice } from "./libreOffice.ts";
 vi.mock("./nativeExcel.ts", async (original) => ({ ...await original<typeof import("./nativeExcel.ts")>(), exportWithExcel: vi.fn() }));
 vi.mock("./libreOffice.ts", async (original) => ({ ...await original<typeof import("./libreOffice.ts")>(), exportWithLibreOffice: vi.fn() }));
+vi.mock("node:os", async (original) => { const os = await original<typeof import("node:os")>(); return { ...os, homedir: os.tmpdir }; });
 afterEach(() => vi.resetAllMocks());
 
 // Two valid PDF pages with distinct sizes/colors catch both page omission and bad stacking.
@@ -28,10 +29,10 @@ function pdfFixture() {
   return Buffer.from(pdf);
 }
 
-it("rasterizes every native PDF page without re-laying out its contents", async () => {
+it("renders every native PDF page at 300 dpi without re-laying out its contents", async () => {
   const image = await pdfImage(pdfFixture(), new AbortController().signal);
-  expect(await sharp(image).metadata()).toMatchObject({ width: 200, height: 300, format: "png" });
-  for (const [top, color] of [[20, [255, 0, 0, 255]], [220, [0, 0, 255, 255]]] as const) {
+  expect(await sharp(image).metadata()).toMatchObject({ width: 416, height: 624, density: 300, format: "png" });
+  for (const [top, color] of [[20, [255, 0, 0, 255]], [440, [0, 0, 255, 255]]] as const) {
     expect([...await sharp(image).extract({ left: 20, top, width: 1, height: 1 }).raw().toBuffer()]).toEqual(color);
   }
 });
@@ -85,7 +86,7 @@ it.each(["success", "calculate", "pdf", "changed"])("renders the final XLSX and 
     expect(Buffer.from(result.bytes)).toEqual(renderedBytes);
     const output = new ExcelJS.Workbook(); await output.xlsx.load(Buffer.from(result.bytes) as unknown as ExcelJS.Buffer);
     expect(output.getWorksheet("report")!.getCell("A1").value).toEqual({ formula: "1+1", result: 2 });
-    expect(await sharp(result.image).metadata()).toMatchObject({ width: 200, height: 300 });
+    expect(await sharp(result.image).metadata()).toMatchObject({ width: 416, height: 624, density: 300 });
   }
   expect(stages).toEqual(outcome === "calculate" ? ["calculate"] : ["calculate", "pdf"]);
   expect(temporary).not.toBe("");
