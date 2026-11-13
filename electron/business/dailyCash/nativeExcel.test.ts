@@ -45,7 +45,7 @@ it("prints cached constants from a disposable copy without overwriting the formu
   expect(mock.read).toHaveBeenCalledWith("/tmp/final.xlsx");
   expect(mock.write).toHaveBeenCalledOnce();
   const [path, bytes] = mock.write.mock.calls[0];
-  expect(path).toBe("/tmp/print-test/final.xlsx");
+  expect(path).toBe(join("/tmp/print-test", "final.xlsx"));
   const print = (await (await SelectiveWorkbook.open(bytes)).loadSheet("sheet")).getWorksheet("sheet")!;
   expect(print.getCell("A1").value).toBe(2);
   expect(print.getCell("A1").formula).toBeUndefined();
