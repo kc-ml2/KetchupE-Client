@@ -2,12 +2,16 @@ import { AgentError } from "./contracts.ts";
 import { createLiteLLMClient, type ModelCallInfo, type ModelClient } from "./modelClient.ts";
 import type { ModelSettings } from "./settings.ts";
 
-/** Model client that reads the current settings on every call so the settings screen takes effect immediately. */
-export function settingsBackedModelClient(settings: () => ModelSettings, resolvedAlias: () => Promise<string>): ModelClient {
-  const client = async () => {
+/** Chat calls are generation; Clef decisions are handled by the systemone router. */
+export function settingsBackedModelClient(
+  settings: () => ModelSettings,
+  resolvedAlias: () => Promise<string>,
+  resolvedDocumentAlias: () => Promise<string> = resolvedAlias,
+): ModelClient {
+  const client = async (document = false) => {
     const current = settings();
-    if (!current.apiKey) throw new AgentError("MODEL_AUTH", "LiteLLM 도메인과 API key를 설정에서 입력하세요.");
-    return { client: createLiteLLMClient({ baseURL: current.baseURL, apiKey: current.apiKey }), modelAlias: await resolvedAlias() };
+    if (!current.apiKey) throw new AgentError("MODEL_AUTH", "로그인 계정의 모델 연결 정보를 확인하세요.");
+    return { client: createLiteLLMClient({ baseURL: current.baseURL, apiKey: current.apiKey }), modelAlias: await (document ? resolvedDocumentAlias() : resolvedAlias()) };
   };
   const lastCalls = new WeakMap<AbortSignal, ModelCallInfo>();
   const report = (live: ModelClient, signal: AbortSignal) => {
@@ -42,7 +46,7 @@ export function settingsBackedModelClient(settings: () => ModelSettings, resolve
       }
     },
     async complete(input, profile, signal) {
-      const { client: live, modelAlias } = await client();
+      const { client: live, modelAlias } = await client(input.purpose === undefined || input.purpose === "canvas");
       try {
         return await live.complete(input, { ...profile, modelAlias }, signal);
       } finally {

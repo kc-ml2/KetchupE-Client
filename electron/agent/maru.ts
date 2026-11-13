@@ -91,6 +91,22 @@ export class MaruClient {
     return { data: payload, summary: JSON.stringify(sanitizeMaruResult(payload), null, 2), documents: [] };
   }
 
+  async browseFolder(storageId: string, path: string, signal: AbortSignal): Promise<import("../../src/app-types/Agent.types.ts").FolderListing> {
+    const payload = await this.callPayload("browse_storage", { storage_id: storageId, path: path || ".", max_depth: 1, max_results: 1000 }, signal);
+    const parsed = z.object({ results: z.array(z.object({ path: z.string(), type: z.enum(["file", "directory"]), size: z.number().nullish(), modified_at: z.string().nullish(), modified_at_ns: z.number().nullish() })), truncated: z.boolean().default(false) }).parse(payload);
+    return {
+      entries: parsed.results.map((item) => ({ name: item.path.split("/").filter(Boolean).at(-1) ?? item.path, path: item.path.startsWith("./") ? item.path.slice(2) : item.path, kind: item.type, size: item.size ?? undefined, modifiedAt: item.modified_at ?? (item.modified_at_ns ? new Date(item.modified_at_ns / 1e6).toISOString() : undefined) }))
+        .sort((a, b) => Number(b.kind === "directory") - Number(a.kind === "directory") || a.name.localeCompare(b.name, "ko")),
+      truncated: parsed.truncated,
+    };
+  }
+
+  async downloadFolderFile(storageId: string, path: string, signal: AbortSignal): Promise<string> {
+    const file = await this.authorizeDocument({ storageId, path }, signal);
+    if (file.type !== "file" || file.download?.status !== "ready") throw new Error("다운로드할 수 없는 파일입니다.");
+    return this.download(file, refId(storageId, path), signal);
+  }
+
   /** Storage roots the account's teams can read. */
   async listStorages(signal: AbortSignal): Promise<MaruStorage[]> {
     const parsed = storageListSchema.safeParse(await this.callPayload("browse_storage", { max_results: 200 }, signal));
@@ -134,7 +150,7 @@ export class MaruClient {
     return this.tomato.ingestFile(localPath, collection, relativePath);
   }
 
-  async authorizeDocument(document: ExternalDocumentRef, signal: AbortSignal): Promise<MaruResult> {
+  async authorizeDocument(document: Pick<ExternalDocumentRef, "storageId" | "path">, signal: AbortSignal): Promise<MaruResult> {
     const payload = await this.callPayload("find_storage", {
       storage_id: document.storageId,
       file_path: document.path,

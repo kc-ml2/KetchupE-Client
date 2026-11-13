@@ -20,7 +20,7 @@ async function handle(request: WorkerRequest): Promise<unknown> {
     case "sync":
       return tomato.sync(...request.args);
     case "embedMissing":
-      return tomato.embedMissing(request.args[0], (completed, total) => post({ id: request.id, progress: { completed, total } }));
+      return tomato.embedMissing(request.args[0], (completed, total) => post({ id: request.id, progress: { completed, total } }), request.args[1]);
     case "search":
       return tomato.search(...request.args);
     case "getNeighbors":

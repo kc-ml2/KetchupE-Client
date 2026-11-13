@@ -93,7 +93,7 @@ export async function routeMessage(settings: Pick<ModelSettings, "baseURL" | "ap
       }),
     });
     if (response.status === 401 || response.status === 403) throw new AgentError("MODEL_AUTH", "LiteLLM 라우팅 모델 접근이 거부되었습니다. 로그아웃 후 다시 인증하거나 운영자에게 모델 권한을 확인해 주세요.");
-    if (!response.ok) throw new AgentError("TOOL_UNAVAILABLE", `Clef 업무 선택 요청이 실패했습니다 (HTTP ${response.status}). LiteLLM의 /v1/systemone 지원과 라우팅 모델 alias를 확인하세요.`);
+    if (!response.ok) throw new AgentError("TOOL_UNAVAILABLE", `Clef 업무 선택 요청이 실패했습니다 (HTTP ${response.status}). llm.config.yaml의 decision.default가 서버에 등록된 모델명인지 확인하세요. 모델명이 맞다면 /v1/systemone의 요청 형식을 확인하세요.`);
     const parsed = choiceSchema.safeParse(await response.json());
     requestSignal.throwIfAborted();
     if (!parsed.success) throw new AgentError("MODEL_PROTOCOL", "업무 선택 모델의 응답 형식이 올바르지 않습니다.");

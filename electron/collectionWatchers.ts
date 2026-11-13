@@ -1,5 +1,6 @@
 import { watch, type FSWatcher } from "node:fs";
-import { basename } from "node:path";
+import { basename, relative, sep } from "node:path";
+import { resolveFolderPath } from "./folderBrowser.ts";
 import type { TomatoClient } from "./tomato/tomatoClient.ts";
 import { TOMATO_LONG_CALL_TIMEOUT_MS } from "./tomato/tomatoClient.ts";
 import type { Collection, EmbeddingReport, UpdateReport } from "./tomato/tomato.ts";
@@ -11,6 +12,8 @@ const IGNORED_SEGMENTS = new Set([".git", "node_modules", "__pycache__", ".DS_St
 
 export type CollectionSyncState = {
   syncing: boolean;
+  pending?: boolean;
+  retryingFile?: string;
   dirty: boolean;
   embedding?: { completed: number; total: number };
   lastError?: string;
@@ -25,6 +28,7 @@ type Entry = {
   retry?: ReturnType<typeof setTimeout>;
   inFlight?: Promise<UpdateReport | undefined>;
   state: CollectionSyncState;
+  retryTask?: Promise<void>;
 };
 
 export type CollectionSyncTelemetry = {
@@ -122,6 +126,8 @@ export class CollectionWatchers {
     const entry = this.entries.get(name);
     if (!entry) return;
     clearTimeout(entry.debounce);
+    entry.state.pending = true;
+    this.emit(entry);
     entry.debounce = setTimeout(() => void this.syncNow(name), SYNC_DEBOUNCE_MS);
   }
 
@@ -129,6 +135,11 @@ export class CollectionWatchers {
   syncNow(name: string): Promise<UpdateReport | undefined> {
     const entry = this.entries.get(name);
     if (!entry) return Promise.resolve(undefined);
+    clearTimeout(entry.debounce);
+    if (entry.retryTask) {
+      entry.state.dirty = true;
+      return entry.retryTask.then(() => undefined, () => undefined);
+    }
     if (entry.inFlight) {
       entry.state.dirty = true;
       return entry.inFlight;
@@ -143,10 +154,54 @@ export class CollectionWatchers {
     return entry.inFlight;
   }
 
+  async retryFile(name: string, path: string): Promise<void> {
+    const entry = this.entries.get(name);
+    if (!entry) throw new Error("등록된 폴더를 찾을 수 없습니다.");
+    if (entry.inFlight || entry.retryTask) throw new Error("분석 중입니다. 완료 후 다시 시도해 주세요.");
+    const absolutePath = await resolveFolderPath(entry.collection.path, path);
+    if (entry.inFlight || entry.retryTask) throw new Error("분석 중입니다. 완료 후 다시 시도해 주세요.");
+    if (!entry.state.lastReport?.failed.some((failure) => failure.path === absolutePath)) throw new Error("실패한 파일만 재시도할 수 있습니다.");
+    clearTimeout(entry.debounce);
+    if (entry.state.pending) entry.state.dirty = true;
+    entry.state.pending = false;
+    entry.state.retryingFile = relative(entry.collection.path, absolutePath).split(sep).join("/");
+    entry.state.syncing = true;
+    this.emit(entry);
+    entry.retryTask = (async () => {
+      try {
+        const result = await this.tomato.call("ingestFile", [absolutePath, name, entry.state.retryingFile!, entry.collection.ocr ?? "off"], { timeoutMs: TOMATO_LONG_CALL_TIMEOUT_MS });
+        await this.tomato.call("embedMissing", [name, result.sourceId], { timeoutMs: TOMATO_LONG_CALL_TIMEOUT_MS });
+        const report = entry.state.lastReport!;
+        report.failed = report.failed.filter((failure) => failure.path !== absolutePath);
+        report.updated += 1;
+        entry.state.lastError = report.failed.length ? `파싱/인덱싱 실패: ${report.failed[0].error}` : undefined;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const failure = entry.state.lastReport?.failed.find((item) => item.path === absolutePath);
+        if (failure) failure.error = message;
+        entry.state.lastError = message;
+        throw error;
+      } finally {
+        entry.state.syncing = false;
+        entry.state.retryingFile = undefined;
+        this.emit(entry);
+      }
+    })();
+    try { await entry.retryTask; }
+    finally {
+      entry.retryTask = undefined;
+      if (entry.state.dirty && this.entries.get(name) === entry) {
+        entry.state.dirty = false;
+        this.requestSync(name);
+      }
+    }
+  }
+
   private async runSync(entry: Entry): Promise<UpdateReport | undefined> {
     const startedAt = new Date().toISOString();
     const started = Date.now();
     entry.state.syncing = true;
+    entry.state.pending = false;
     entry.state.lastError = undefined;
     this.emit(entry);
     try {
@@ -170,6 +225,8 @@ export class CollectionWatchers {
 
   private async embed(entry: Entry): Promise<(EmbeddingReport & { durationMs: number }) | undefined> {
     const started = Date.now();
+    entry.state.embedding = { completed: 0, total: 0 };
+    this.emit(entry);
     try {
       const report = await this.tomato.call("embedMissing", [entry.collection.name], {
         timeoutMs: TOMATO_LONG_CALL_TIMEOUT_MS,
@@ -186,6 +243,7 @@ export class CollectionWatchers {
       entry.state.lastError = entry.state.lastError ? `${entry.state.lastError} · ${embeddingError}` : embeddingError;
       return undefined;
     } finally {
+      entry.state.embedding = undefined;
       this.emit(entry);
     }
   }

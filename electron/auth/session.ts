@@ -1,3 +1,4 @@
+import { ActivationError } from "./activationError.ts";
 import type { AuthState } from "../../src/app-types/Auth.types.ts";
 import { BrokerError, CredentialBroker, codeSchema, emailSchema } from "./broker.ts";
 import type { AccountCredentials, CredentialStore } from "./storage.ts";
@@ -142,7 +143,7 @@ export class AuthSession {
           this.token = undefined;
           this.update({ phase: "ready", email: account.email, sessionId });
         }
-      } catch {
+      } catch (error) {
         try {
           if (saved) this.store.clear();
           await this.lifecycle.deactivate();
@@ -150,7 +151,7 @@ export class AuthSession {
           this.update({ phase: "signing_out", message: "작업 공간을 정리하지 못했습니다. 앱을 종료한 뒤 다시 실행해 주세요." });
           return;
         }
-        if (!signal.aborted) this.update({ phase: "signed_out", email: account.email, message: "로그인 정보를 저장하거나 작업 공간을 열지 못했습니다. 다시 시도해 주세요." });
+        if (!signal.aborted) this.update({ phase: "signed_out", email: account.email, message: error instanceof ActivationError ? error.message : "로그인 정보를 저장하거나 작업 공간을 열지 못했습니다. 다시 시도해 주세요." });
       }
     })();
     await this.activation;

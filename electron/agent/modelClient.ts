@@ -50,7 +50,7 @@ export async function listModels(baseURL: string, apiKey: string, signal?: Abort
 
 function generationModels(models: string[], excluded?: string): string[] {
   // shortcut: /models has no standard capability field; exclude known non-chat aliases until the gateway supplies one.
-  const candidates = models.filter((id) => id !== excluded && id !== process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim()
+  const candidates = models.filter((id) => id !== excluded
     && !/(?:^|[/_.-])(?:clef|embed(?:ding)?s?|rerank(?:er)?|whisper|tts|dall-e)(?:$|[/_.-])/i.test(id));
   const preferred = [DEFAULT_LITELLM_MODEL_ALIAS, "loki", "odin"].flatMap((alias) => candidates.filter((id) => id.toLowerCase() === alias));
   return [...new Set([...preferred, ...candidates])];
@@ -148,14 +148,6 @@ export async function fetchWithConnectionRetry(input: string | URL | Request, in
   }
 }
 
-/** Inspect model-selection errors in memory only: gateway messages can contain credentials. */
-async function isInvalidModel(response: Response): Promise<boolean> {
-  if (response.status !== 400 && response.status !== 404) return false;
-  const body = await response.clone().json().catch(() => null);
-  const parsed = z.object({ error: z.object({ message: z.string().optional(), code: z.union([z.string(), z.number()]).nullable().optional() }) }).safeParse(body);
-  return parsed.success && /invalid model|model[_ ]not[_ ]found|model[^\n]*(?:does not exist|not available|not found)/i.test(`${parsed.data.error.code ?? ""} ${parsed.data.error.message ?? ""}`);
-}
-
 const PROVIDER_NAME = "ketchupe-litellm";
 /**
  * Turns off thinking on the vLLM-served Qwen behind LiteLLM (passed through as `chat_template_kwargs`).
@@ -170,32 +162,14 @@ export function createLiteLLMClient(options: LiteLLMClientOptions): ModelClient 
     options.onCall?.(info);
   };
   function requestModel(alias: string) {
-    const request = { alias };
     const provider = createOpenAICompatible({
       name: PROVIDER_NAME,
       baseURL: normalizeBaseURL(options.baseURL),
       apiKey: options.apiKey,
       includeUsage: true,
-      fetch: async (url, init) => {
-        let response = await fetchWithConnectionRetry(url, init);
-        if (!await isInvalidModel(response) || typeof init?.body !== "string") return response;
-        const signal = init.signal ?? undefined;
-        signal?.throwIfAborted();
-        const replacements = generationModels(await listModels(options.baseURL, options.apiKey, signal), alias).slice(0, 2);
-        // At most two alternate models before consuming any stream; never replay a partial answer.
-        for (const replacement of replacements) {
-          const body = JSON.parse(init.body);
-          body.model = replacement;
-          if (!["ketchupe", "loki"].includes(replacement.toLowerCase())) delete body.chat_template_kwargs;
-          signal?.throwIfAborted();
-          response = await fetchWithConnectionRetry(url, { ...init, body: JSON.stringify(body) });
-          request.alias = replacement;
-          if (!await isInvalidModel(response)) break;
-        }
-        return response;
-      },
+      fetch: fetchWithConnectionRetry,
     });
-    return { get alias() { return request.alias; }, model: provider(alias) };
+    return { alias, model: provider(alias) };
   }
 
   async function structuredCall<T>(

@@ -238,6 +238,7 @@ describe("업무 탭의 계약서 작성 시작", () => {
   it.each(["새 질문", "다른 대화"])("입력 전에 %s로 이동하면 문서 모드를 해제한다", async (destination) => {
     const api = setup();
     await chooseContract();
+    fireEvent.click(screen.getByRole("tab", { name: "홈" }));
     fireEvent.click(screen.getByRole("link", { name: destination }));
     expect(screen.queryByText(question)).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "안녕하세요" } });
