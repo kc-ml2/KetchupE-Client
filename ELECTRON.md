@@ -138,9 +138,9 @@ KetchupE/
 ### 자동 배포 (권장): GitHub Actions + Release (Windows `.exe` 전용)
 
 GitHub Actions에서 생성되는 `.exe`는 로컬 `.env`를 읽지 않습니다.
-앱의 LiteLLM·MARU 주소와 키는 이메일 인증 broker에서 받습니다. `VITE_API_URL`은 현재 앱에서 사용하지 않습니다.
+앱의 LiteLLM·MARU 주소와 키는 이메일 인증 broker에서 받습니다.
 모델 이름은 저장소의 `llm.config.yaml`에서 설정하며 main 번들에 포함되므로 변경 후 재빌드해야 합니다.
-선택적 서비스 및 독립 진단 도구의 환경변수는 `.env.sample`과 [인증 문서](docs/AUTHENTICATION.md)를 참고하세요.
+선택적 서비스 설정은 `.env.sample`, 독립 진단 도구는 [README](README.md#development), 로그인은 [인증 문서](docs/AUTHENTICATION.md)를 참고하세요.
 
 1. `package.json`의 `version`을 올립니다 (예: `2.0.8` → `2.0.9`).
 2. 태그를 생성해서 푸시합니다.
