@@ -7,8 +7,41 @@ import { PDFiumLibrary } from "@hyzyla/pdfium";
 import { expect, it } from "vitest";
 import { exportWithLibreOffice } from "./libreOffice.ts";
 import { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
+import { fixtureBooks } from "./fixtures.ts";
+import { bindAccounts, buildReport, priorAmounts } from "./report.ts";
+import { readCashStatus } from "./cashStatus.ts";
+import { readWeekly } from "./weekly.ts";
 
 // Opt in on machines with a full LibreOffice installation; ordinary CI does not launch desktop apps.
+it.skipIf(process.env.KETCHUPE_TEST_LIBREOFFICE !== "1")("recalculates preserved cash SUMs and KRW totals after an execution amount changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lo-cash-formulas-"));
+  try {
+    const { report, status, weekly } = fixtureBooks(); const prior = report.getWorksheet(1)!;
+    prior.getCell("E10").value = { formula: "SUM(D131:D136)", result: 0 };
+    prior.getCell("G10").value = { formula: "SUM(D157:D174)", result: 0 };
+    prior.getCell("H21").value = 2; prior.getCell("H28").value = -2;
+    prior.getCell("L21").value = { formula: "TRUNC(H21*K21,0)", result: 0 };
+    const amounts = priorAmounts(prior, {}).values, kc = readCashStatus(status);
+    const { bindings } = bindAccounts(prior, kc.accounts, amounts, {}, "2026-10-13");
+    const movements = readWeekly(weekly, "fixture").movements;
+    const rates = { date: "2026-10-13", requestedDate: "2026-10-13", round: "1", publishedAt: "fixture", source: "fixture", fetchedAt: "fixture", responseHash: "fixture", perUnit: { USD: "1400.25", JPY: "9.5012", CNY: "200.1" } };
+    const built = buildReport(report, prior, "2026-10-13", "2026-10-14", amounts, kc.accounts, bindings, movements.filter((m) => m.date === "2026-10-13"), movements.filter((m) => m.date === "2026-10-14"), rates, {}, new Map());
+    built.sheet.getCell("D131").value = 12000;
+    const input = join(directory, "source.xlsx"); await writeFile(input, Buffer.from(await report.xlsx.writeBuffer()));
+    await exportWithLibreOffice(input, built.sheet.name, join(directory, "report.pdf"), new AbortController().signal, "calculate");
+    const calculated = (await (await SelectiveWorkbook.open(await readFile(input))).loadSheet(built.sheet.name)).getWorksheet(built.sheet.name)!;
+    expect(calculated.getCell("E10").result).toBe(12000);
+    for (const address of ["H10", "H17", "D237", "G242", "G248"]) expect(calculated.getCell(address).result, address).toBe(111000);
+    expect(calculated.getCell("E10").formula).toBe("SUM(D131)");
+    expect(calculated.getCell("G248").formula).toBe("G242+G244+G246");
+    expect(calculated.getCell("K23").value).toBe(9.5012);
+    expect(calculated.getCell("L21").formula).toBe("ROUND(H21*K21,0)");
+    expect(calculated.getCell("L21").result).toBe(2801);
+    expect(calculated.getCell("L28").result).toBe(-2801);
+    expect(calculated.getCell("B131").alignment.wrapText).not.toBe(true);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}, 120000);
+
 it.skipIf(process.env.KETCHUPE_TEST_LIBREOFFICE !== "1")("calculates and prints only the selected sheet with the final cached values", async () => {
   const directory = await mkdtemp(join(tmpdir(), "lo-integration-"));
   try {

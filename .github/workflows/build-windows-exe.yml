@@ -24,8 +24,6 @@ jobs:
       KETCHUPE_TELEMETRY_CONTENT_MODE: ${{ vars.KETCHUPE_TELEMETRY_CONTENT_MODE }}
       KETCHUPE_ENVIRONMENT: production
       KETCHUPE_TENANT_ID: public
-      LITELLM_MODEL_ALIAS: ketchupe
-      LITELLM_ROUTER_MODEL_ALIAS: clef-flash
 
     steps:
       - name: Checkout

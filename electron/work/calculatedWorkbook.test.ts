@@ -17,6 +17,51 @@ async function fixture() {
   return { bytes, archive: await SelectiveWorkbook.open(bytes), sheet };
 }
 
+it("freezes only the print sheet's cached values while preserving types, styles, merges and historical formulas", async () => {
+  const book = new ExcelJS.Workbook();
+  book.addWorksheet("history").getCell("A1").value = { formula: "1+1", result: 2 };
+  const sheet = book.addWorksheet("print");
+  for (const [address, formula, result] of [["A1", "RAND()", 0.123456], ["A2", "1-1", 0], ["A3", '" text "', " text "], ["A4", '""', ""], ["A5", "1=1", true], ["A6", "1=0", false], ["A7", "DATE(2026,10,14)", 46309]] as const) sheet.getCell(address).value = { formula, result } as ExcelJS.CellFormulaValue;
+  sheet.getCell("A7").numFmt = "yyyy-mm-dd";
+  sheet.getCell("A1").font = { name: "Arial", size: 11, strike: true };
+  sheet.mergeCells("A1:B1"); sheet.pageSetup.printArea = "A1:B7";
+  const source = Buffer.from(await book.xlsx.writeBuffer()), before = await JSZip.loadAsync(source);
+  const output = await (await SelectiveWorkbook.open(source)).withCachedValuesForPrint("print");
+  const zip = await JSZip.loadAsync(output);
+  for (const path of ["xl/worksheets/sheet1.xml", "xl/styles.xml", "xl/workbook.xml"]) expect(await zip.file(path)!.async("string")).toBe(await before.file(path)!.async("string"));
+  const printed = (await (await SelectiveWorkbook.open(output)).loadSheet("print")).getWorksheet("print")!;
+  // ExcelJS normalizes an empty inline string to null; its printed value must stay blank, not zero.
+  expect(["A1", "A2", "A3", "A5", "A6"].map((address) => printed.getCell(address).value)).toEqual([0.123456, 0, " text ", true, false]);
+  expect(printed.getCell("A4").text).toBe("");
+  expect(printed.getCell("A7").value).toBeInstanceOf(Date);
+  expect(printed.getCell("A1").font).toEqual(sheet.getCell("A1").font);
+  expect(printed.model.merges).toEqual(["A1:B1"]);
+  expect(printed.pageSetup.printArea).toBe("A1:B7");
+  printed.eachRow((row) => row.eachCell((cell) => expect(cell.formula).toBeUndefined()));
+  expect((await (await SelectiveWorkbook.open(source)).loadSheet("print")).getWorksheet("print")!.getCell("A1").formula).toBe("RAND()");
+});
+
+it("removes obsolete calculation-chain references from the disposable print workbook", async () => {
+  const book = new ExcelJS.Workbook(); book.addWorksheet("print").getCell("A1").value = { formula: "1+1", result: 2 };
+  const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer());
+  zip.file("xl/calcChain.xml", '<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="A1" i="1"/></calcChain>');
+  const rels = "xl/_rels/workbook.xml.rels", types = "[Content_Types].xml";
+  zip.file(rels, (await zip.file(rels)!.async("string")).replace("</Relationships>", '<Relationship Id="chain" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/></Relationships>'));
+  zip.file(types, (await zip.file(types)!.async("string")).replace("</Types>", '<Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/></Types>'));
+  const archive = await SelectiveWorkbook.open(await zip.generateAsync({ type: "uint8array" }));
+  const printed = await JSZip.loadAsync(await archive.withCachedValuesForPrint("print"));
+  expect(printed.file("xl/calcChain.xml")).toBeNull();
+  expect(await printed.file(rels)!.async("string")).not.toContain("calcChain");
+  expect(await printed.file(types)!.async("string")).not.toContain("calcChain");
+});
+
+it.each([undefined, { error: "#REF!" } as const])("refuses to print a formula without a valid cached result (%s)", async (result) => {
+  const book = new ExcelJS.Workbook();
+  book.addWorksheet("print").getCell("A1").value = { formula: "1+1", result };
+  const archive = await SelectiveWorkbook.open(Buffer.from(await book.xlsx.writeBuffer()));
+  await expect(archive.withCachedValuesForPrint("print")).rejects.toThrow("저장 결과");
+});
+
 it("updates boolean and numeric caches without changing formulas, styles or historical XML", async () => {
   const { bytes, archive, sheet } = await fixture();
   sheet.getCell("B1").value = { formula: "A1=prior!A1", result: true } as unknown as ExcelJS.CellValue;

@@ -32,7 +32,7 @@ export function readWeekly(book: ExcelJS.Workbook, filename: string) {
       const amount = money(sheet.getCell(`${side.amount}${r}`));
       if (amount.lte(0)) throw new Error(`${filename}!${r}: 계획 금액은 양수여야 합니다.`);
       if (!description) throw new Error(`${filename}!${r}: 적요가 없습니다.`);
-      (deposit ? deposits : result).push({ date: current, direction: side.direction, description, party, amount, source: `${filename}/${sheet.name}!${side.amount}${r}` });
+      (deposit ? deposits : result).push({ date: current, direction: side.direction, description, party, amount: amount.round(), source: `${filename}/${sheet.name}!${side.amount}${r}` });
     }
   }
   if (!ended || !dates.size) throw new Error(`${filename}: 주간계획의 날짜/상세행 종료 표식을 확인하세요.`);

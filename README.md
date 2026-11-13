@@ -59,16 +59,17 @@ npm run typecheck:electron
 
 After company email authentication, the app receives per-user LiteLLM and MARU keys from the credential broker. Development runs use the same login; shared service keys are never injected into the app. See [authentication and credentials](docs/AUTHENTICATION.md) for authentication, storage, account isolation and operational checks.
 
-`.env` can set the generation and routing model aliases and optional service settings. Never commit API keys or tokens.
+App model names are configured in `llm.config.yaml`, not `.env`. Use `.env` for optional service settings (see `.env.sample`). App LiteLLM/MARU credentials come from email authentication. Never commit API keys or tokens.
+
+Tomato caches embedding models in `<Electron userData>/accounts/<account id>/tomato/models` by default and reuses them across app updates. Leave `TOMATO_MODEL_CACHE` unset to use this location; an empty value resolves to the working directory. Changing the cache location may require downloading the model again.
 
 ```dotenv
-LITELLM_MODEL_ALIAS=ketchupe
-LITELLM_ROUTER_MODEL_ALIAS=clef-flash
+# 모델 선택은 llm.config.yaml에서 설정합니다.
 TROLLEY_API_KEY=<optional service user key>
 TROLLEY_MCP_ENDPOINT=https://trolley.ml2-alpha.com/mcp/
 ```
 
-Only the standalone diagnostic scripts below use `LITELLM_API_KEY`/`LITELLM_BASE_URL` and `MARU_API_TOKEN`/`MARU_MCP_ENDPOINT`. These values do not affect app login or connections.
+Only the standalone diagnostic scripts below use `LITELLM_API_KEY`/`LITELLM_BASE_URL`/`LITELLM_MODEL_ALIAS` and `MARU_API_TOKEN`/`MARU_MCP_ENDPOINT`. Supply these through the process environment when running diagnostics; they are omitted from `.env.sample` and do not affect app login or connections.
 
 ```bash
 npm run smoke:litellm
@@ -76,7 +77,7 @@ npm run probe:maru
 npm run probe:trolley
 ```
 
-Natural-language task selection uses the `clef-flash` alias registered on the same LiteLLM's `/v1/systemone`. If it is deployed under another name, set `LITELLM_ROUTER_MODEL_ALIAS`. `$workflow_id` and explicit modes do not call the routing model. Generation and answers use `LITELLM_MODEL_ALIAS` (release default `ketchupe`). If that model is rejected as unavailable (HTTP 400/404), the client refreshes `/models` using the same account and tries up to two alternatives: `ketchupe`, `loki`/`Loki`, `odin`, then other exposed generation candidates. Clef and known non-chat aliases are excluded; actual API spelling is preserved. No model fallback occurs for unrelated bad requests, authentication errors, server failures or partial streams. A routing failure never falls back to another model. Restart the dev server after changing settings, and rebuild release builds.
+Model names are configured in `llm.config.yaml`: `decision.default: clef-flash`, `generation.default: loki`, and `generation.document: loki`. Existing Clef routing keeps `/v1/systemone`; all chat API calls (including policy, verification and Excel planning) use generation, with Canvas using document. Both roles use only the logged-in broker URL/key. Missing document overrides use generation.default; unknown configuration keys/categories fail validation. Failed model requests never switch models. YAML is bundled into Electron main: restart development or rebuild the release after editing it.
 
 To switch accounts, log out and authenticate again. MARU currently supports storage browsing and search with cited content, plus document download and indexing; Trolley supports capability and Operation listing. Trolley Operation execution is not connected. Follow the [integration guide for external teams](docs/WORKFLOW_INTEGRATION_GUIDE.md) to connect a new MCP server.
 
@@ -110,6 +111,7 @@ To switch accounts, log out and authenticate again. MARU currently supports stor
 | Architecture, lifecycle, code map, limitations     | [Architecture and code map](docs/KETCHUPE_V3_ARCHITECTURE.md) |
 | Add a workflow or connect an external MCP provider | [Integration guide](docs/WORKFLOW_INTEGRATION_GUIDE.md)       |
 | Excel execution contract and Daily Cash rules      | [Business tools and Daily Cash](docs/BUSINESS_TOOLS.md)       |
+| Daily Cash formulas to preserve and values to fill | [Daily Cash README](electron/business/dailyCash/README.md)   |
 | Natural-language Excel work design and status      | [Excel work plan](execl%20workflow.md)                        |
 
 ## License

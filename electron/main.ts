@@ -28,6 +28,7 @@ import { registerAgentHandlers } from "./ipc/agentHandlers.ts";
 import { registerCollectionHandlers } from "./ipc/collectionHandlers.ts";
 import { registerWorkSourceHandlers } from "./ipc/workSourceHandlers.ts";
 import { startAgentRuntime, type AgentRuntime } from "./agent/runtime.ts";
+import { validateAccountModels } from "./agent/validateModels.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -361,6 +362,7 @@ function setupAuth() {
   auth = new AuthSession(new CredentialBroker(), new CredentialStore(root), {
     activate: async (account) => {
       if (agentRuntime || scope) throw new Error("Previous account is still active");
+      await validateAccountModels(account.keys);
       const sessionId = randomUUID();
       const currentScope = new SessionScope(sessionId, trustedSender);
       scope = currentScope;
@@ -370,7 +372,6 @@ function setupAuth() {
         userData: accountDirectory(root, account.email),
         workerPath: path.join(__dirname, "tomato.worker.js"),
         appVersion: app.getVersion(),
-        modelSelectable: isDev,
         emitAgentEvent: (event) => {
           if (auth?.getState().sessionId === sessionId) broadcast("agent:event", { sessionId, event });
         },

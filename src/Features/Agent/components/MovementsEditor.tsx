@@ -18,18 +18,22 @@ export default function MovementsEditor({ field, value, disabled, onChange }: { 
   const [edits, setEdits] = useState<MovementEdits>(() => parseEdits(value));
   const update = (next: MovementEdits) => { setEdits(next); onChange(JSON.stringify(next)); };
   const amountOf = (row: PlannedMovement) => edits.changes.find((change) => change.index === row.index)?.amount ?? row.amount;
-  const setAmount = (row: PlannedMovement, amount: string) => update({ ...edits, changes: [...edits.changes.filter((change) => change.index !== row.index), ...(amount !== row.amount ? [{ index: row.index, amount }] : [])] });
+  const setRow = (row: PlannedMovement, patch: Partial<MovementEdits["changes"][number]>) => {
+    const next = { index: row.index, amount: row.amount, ...edits.changes.find((change) => change.index === row.index), ...patch };
+    update({ ...edits, changes: [...edits.changes.filter((change) => change.index !== row.index), ...(next.amount !== row.amount || next.account ? [next] : [])] });
+  };
   const setAdded = (position: number, patch: Partial<MovementEdits["add"][number]>) => update({ ...edits, add: edits.add.map((item, i) => i === position ? { ...item, ...patch } : item) });
   return <div className="grid min-w-0 gap-3">
     <div role="region" aria-label={`${field.label} 거래 표`} tabIndex={0} className="overflow-x-auto rounded-xl border border-[#E4E4E7] bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#71717A] dark:border-[#3F3F46] dark:bg-[#202022]">
     <table className="w-full min-w-[640px] text-sm [&_th]:px-3 [&_th]:py-2.5 [&_th]:font-medium [&_td]:px-3 [&_td]:py-2">
-      <thead><tr className="bg-[#F4F4F5] text-left text-xs whitespace-nowrap text-[#52525B] dark:bg-[#27272A] dark:text-[#A1A1AA]"><th>#</th><th>구분</th><th>적요</th><th>거래처</th><th className="text-right">계획 금액</th><th className="text-right">실제 금액</th><th /></tr></thead>
+      <thead><tr className="bg-[#F4F4F5] text-left text-xs whitespace-nowrap text-[#52525B] dark:bg-[#27272A] dark:text-[#A1A1AA]"><th>#</th><th>구분</th><th>적요</th><th>거래처</th>{field.movementAccounts && <th>거래 계좌</th>}<th className="text-right">계획 금액</th><th className="text-right">실제 금액</th><th /></tr></thead>
       <tbody>
-        {rows.length === 0 && edits.add.length === 0 && <tr><td colSpan={7} className="text-xs leading-6 text-[#52525B] dark:text-[#A1A1AA]">해당일 지주현금 계획 없음. 거래가 있었다면 아래에서 추가하세요.</td></tr>}
+        {rows.length === 0 && edits.add.length === 0 && <tr><td colSpan={field.movementAccounts ? 8 : 7} className="text-xs leading-6 text-[#52525B] dark:text-[#A1A1AA]">해당일 지주현금 계획 없음. 거래가 있었다면 아래에서 추가하세요.</td></tr>}
         {rows.map((row) => <tr key={row.index} className="border-t border-[#E4E4E7] dark:border-[#3F3F46]">
           <td className="text-xs text-[#52525B] dark:text-[#A1A1AA]">{row.index}</td><td className="whitespace-nowrap">{DIRECTION_LABEL[row.direction]}</td><td>{row.description}</td><td>{row.party}</td>
+          {field.movementAccounts && <td><select className={cell} aria-label={`${row.index}번 거래 계좌`} disabled={disabled} value={edits.changes.find((change) => change.index === row.index)?.account ?? ""} onChange={(event) => setRow(row, { account: event.target.value })}><option value="">자동 연결</option>{field.movementAccounts.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}</select></td>}
           <td className="text-right tabular-nums">{Number(row.amount).toLocaleString("ko-KR")}</td>
-          <td className="text-right"><input className={`${cell} w-32 text-right tabular-nums`} type="number" step="any" min={0} inputMode="decimal" aria-label={`${row.index}번 실제 금액`} disabled={disabled} value={amountOf(row)} onChange={(event) => setAmount(row, event.target.value)} /></td>
+          <td className="text-right"><input className={`${cell} w-32 text-right tabular-nums`} type="number" step="any" min={0} inputMode="decimal" aria-label={`${row.index}번 실제 금액`} disabled={disabled} value={amountOf(row)} onChange={(event) => setRow(row, { amount: event.target.value })} /></td>
           <td className="whitespace-nowrap text-xs text-[#52525B] dark:text-[#A1A1AA]">{amountOf(row) === "0" ? "미집행" : amountOf(row) !== row.amount ? "수정" : ""}</td>
         </tr>)}
         {edits.add.map((item, i) => <tr key={`add-${i}`} className="border-t border-[#E4E4E7] dark:border-[#3F3F46]">
@@ -37,6 +41,7 @@ export default function MovementsEditor({ field, value, disabled, onChange }: { 
           <td><select className={cell} aria-label="추가 거래 구분" disabled={disabled} value={item.direction} onChange={(event) => setAdded(i, { direction: event.target.value as "in" | "out" })}><option value="in">입금</option><option value="out">지급</option></select></td>
           <td><input className={`${cell} w-full min-w-24`} aria-label="추가 거래 적요" required disabled={disabled} value={item.description} onChange={(event) => setAdded(i, { description: event.target.value })} /></td>
           <td><input className={`${cell} w-full min-w-24`} aria-label="추가 거래 거래처" disabled={disabled} value={item.party} onChange={(event) => setAdded(i, { party: event.target.value })} /></td>
+          {field.movementAccounts && <td><select className={cell} aria-label="추가 거래 계좌" disabled={disabled} value={item.account ?? ""} onChange={(event) => setAdded(i, { account: event.target.value })}><option value="">자동 연결</option>{field.movementAccounts.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}</select></td>}
           <td />
           <td className="text-right"><input className={`${cell} w-32 text-right tabular-nums`} type="number" step="any" min={0} inputMode="decimal" aria-label="추가 거래 금액" required disabled={disabled} value={item.amount} onChange={(event) => setAdded(i, { amount: event.target.value })} /></td>
           <td><button type="button" className={`${button} whitespace-nowrap`} disabled={disabled} onClick={() => update({ ...edits, add: edits.add.filter((_, j) => j !== i) })}>빼기</button></td>

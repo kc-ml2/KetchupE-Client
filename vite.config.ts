@@ -12,8 +12,6 @@ export default defineConfig(({ mode }) => {
     "KETCHUPE_ENVIRONMENT",
     "KETCHUPE_TENANT_ID",
     "KETCHUPE_VARIANT",
-    "LITELLM_MODEL_ALIAS",
-    "LITELLM_ROUTER_MODEL_ALIAS",
   ].map((key) => [`process.env.${key}`, JSON.stringify(env[key] ?? "")]));
   return {
     plugins: [

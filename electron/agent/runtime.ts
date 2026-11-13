@@ -12,8 +12,7 @@ import { createHash } from "node:crypto";
 import type { AccountCredentials } from "../auth/storage.ts";
 import { accountId } from "../auth/storage.ts";
 import { assertPublicSources } from "../auth/sourcePaths.ts";
-import { AgentError } from "./contracts.ts";
-import { dirname } from "node:path";
+import { dirname, relative, sep } from "node:path";
 import { WorkSourcesFlow, WORK_SOURCES_ROUTE } from "./workSourcesFlow.ts";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -30,7 +29,8 @@ import { CHAT_ROUTE, RAG_ROUTE, DOC_ROUTE } from "./router.ts";
 import type { StartRunInput, StartRunResult } from "../../src/app-types/Agent.types.ts";
 import { tomatoTools } from "./tools.ts";
 import { settingsBackedModelClient } from "./liveModelClient.ts";
-import { listModels, resolveModelAlias } from "./modelClient.ts";
+import { configuredModel, modelConfig } from "./modelConfig.ts";
+import { listModels } from "./modelClient.ts";
 import { ANSWER_PROMPT_VERSION, assignVariant, POLICY_VARIANTS } from "./policy.ts";
 import { accountModelSettings, loadTelemetrySettings, type ModelSettings } from "./settings.ts";
 import { interactionScore, LangfuseExporter, loadInstallId } from "./telemetry.ts";
@@ -61,10 +61,9 @@ export type AgentRuntime = {
   collectionSummaries: (workspaceId: string) => Promise<CollectionSummary[]>;
   /** MARU storages the account can read, with this workspace's on/off state (default on). */
   maruStorages: (workspaceId: string) => Promise<MaruStorageSummary[]>;
+  downloadMaruFile: (storageId: string, path: string) => Promise<string>;
+  browseMaruFolder: (storageId: string, path: string) => Promise<import("../../src/app-types/Agent.types.ts").FolderListing>;
   settings: () => ModelSettings;
-  /** Development builds may switch the generation model; credentials always come from the account. */
-  modelSelectable: boolean;
-  updateSettings: (settings: { modelAlias: string }) => void;
   listModels: () => Promise<string[]>;
   resolvedModelAlias: () => Promise<string>;
   telemetry: LangfuseExporter;
@@ -86,19 +85,19 @@ export type RuntimeOptions = {
   appVersion: string;
   emitAgentEvent: (event: AgentStreamEvent) => void;
   emitCollectionsChanged: () => void;
-  modelSelectable?: boolean;
   /** Account-scoped connections supplied by the application; every allowed tool must be reviewed as read-only. */
   readOnlyMcpServers?: Array<McpServerConfig & { allowedTools: readonly string[] }>;
 };
 
 export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
+  const current = accountModelSettings(options.account.keys);
+  const decision = accountModelSettings(options.account.keys, "decision");
   const db = openAgentDb(join(options.userData, "agent.sqlite"));
   ensureWorkspace(db);
   const tomato = new TomatoClient(options.workerPath, join(options.userData, "tomato"));
   const lifetime = new AbortController();
   let stopped = false;
   let draining: Promise<unknown> | undefined;
-  let current = accountModelSettings(options.account.keys);
   const telemetrySettings = loadTelemetrySettings();
   const installId = loadInstallId(options.userData);
   // Variant is fixed for the process lifetime so every run in a session lands in one arm.
@@ -106,12 +105,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   const policyProfile = POLICY_VARIANTS[variant];
   const telemetry = new LangfuseExporter(db, () => telemetrySettings, { installId, accountId: accountId(options.account.email), appVersion: options.appVersion, os: process.platform });
   let collections: Collection[] = [];
-  let aliasCache: { key: string; alias: string } | undefined;
-  const resolvedModelAlias = async () => {
-    const key = `${current.baseURL}\u0000${current.modelAlias}\u0000${current.apiKey ?? ""}`;
-    if (aliasCache?.key !== key) aliasCache = { key, alias: await resolveModelAlias(current.baseURL, current.apiKey ?? "", current.modelAlias) };
-    return aliasCache.alias;
-  };
+  const resolvedModelAlias = async () => current.modelAlias;
 
   // Content fingerprint per collection: lets the external benchmark match a trajectory to a corpus it also holds.
   const corpusFingerprints: Record<string, string> = {};
@@ -127,7 +121,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     telemetry.indexSync(result);
     void refreshFingerprint(result.collection);
   });
-  const harnessModel = settingsBackedModelClient(() => current, resolvedModelAlias);
+  const harnessModel = settingsBackedModelClient(() => current, resolvedModelAlias, async () => configuredModel(modelConfig, "generation", "document"));
   const activeCollections = (workspaceId: string) => {
     const inactive = inactiveCollections(db, workspaceId);
     return collections.map((collection) => collection.name).filter((name) => !name.startsWith("maru_") && !inactive.has(name));
@@ -194,7 +188,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       listSources: (names) => tomato.listSources(names),
       getSourceChunks: (sourceId) => tomato.getSourceChunks(sourceId),
     },
-    profile: { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" },
+    profile: { ...policyProfile, modelAlias: configuredModel(modelConfig, "generation", "document") },
     activeCollections,
     emit,
   });
@@ -250,7 +244,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
       cancel: (id: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.cancel(id) : workflow.cancel(id),
     })),
   ],
-    routingSettings: () => ({ ...current, modelAlias: process.env.LITELLM_ROUTER_MODEL_ALIAS?.trim() || "clef-flash" }),
+    routingSettings: () => decision,
     authorizeThread: (threadId, signal) => maruAccess.authorizeThread(threadId, AbortSignal.any([signal, accessSignal()])),
     emit: options.emitAgentEvent,
     onSettled: (runId) => telemetry.exportRun(db, runId),
@@ -294,11 +288,6 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     collections: () => collections,
     refreshCollections,
     settings: () => current,
-    modelSelectable: Boolean(options.modelSelectable),
-    updateSettings: ({ modelAlias }) => {
-      if (!options.modelSelectable) throw new AgentError("MODEL_AUTH", "연결 정보는 로그인 계정에서 관리합니다.");
-      current = { ...current, modelAlias: modelAlias.trim() };
-    },
     listModels: () => (current.apiKey ? listModels(current.baseURL, current.apiKey) : Promise.resolve([])),
     resolvedModelAlias,
     telemetry,
@@ -318,10 +307,16 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
           chunks: item.chunks,
           embedded: item.embedded,
           syncing: state?.syncing ?? false,
+          analysisStatus: state?.syncing || state?.embedding ? "analyzing" : state?.pending ? "pending" : "idle",
+          retryingFile: state?.retryingFile,
           lastError: state?.lastError,
+          syncCounts: state?.lastReport ? { succeeded: Math.max(0, state.lastReport.scanned - state.lastReport.failed.length), failed: state.lastReport.failed.length } : undefined,
+          failedFiles: state?.lastReport?.failed.map((failure) => ({ path: relative(item.path, failure.path).split(sep).join("/"), error: failure.error })) ?? [],
         };
       });
     },
+    downloadMaruFile: (storageId, path) => maru.downloadFolderFile(storageId, path, accessSignal()),
+    browseMaruFolder: (storageId, path) => maru.browseFolder(storageId, path, accessSignal()),
     async maruStorages(workspaceId) {
       const excluded = new Set(excludedMaruStorages(db, workspaceId));
       return (await maru.listStorages(accessSignal())).map((storage) => ({ ...storage, active: !excluded.has(storage.storageId) }));

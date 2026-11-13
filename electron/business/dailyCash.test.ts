@@ -5,15 +5,15 @@ import sharp from "sharp";
 import JSZip from "jszip";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { dailyCashTool, applyEdits } from "./dailyCash.ts";
-import { bindAccounts, layout, priorAmounts } from "./dailyCash/report.ts";
+import { bindAccounts, layout, priorAmounts, withPriorPlan } from "./dailyCash/report.ts";
 import { annualReportFixture, fixtureBooks } from "./dailyCash/fixtures.ts";
 import { renderSheet } from "./dailyCash/image.ts";
 import { readCashStatus } from "./dailyCash/cashStatus.ts";
 import { readWeekly } from "./dailyCash/weekly.ts";
 import { fetchHana, parseHana } from "./dailyCash/hana.ts";
-import { Money, previousBusinessDay } from "./dailyCash/values.ts";
+import { Money, previousBusinessDay, raw, numeric } from "./dailyCash/values.ts";
 import type { BusinessTool } from "./contracts.ts";
-vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "10", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
+vi.mock("./dailyCash/hana.ts", async (original) => ({ ...await original<typeof import("./dailyCash/hana.ts")>(), fetchHana: vi.fn(async (day: string) => ({ date: day, requestedDate: day, round: "1", publishedAt: "테스트 고시", source: "fixture-only", fetchedAt: "2026-10-14T00:00:00Z", responseHash: "fixture", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } })) }));
 vi.mock("./dailyCash/image.ts", () => ({ renderSheet: vi.fn(async (bytes: Uint8Array, name: string) => ({ bytes, engine: "Excel" as const, fallbackReason: undefined, sheet: (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!, image: await sharp({ create: { width: 1, height: 1, channels: 4, background: "white" } }).png().toBuffer() })) }));
 async function setup() {
   const books = fixtureBooks(); const file = async (book: ExcelJS.Workbook, name: string) => ({ bytes: Buffer.from(await book.xlsx.writeBuffer()), name, fingerprint: name });
@@ -57,10 +57,13 @@ async function confirm(input: Parameters<BusinessTool["execute"]>[0]) {
   const code = review.fields.find((field) => field.key === "review")?.confirm; expect(code, review.question).toMatch(/^확인 [a-f0-9]{12}$/);
   return dailyCashTool.execute({ ...input, checkpoint: review.checkpoint ?? {}, values: { ...input.values, review: code! } });
 }
-it("appends a dated sheet, redeems a maturity, reconciles KC cash and returns a real PNG", async () => {
-  const { input } = await setup(); const result = await confirm(input);
+it.each(["261013_자금현황표[KC].xlsx", "자금현황표.xlsx"])("uses the work date to complete the report with KC file %s without a source-date question", async (name) => {
+  const { input } = await setup(); input.files.cashStatus[0].name = name;
+  input.values.statusDate = "2026-01-01";
+  const result = await confirm(input);
   expect(result.status, JSON.stringify(result.status === "failed" ? result : {})).toBe("completed");
   if (result.status !== "completed") return;
+  expect(result.externalData).toMatchObject({ workDate: "2026-10-14", reportDate: "2026-10-13", sourceDate: "2026-10-13" });
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer);
   expect(b.worksheets.map((sheet) => sheet.name)).toEqual(["261012", "261013"]);
   expect(b.getWorksheet("261012")!.getCell("H10").value).toBe(100000);
@@ -69,12 +72,12 @@ it("appends a dated sheet, redeems a maturity, reconciles KC cash and returns a 
   expect(s.getCell("C131").master.address).toBe("B131");
   expect(s.getCell("D10").value).toBe(100000); expect(s.getCell("H10").result).toBe(109000);
   expect(s.getCell("G51").value).toBe(10000); expect(s.getCell("H51").result).toBe(0);
-  expect(s.getCell("G248").value).toBe(109000); expect(s.getCell("H237").result).toBe(107000);
+  expect(s.getCell("G248").result).toBe(109000); expect(s.getCell("H237").result).toBe(107000);
   expect(s.getCell("K23").value).toBe(9.5); expect(s.getCell("H27").formula).toBe("H26");
   expect(s.getCell("J23").result).toBe(0); expect(s.pageSetup.printArea).toBe("A1:P249");
   expect(s.pageSetup).toMatchObject({ fitToPage: true, fitToWidth: 1, fitToHeight: 1 });
   expect(Buffer.from(result.image!.bytes).subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-  expect(renderSheet).toHaveBeenCalledWith(expect.any(Uint8Array), "261013", expect.any(Array), input.signal, expect.any(Array));
+  expect(renderSheet).toHaveBeenCalledWith(expect.any(Uint8Array), "261013", expect.any(Array), input.signal);
   for (const row of [238, 239, 249]) expect(s.getRow(row).hidden, `row ${row}`).toBe(false);
   expect(result.externalData?.matured).toHaveLength(1);
 }, artifactTestTimeout);
@@ -101,13 +104,49 @@ it("preserves a year of historical sheets, including distant used cells, when ap
   expect(output.getWorksheet("261012")!.getCell("H10").value).toBe(100000);
   expect(output.getWorksheet("261013")!.getCell("H10").result).toBe(109000);
 }, artifactTestTimeout);
-it("carries sub-won interest fractions forward and reconciles them against whole-won KC balances", async () => {
+it("rounds sub-won interest fractions and reconciles them against whole-won KC balances", async () => {
   const { input, books, file } = await setup(); books.report.getWorksheet("261012")!.getCell("H10").value = 100000.27878; input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status === "failed" ? result : {})).toBe("completed");
   if (result.status !== "completed") return;
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
-  expect(s.getCell("D10").value).toBe(100000.27878); expect(s.getCell("H10").result).toBe(109000.27878);
+  expect(s.getCell("D10").value).toBe(100000); expect(s.getCell("H10").result).toBe(109000);
 }, artifactTestTimeout);
+it("rounds prior balances, KC amounts and confirmed flows consistently", async () => {
+  const { input, books, file } = await setup();
+  books.report.getWorksheet(1)!.getCell("H10").value = 100000.9;
+  const status = books.status.getWorksheet(1)!;
+  for (const [address, value] of Object.entries({ H2: 100000.9, J2: 10000.2, L2: 1000.1, M2: 109001, N2: 109001, O2: 109001, N4: 109001, O4: 109001 })) status.getCell(address).value = value;
+  input.files.previousReport = [await file(books.report, "prior.xlsx")];
+  input.files.cashStatus = [await file(books.status, "261013_KC.xlsx")];
+  input.values.cashChanges = JSON.stringify({ "140013557434:KRW": { incoming: "10000.2", outgoing: "1000.1" } });
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  for (const [address, value] of Object.entries({ D10: 100001, E10: 10000, G10: 1000, H10: 109001, G248: 109001 })) expect(raw(sheet.getCell(address)), address).toBe(value);
+}, artifactTestTimeout);
+
+it.each(["account", "total"])("identifies a %s rounding difference without asking to change real transactions", async (kind) => {
+  const { input, books, file } = await setup(); const status = books.status.getWorksheet(1)!;
+  if (kind === "account") {
+    for (const [address, value] of Object.entries({ H2: 100000.4, J2: 10000.4, L2: 1000.1, M2: 109000.7, N2: 109000.7, O2: 109000.7, N4: 109000.7, O4: 109000.7 })) status.getCell(address).value = value;
+  } else {
+    status.getCell("O2").value = 109000.4; status.getCell("O3").value = 0.4; status.getCell("O4").value = 109000.8;
+  }
+  input.files.cashStatus = [await file(books.status, "261013_KC.xlsx")];
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("원천자료는 일치하지만") });
+});
+
+it.each([[123.49, 123], [123.5, 124], [-123.49, -123], [-123.5, -124], [0.5, 1], [-0.5, -1]])("rounds %s to %s like Excel ROUND", (input, expected) => {
+  const cell = new ExcelJS.Workbook().addWorksheet("rounding").getCell("A1");
+  numeric(cell, input); expect(cell.value).toBe(expected);
+});
+
+it("rounds weekly plans and entered payments before merging and writing them", () => {
+  const { weekly } = fixtureBooks(); weekly.getWorksheet(1)!.getCell("L8").value = 2000.5;
+  const plans = readWeekly(weekly, "weekly").movements.filter((m) => m.date === "2026-10-14");
+  expect(plans[0].amount.toNumber()).toBe(2001);
+  const edited = applyEdits(plans, JSON.stringify({ changes: [{ index: 1, amount: "2000.4" }], add: [{ direction: "in", description: "추가", amount: "500.5" }] }), "2026-10-14");
+  expect(edited.map((m) => m.amount.toNumber())).toEqual([2000, 501]);
+});
 it("defaults the work date to today and computes the report date as the previous business day", () => {
   expect(dailyCashTool.defaults!("2026-10-15")).toEqual({ workDate: "2026-10-15" });
   expect(["2026-10-19", "2026-10-18", "2026-10-17", "2026-10-14"].map(previousBusinessDay)).toEqual(["2026-10-16", "2026-10-16", "2026-10-16", "2026-10-13"]);
@@ -198,7 +237,7 @@ it("redeems duplicate deposits and allocates a pooled subscription to new KC acc
     expect(b.getWorksheet("261012")!.getCell(`C${r}`).value).toBeNull();
   }
   expect(s.getCell("E98").result).toBe(20000); expect(s.getCell("G98").result).toBe(20000); expect(s.getCell("H98").result).toBe(20000);
-  expect(s.getCell("H17").result).toBe(99000); expect(s.getCell("D156").result).toBe(0); expect(s.getCell("G248").value).toBe(119000);
+  expect(s.getCell("H17").result).toBe(99000); expect(s.getCell("D156").result).toBe(0); expect(s.getCell("G248").result).toBe(119000);
   expect(result.externalData?.deposits).toHaveLength(5); expect(result.externalData?.newDeposits).toHaveLength(2);
   expect(layout(s).krwTermSum).toBe(98); expect(priorAmounts(s, {}).values.H53.toNumber()).toBe(12000);
   const k = books.status.getWorksheet(1)!;
@@ -246,12 +285,12 @@ it("validates a new deposit's dates and opening amount, and never overwrites an 
 });
 it("supports changed amounts, omitted and unplanned transactions without float arithmetic", () => {
   const rows = [{ date: "2026-10-13", direction: "out" as const, description: "test", party: "test", amount: new Money("0.1"), source: "fixture" }];
-  expect(applyEdits(rows, '{"changes":[{"index":1,"amount":0}],"add":[{"direction":"in","description":"추가","amount":"0.2"}]}', "2026-10-13")[0].amount.plus("0.1").toString()).toBe("0.3");
+  expect(applyEdits(rows, '{"changes":[{"index":1,"amount":0}],"add":[{"direction":"in","description":"추가","amount":"2.9"}]}', "2026-10-13")[0].amount.toString()).toBe("3");
   expect(() => applyEdits(rows, '{"changes":[{"index":2,"amount":1}]}', "2026-10-13")).toThrow();
 });
 it("parses Hana base rates at the correct column and converts JPY per 100 units", () => {
-  const html = '<p class="txtRateBox">기준일 : <strong>2026년10월13일</strong> 고시일시 : 2026년10월14일 07시 (1206회차)</p><th>매매 기준율</th>' + [["USD", "1400"], ["JPY (100)", "950"], ["CNY", "200"]].map(([c, rate]) => `<tr>${[c, "999", "1", "999", "1", "999", "999", "999", rate, "1", "1"].map((v) => `<td>${v}</td>`).join("")}</tr>`).join("");
-  expect(parseHana(html, "2026-10-13")).toMatchObject({ date: "2026-10-13", round: "1206", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } });
+  const html = '<p class="txtRateBox">기준일 : <strong>2026년10월13일</strong> 고시일시 : 2026년10월14일 07시 (1회차)</p><th>매매 기준율</th>' + [["USD", "1400"], ["JPY (100)", "950"], ["CNY", "200"]].map(([c, rate]) => `<tr>${[c, "999", "1", "999", "1", "999", "999", "999", rate, "1", "1"].map((v) => `<td>${v}</td>`).join("")}</tr>`).join("");
+  expect(parseHana(html, "2026-10-13")).toMatchObject({ date: "2026-10-13", round: "1", perUnit: { USD: "1400", JPY: "9.5", CNY: "200" } });
   expect(() => parseHana(html.replace("JPY (100)", "JPY"), "2026-10-13")).toThrow("단위");
 });
 it("keeps JPY and CNY separate and uses KC foreign balances with per-unit FX rates", async () => {
@@ -263,7 +302,7 @@ it("keeps JPY and CNY separate and uses KC foreign balances with per-unit FX rat
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status !== "completed" && result)).toBe("completed");
   if (result.status !== "completed") return;
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
-  expect(s.getCell("H25").result).toBe(100); expect(s.getCell("H27").result).toBe(200); expect(s.getCell("F242").value).toBe(40950);
+  expect(s.getCell("H25").result).toBe(100); expect(s.getCell("H27").result).toBe(200); expect(s.getCell("F242").result).toBe(40950);
 }, artifactTestTimeout);
 it("never combines a months-old daily report with a current KC snapshot", async () => {
   const { books, input, file } = await setup(); books.report.getWorksheet(1)!.name = "260528"; input.files.previousReport = [await file(books.report, "old.xlsx")];
@@ -295,7 +334,7 @@ it("preserves unmerged overflow text, merged edge styles and template checks at 
   expect(output.getCell("F131").alignment.wrapText).not.toBe(true);
   expect(output.getRow(131).height).toBe(19);
   for (const address of ["B8", "F8"]) expect(output.getCell(address).border).toEqual(source.getCell(address).border);
-  expect(output.getCell("D243").formula).toBe("D130='261012'!D237");
+  expect(output.getCell("D243").formula).toBe("D130=ROUND('261012'!D237,0)");
   expect(output.getCell("Q240").formula).toBe("SUM(H10:H13)");
   expect(output.pageSetup.printArea).toBe("A1:Q249");
 }, artifactTestTimeout);
@@ -308,14 +347,14 @@ it("keeps the template's prior-sheet carry-over formulas and the next-day openin
   input.files.previousReport = [await file(books.report, "carry.xlsx")];
   const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
   const output = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
-  expect(output.getCell("D10").value).toEqual({ formula: "'261012'!H10", result: 100000 });
-  expect(output.getCell("D21").formula).toBe("'261012'!H21");
+  expect(output.getCell("D10").value).toEqual({ formula: "ROUND('261012'!H10,0)", result: 100000 });
+  expect(output.getCell("D21").formula).toBe("ROUND('261012'!H21,0)");
   expect(output.getCell("D13").formula).toBeUndefined();
-  expect(output.getCell("H130").formula).toBe("D237");
+  expect(output.getCell("H130").formula).toBe("$D$237");
   expect(output.getCell("H130").result).toBe(output.getCell("H17").result);
 }, artifactTestTimeout);
 
-it("preserves every cell style, including all blank merged children, and every original row height after saving", async () => {
+it("preserves styles and row heights outside the execution-entry formatting changes", async () => {
   const { books, input, file } = await setup();
   const source = books.report.getWorksheet("261012")!;
   source.mergeCellsWithoutStyle("Q253:S255");
@@ -337,9 +376,18 @@ it("preserves every cell style, including all blank merged children, and every o
   const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
   const output = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
   expect(output.model.merges).toEqual(original.model.merges);
+  const regions = layout(original);
   original.eachRow({ includeEmpty: true }, (row) => {
-    expect(output.getRow(row.number).height, `row ${row.number}`).toBe(original.getRow(row.number).height);
-    row.eachCell({ includeEmpty: true }, (cell) => expect(output.getCell(cell.address).style, cell.address).toEqual(cell.style));
+    const execution = row.number > regions.opening && row.number < regions.closing && ![regions.inSum, regions.outSum].includes(row.number);
+    expect(output.getRow(row.number).height, `row ${row.number}`).toBe(execution ? Math.max(row.height ?? 15, 18) : row.height);
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      const target = output.getCell(cell.address);
+      if (execution && [2, 3, 4, 6, 7, 8].includes(Number(cell.col))) expect(target.font, cell.address).toMatchObject({ name: "맑은 고딕", size: 11 });
+      else expect(target.font, cell.address).toEqual(cell.font);
+      expect(target.border, cell.address).toEqual(cell.border);
+      expect(target.fill, cell.address).toEqual(cell.fill);
+      if (typeof raw(target) !== "number" && !(row.number > 130 && row.number < 237 && [2, 3, 6, 7].includes(Number(cell.col)))) expect(target.alignment, cell.address).toEqual(cell.alignment);
+    });
   });
   for (let row = 253; row <= 255; row++) for (let col = 17; col <= 19; col++) {
     const cell = output.getCell(row, col);
@@ -368,7 +416,7 @@ it("discloses LibreOffice fallback in the result and audit", async () => {
   });
 });
 
-it.each(["G248", "D237", "H10"])("rejects an Excel-calculated financial mismatch at %s", async (address) => {
+it.each(["G248", "D237", "H10", "E10", "G10"])("rejects an Excel-calculated financial mismatch at %s", async (address) => {
   const { input } = await setup();
   vi.mocked(renderSheet).mockImplementationOnce(async (bytes, name) => {
     const sheet = (await (await SelectiveWorkbook.open(bytes)).loadSheet(name)).getWorksheet(name)!;
@@ -383,10 +431,10 @@ it("falls back to manually entered rates after a failed retry and records them a
   const first = await dailyCashTool.execute(input); expect(first).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ key: "retryRates", confirm: "확인" })] });
   input.values.retryRates = "확인";
   const second = await dailyCashTool.execute(input); expect(second).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "manualUSD", type: "number" }), expect.objectContaining({ key: "manualJPY100" })]) });
-  Object.assign(input.values, { manualRateDate: "2026-10-13", manualRateRound: "8", manualUSD: "1402.5", manualJPY100: "950.12", manualCNY: "199.9" });
+  Object.assign(input.values, { manualRateDate: "2026-10-13", manualRateRound: "1", manualUSD: "1402.5", manualJPY100: "950.12", manualCNY: "199.9" });
   const review = await dailyCashTool.execute(input); expect(review.status).toBe("needs_input"); if (review.status !== "needs_input") return;
   expect(review.fields.map((field) => field.key)).toContain("review"); expect(review.question).toContain("USD 1402.5"); expect(review.question).toContain("JPY(1엔) 9.5012");
-  expect(review.checkpoint).toMatchObject({ rates: { source: expect.stringContaining("수동"), round: "8", date: "2026-10-13", perUnit: { USD: "1402.5", JPY: "9.5012", CNY: "199.9" } } });
+  expect(review.checkpoint).toMatchObject({ rates: { source: expect.stringContaining("수동"), round: "1", date: "2026-10-13", perUnit: { USD: "1402.5", JPY: "9.5012", CNY: "199.9" } } });
   expect(fetchHana).toHaveBeenCalledTimes(2);
 });
 
@@ -453,4 +501,120 @@ it("asks for an Excel recalculation instead of bulk JSON when many cached amount
   for (const row of [9, 10, 11, 12, 13, 15, 21, 23, 24, 26, 28, 30, ...layout(sheet).termRows]) sheet.getCell(`H${row}`).value = { formula: "0" };
   input.files.previousReport = [await file(books.report, "전일.xlsx")];
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("Excel에서 열어 수식을 계산하고 저장") });
+});
+
+it("keeps template SUMs, cash flow links, FX links and bottom totals as formulas", async () => {
+  const { books, input, file } = await setup(); const source = books.report.getWorksheet(1)!;
+  const formulas = { E10: "SUM(D131:D136)", G10: "SUM(D157:D174)", D14: "SUM(D10:D13)", E14: "SUM(E10:F13)", G242: "H17", G244: "SUM(P244:P249)", G246: "H98", G248: "G242+G244+G246", K24: "K23", K102: "$K$21", M100: "M19" };
+  for (const [address, expression] of Object.entries(formulas)) source.getCell(address).value = { formula: expression, result: 0 };
+  source.getCell("I30").value = { formula: "1000*0", result: 0 };
+  input.files.previousReport = [await file(books.report, "formulas.xlsx")];
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  for (const [address, expression] of Object.entries({ ...formulas, E10: "SUM(D131)", G10: "SUM(D157)" })) expect(sheet.getCell(address).formula, address).toBe(expression);
+  expect(sheet.getCell("I30").formula).toBe("ROUND(1000*0,0)");
+  expect(sheet.getCell("H9").formula).toBe("D9+E9-G9");
+  expect(sheet.getCell("D98").formula).toBe("SUM(D51:D97)");
+  expect(sheet.getCell("F248").formula).toBe("ROUND(F242+F244+F246,0)");
+  expect(sheet.getCell("M19").value).toContain("최초 고시");
+}, artifactTestTimeout);
+
+it("writes integer, right-aligned amounts with visible zeroes and single-line descriptions", async () => {
+  const { books, input, file } = await setup();
+  const original = books.report.getWorksheet(1)!;
+  original.getCell("H9").value = "-";
+  original.getCell("D10").numFmt = '#,##0;[Red]-#,##0;"-"';
+  original.getCell("B131").font = { name: "Arial", size: 6, italic: true };
+  original.getCell("F157").font = { name: "Times New Roman", size: 8, strike: true };
+  original.getRow(157).height = 10;
+  input.files.previousReport = [await file(books.report, "format.xlsx")];
+  input.values.planEdits = JSON.stringify({ changes: [{ index: 1, amount: "2000.99", description: "설비 대금\n잔금 지급", party: "테스트\r\n상사" }] });
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  for (const address of ["D9", "D10", "E10", "H10", "D132", "H157", "G248"]) {
+    expect(Number.isInteger(raw(sheet.getCell(address))), address).toBe(true);
+    expect(sheet.getCell(address).alignment.horizontal, address).toBe("right");
+    expect(sheet.getCell(address).numFmt, address).toBe("#,##0;-#,##0;0");
+  }
+  expect(sheet.getCell("D132").value).toBe(0);
+  expect(sheet.getCell("H157").value).toBe(2001);
+  expect(sheet.getCell("F157").value).toBe("설비 대금 잔금 지급 / 테스트 상사");
+  for (const address of ["B131", "D131", "F157", "H157"]) {
+    expect(sheet.getCell(address).font).toEqual({ name: "맑은 고딕", size: 11, color: { argb: "FF000000" } });
+    expect(sheet.getCell(address).alignment.shrinkToFit).not.toBe(true);
+  }
+  expect(sheet.getRow(157).height).toBe(18);
+  expect(sheet.getColumn("F").width).toBe(original.getColumn("F").width);
+  expect(sheet.getCell("F157").alignment.wrapText).not.toBe(true);
+  expect(sheet.getCell("K23").value).toBe(9.5);
+  numeric(original.getCell("D9"), -1.9); expect(original.getCell("D9").value).toBe(-2);
+}, artifactTestTimeout);
+
+it("merges prior planned entries once per matching weekly entry and retains additional identical payments", () => {
+  const { report, weekly } = fixtureBooks(); const prior = report.getWorksheet(1)!;
+  const movements = readWeekly(weekly, "weekly").movements.filter((m) => m.date === "2026-10-13");
+  prior.getCell("F157").value = "소모품 지급 / 가상문구"; prior.getCell("H157").value = 1000;
+  prior.getCell("F158").value = "전일 추가 예정"; prior.getCell("H158").value = 300.9;
+  prior.getCell("F159").value = "소모품 지급 / 가상문구"; prior.getCell("H159").value = 1000;
+  const combined = withPriorPlan(movements, prior, "2026-10-13");
+  expect(combined.map((m) => m.amount.toNumber())).toEqual([10000, 1000, 301, 1000]);
+  expect(combined[1].source).toContain("261012!H157");
+  expect(movements[1].source).not.toContain("261012");
+  expect(withPriorPlan(movements, prior, "2026-10-14")).toEqual(movements);
+  prior.getCell("H158").value = { formula: "1+2" };
+  expect(() => withPriorPlan(movements, prior, "2026-10-13")).toThrow("Excel에서 계산");
+});
+
+it("includes the prior day's planned entries in the actuals form without asking for an undated KC file's date", async () => {
+  const { books, input, file } = await setup(); const prior = books.report.getWorksheet(1)!;
+  prior.getCell("F157").value = "전일 추가 예정"; prior.getCell("H157").value = 500;
+  input.files.previousReport = [await file(books.report, "prior.xlsx")];
+  input.files.cashStatus[0].name = "자금현황표.xlsx";
+  input.values.statusDate = "2026-01-01"; delete input.values.actualEdits;
+  const result = await dailyCashTool.execute(input);
+  expect(result).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "actualEdits", rows: expect.arrayContaining([expect.objectContaining({ description: "전일 추가 예정", amount: "500" })]) })]) });
+  if (result.status === "needs_input") expect(result.fields.some((f) => f.key === "statusDate")).toBe(false);
+});
+
+it.each(["삼성증권", "키움증권"])("carries prior transfers into the described %s counterparty, regardless of the Woori number", async (label) => {
+  const { books, input, file } = await setup(); const prior = books.report.getWorksheet(1)!;
+  prior.getCell("C12").value = label; prior.getCell("C15").value = "삼성증권-MMF";
+  const description = `신한557434에서 우리96107116718943(${label} 연동계좌) 자금대체`;
+  for (const row of [131, 157]) { prior.getCell(`F${row}`).value = description; prior.getCell(`H${row}`).value = 500; }
+  const status = books.status.getWorksheet(1)!;
+  for (const [address, value] of Object.entries({ K2: 1500, L2: 1500, M2: 108500, N2: 108500, O2: 108500 })) status.getCell(address).value = value;
+  status.addRow([4, "우리은행", "96107116718943", "우리 입출금", "TEST-LINKED", "KRW", 0, 0, 500, 500, 0, 0, 500, 500, 500, 0, "보통예금"]);
+  input.files.previousReport = [await file(books.report, "prior.xlsx")];
+  input.files.cashStatus = [await file(books.status, "261013_KC.xlsx")];
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(sheet.getCell("E12").value).toEqual({ formula: "SUM(D132)", result: 500 });
+  expect(sheet.getCell("G10").value).toEqual({ formula: "SUM(D157,D158)", result: 1500 });
+  expect(sheet.getCell("E15").formula).toBe("SUM(0)"); expect(sheet.getCell("E15").result).toBe(0);
+  expect(sheet.getCell("H12").result).toBe(500); expect(sheet.getCell("H10").result).toBe(108500);
+  expect(sheet.getCell("G248").result).toBe(109000);
+  expect(result.externalData).toMatchObject({ actual: expect.arrayContaining([expect.objectContaining({ description, direction: "in", account: "H12" }), expect.objectContaining({ description, direction: "out", account: "H10" })]) });
+}, artifactTestTimeout);
+
+it("replaces a saved final-quote checkpoint with the first quote", async () => {
+  const { input } = await setup();
+  input.checkpoint.rates = { requestedDate: "2026-10-13", round: "100" };
+  vi.mocked(fetchHana).mockClear();
+  const result = await dailyCashTool.execute(input);
+  expect(fetchHana).toHaveBeenCalledOnce();
+  expect(result).toMatchObject({ status: "needs_input", checkpoint: { rates: { round: "1" } } });
+});
+
+it("requests Hana's first quote and rejects a final-quote response", async () => {
+  const html = '<p class="txtRateBox">기준일 : 2026년10월13일 고시일시 : 2026년10월13일 09시 (1회차)</p><th>매매 기준율</th>' + [["USD", "1400.25"], ["JPY (100)", "950.12"], ["CNY", "200.1"]].map(([code, rate]) => `<tr>${[code, "0", "0", "0", "0", "0", "0", "0", rate, "0", "0"].map((v) => `<td>${v}</td>`).join("")}</tr>`).join("");
+  const request = vi.fn(async () => new Response(html)); vi.stubGlobal("fetch", request);
+  try {
+    const hana = await vi.importActual<typeof import("./dailyCash/hana.ts")>("./dailyCash/hana.ts");
+    const result = await hana.fetchHana("2026-10-13", new AbortController().signal);
+    const options = request.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URLSearchParams(options[1].body as URLSearchParams).get("pbldDvCd")).toBe("1");
+    expect(new URLSearchParams(options[1].body as URLSearchParams).get("pbldSqn")).toBe("1");
+    expect(result.perUnit).toEqual({ USD: "1400.25", JPY: "9.5012", CNY: "200.1" });
+    expect(() => parseHana(html.replace("(1회차)", "(10회차)"), "2026-10-13")).toThrow("최초고시");
+  } finally { vi.unstubAllGlobals(); }
 });

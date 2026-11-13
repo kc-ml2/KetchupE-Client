@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { join } from "node:path";
-import { access } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { SelectiveWorkbook } from "../../work/selectiveWorkbook.ts";
 
 export class ExcelExportError extends Error {}
 
@@ -277,8 +278,16 @@ exit 0
 export async function exportWithExcel(input: string, sheet: string, pdf: string, signal: AbortSignal, operation: "calculate" | "pdf", textFitRanges: string[] = []) {
   signal.throwIfAborted();
   let failedStage: string | undefined;
+  let printDirectory: string | undefined;
   let timeoutMs = EXCEL_TIMEOUT_MS;
   try {
+    if (operation === "pdf") {
+      const snapshot = await (await SelectiveWorkbook.open(await readFile(input))).withCachedValuesForPrint(sheet);
+      printDirectory = await mkdtemp(join(dirname(input), "print-"));
+      input = join(printDirectory, basename(input));
+      await writeFile(input, snapshot, { mode: 0o600 });
+      signal.throwIfAborted();
+    }
     const execute = promisify(execFile);
     if (process.platform === "darwin") {
       await execute("/usr/bin/osascript", ["-e", macExcelScript, input, sheet, pdf, operation, textFitRanges.join("\n")], { timeout: EXCEL_TIMEOUT_MS, maxBuffer: OUTPUT_BUFFER_BYTES });
@@ -309,6 +318,6 @@ export async function exportWithExcel(input: string, sheet: string, pdf: string,
       : native?.code === "ENOENT" ? "Excel 자동화 실행 프로그램을 찾을 수 없습니다."
       : message.startsWith("Command failed:") ? `자동화 실행이 종료되었습니다 (종료 코드: ${native?.code ?? "알 수 없음"}).` : message;
     throw new ExcelExportError(`Microsoft Excel 재계산·출력에 실패했습니다.${stage ? ` 실패 단계: ${stage}.` : ""} ${detail}`);
-  }
+  } finally { if (printDirectory) await rm(printDirectory, { recursive: true, force: true }); }
   signal.throwIfAborted();
 }

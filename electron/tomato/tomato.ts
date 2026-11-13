@@ -36,23 +36,7 @@ export const parserVersion = (options: ParserOptions = {}): string =>
   `${BASE_PARSER_VERSION}${(options.articleHeadings ?? DEFAULT_PARSER_OPTIONS.articleHeadings) ? "+article-1" : ""}`;
 const CHUNKER_VERSION = "structure-1";
 const SEARCH_VERSION = "fts5-cjk-1";
-const SUPPORTED_EXTENSIONS = new Set([
-  ".md",
-  ".markdown",
-  ".txt",
-  ".hwp",
-  ".hwpx",
-  ".hml",
-  ".pdf",
-  ".docx",
-  ".xlsx",
-  ".xls",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp",
-]);
-const SKIP_NAMES = new Set([".git", "node_modules", "__pycache__", ".DS_Store", "Thumbs.db", "desktop.ini", ".Trash", "$RECYCLE.BIN"]);
+import { SUPPORTED_EXTENSIONS, SKIP_NAMES } from "./filePolicy.ts";
 
 export const DEFAULT_CHUNK_OPTIONS = { targetTokens: 600, maxTokens: 850, minTokens: 120, overlapTokens: 80 } as const;
 
@@ -594,7 +578,7 @@ export class Tomato {
     return { home: this.home, pipelineFingerprint: this.fingerprint };
   }
 
-  async registerCollection(folder: string, name: string, ocr: OcrMode = "off"): Promise<Collection> {
+  async registerCollection(folder: string, name: string, ocr: OcrMode = "off", deferSync = false): Promise<Collection> {
     validateCollectionName(name);
     await this.init();
     const resolved = await realpath(resolve(folder));
@@ -609,7 +593,7 @@ export class Tomato {
     const collection: Collection = { name, path: resolved, ocr };
     config.collections.push(collection);
     await atomicJson(this.configPath(), config);
-    await this.sync(name);
+    if (!deferSync) await this.sync(name);
     return collection;
   }
 
@@ -668,7 +652,7 @@ export class Tomato {
     return total;
   }
 
-  async embedMissing(collectionName?: string, onProgress?: (completed: number, total: number) => void): Promise<EmbeddingReport> {
+  async embedMissing(collectionName?: string, onProgress?: (completed: number, total: number) => void, sourceId?: string): Promise<EmbeddingReport> {
     await this.init();
     const config = await this.readConfig();
     if (collectionName && !config.collections.some((collection) => collection.name === collectionName)) {
@@ -693,7 +677,10 @@ export class Tomato {
             WHERE e.chunk_id IS NULL OR e.profile != ? OR e.content_hash != c.content_hash
             ORDER BY c.collection, c.source_id, c.sequence
           `).all(EMBEDDING_PROFILE)) as Record<string, unknown>[];
-      const total = Number(totalRow.count);
+      if (sourceId) {
+        for (let index = pending.length - 1; index >= 0; index -= 1) if (pending[index].source_id !== sourceId) pending.splice(index, 1);
+      }
+      const total = sourceId ? pending.length : Number(totalRow.count);
       let embedded = 0;
       const touchedCollections = new Set<string>();
       const insert = db.prepare(`

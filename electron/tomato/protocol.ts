@@ -2,11 +2,11 @@ import type { ChunkRecord, Collection, CollectionStatus, EmbeddingReport, Ingest
 
 /** Request/response protocol between the main process and the Tomato utility process. */
 export type TomatoMethods = {
-  registerCollection: { args: [folder: string, name: string, ocr?: OcrMode]; result: Collection };
+  registerCollection: { args: [folder: string, name: string, ocr?: OcrMode, deferSync?: boolean]; result: Collection };
   remove: { args: [name: string]; result: void };
   listCollections: { args: []; result: Collection[] };
   sync: { args: [collection?: string]; result: UpdateReport };
-  embedMissing: { args: [collection?: string]; result: EmbeddingReport };
+  embedMissing: { args: [collection?: string, sourceId?: string]; result: EmbeddingReport };
   search: { args: [query: string, options: { collections: string[]; limit?: number; mode?: SearchMode }]; result: TomatoSearch };
   getNeighbors: { args: [chunkId: string, before: number, after: number]; result: ChunkRecord[] };
   getChunks: { args: [chunkIds: string[]]; result: ChunkRecord[] };

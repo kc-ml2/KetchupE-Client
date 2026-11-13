@@ -7,7 +7,7 @@ import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { readCashStatus, differences, parseOverrides } from "./dailyCash/cashStatus.ts";
 import { fetchHana, type Rates } from "./dailyCash/hana.ts";
 import { renderSheet } from "./dailyCash/image.ts";
-import { bindAccounts, buildReport, cashRows, depositIssues, layout, maturity, priorAmounts, rolloverFormulas } from "./dailyCash/report.ts";
+import { assignCashMovements, bindAccounts, buildReport, cashAccountOptions, cashRows, depositIssues, layout, maturity, priorAmounts, rolloverFormulas, withPriorPlan } from "./dailyCash/report.ts";
 import { date, decimal, isoSheetDate, money, sameWon, sheetDate, shiftDate, previousBusinessDay, sum, text, type Amount } from "./dailyCash/values.ts";
 import { depositKind, readWeekly, type Movement } from "./dailyCash/weekly.ts";
 
@@ -17,9 +17,10 @@ const movementField = (key: string, label: string, plan: Movement[]): Partial<Bu
 /** flow가 한 번에 받는 입력란 상한(30) 안에서 셀별 숫자 입력을 제공한다. 그보다 많으면 파일 자체가 계산값 없이 저장된 것이다. */
 const MAX_CELL_INPUTS = 20;
 const numberInput = z.union([z.number(), z.string()]);
-const editsSchema = z.object({ changes: z.array(z.object({ index: z.number().int().min(1), amount: numberInput, description: z.string().optional(), party: z.string().optional() }).strict()).max(200).default([]), add: z.array(z.object({ direction: z.enum(["in", "out"]), description: z.string().min(1), party: z.string().default(""), amount: numberInput }).strict()).max(200).default([]) }).strict();
+const movementAccount = z.string().regex(/^(?:H\d{1,3})?$/).optional();
+const editsSchema = z.object({ changes: z.array(z.object({ index: z.number().int().min(1), amount: numberInput, description: z.string().optional(), party: z.string().optional(), account: movementAccount }).strict()).max(200).default([]), add: z.array(z.object({ direction: z.enum(["in", "out"]), description: z.string().min(1), party: z.string().default(""), amount: numberInput, account: movementAccount }).strict()).max(200).default([]) }).strict();
 export function applyEdits(plan: Movement[], input: string | undefined, day: string): Movement[] {
-  if (!input || input === "확인") return plan.map((m) => ({ ...m }));
+  if (!input || input === "확인") return plan.map((m) => ({ ...m, amount: m.amount.round() })).filter((m) => m.amount.gt(0));
   const edits = editsSchema.parse(JSON.parse(input)); const items = plan.map((m) => ({ ...m })); const seen = new Set<number>();
   for (const edit of edits.changes) {
     if (!items[edit.index - 1] || seen.has(edit.index)) throw new Error("수정할 계획 번호가 없거나 중복됩니다."); seen.add(edit.index);
@@ -27,19 +28,20 @@ export function applyEdits(plan: Movement[], input: string | undefined, day: str
     items[edit.index - 1] = { ...items[edit.index - 1], ...edit, amount, source: `담당자 확인·수정 / 원계획 ${items[edit.index - 1].source}` };
   }
   for (const entry of edits.add) { const amount = decimal(entry.amount, "추가 금액"); if (amount.lte(0)) throw new Error("추가 금액은 양수여야 합니다."); items.push({ ...entry, amount, date: day, source: "담당자 확인 추가 거래" }); }
-  return items.filter((m) => m.amount.gt(0));
+  return items.map((m) => ({ ...m, amount: m.amount.round() })).filter((m) => m.amount.gt(0));
 }
 /** Fallback when the Hana page cannot be read even after a retry: the person types the published 매매기준율 and the audit records it as manual. */
 const MANUAL_RATE_FIELDS: BusinessField[] = [
   { key: "manualRateDate", label: "고시 기준일 (하나은행 화면의 기준일)", type: "date", required: true },
-  { key: "manualRateRound", label: "고시 회차", type: "text", required: false },
+  { key: "manualRateRound", label: "최초고시 회차 (1)", type: "number", required: true },
   { key: "manualUSD", label: "USD 매매기준율 (1달러당 원)", type: "number", required: true },
   { key: "manualJPY100", label: "JPY 매매기준율 (100엔당 원)", type: "number", required: true },
   { key: "manualCNY", label: "CNY 매매기준율 (1위안당 원)", type: "number", required: true },
 ];
 function manualRates(values: Record<string, string>, reportDate: string): Rates {
+  if (values.manualRateRound !== "1") throw new Error("최초고시(1회차)의 환율을 확인해 입력하세요.");
   const positive = (key: string) => { const amount = decimal(values[key], key); if (amount.lte(0)) throw new Error(`${key}는 양수여야 합니다.`); return amount; };
-  return { date: date(values.manualRateDate), requestedDate: reportDate, round: values.manualRateRound?.trim() || "수동", publishedAt: "담당자 수동 입력", source: "담당자 수동 입력 (하나은행 고시환율 화면 확인)", fetchedAt: new Date().toISOString(), responseHash: "manual", perUnit: { USD: positive("manualUSD").toString(), JPY: positive("manualJPY100").div(100).toString(), CNY: positive("manualCNY").toString() } };
+  return { date: date(values.manualRateDate), requestedDate: reportDate, round: "1", publishedAt: "담당자 수동 입력", source: "담당자 수동 입력 (하나은행 최초고시 화면 확인)", fetchedAt: new Date().toISOString(), responseHash: "manual", perUnit: { USD: positive("manualUSD").toString(), JPY: positive("manualJPY100").div(100).toString(), CNY: positive("manualCNY").toString() } };
 }
 const markdownText = (value: string) => value.replace(/([\\`*_{}[\]<>])/g, "\\$1").replace(/[\r\n]+/g, " ");
 const bullets = (items: string[]) => items.map((item) => `- ${markdownText(item)}`).join("\n");
@@ -47,9 +49,10 @@ const listing = (items: Movement[]) => items.length ? items.map((m) => `- **${m.
 const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계획에 없는 거래는 행을 추가하세요.';
 
 export const dailyCashTool: BusinessTool = {
-  id: "daily_cash", version: "1.2.0", title: "일일자금일보",
+  id: "daily_cash", version: "1.4.2", title: "일일자금일보",
   updateSource: "previousReport",
-  description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
+  description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 자금현황표 기준일은 작업일에서 자동 결정하며 별도로 묻지 않는다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
+  initialQuestion: "작업일과 원천 파일을 지정해 주세요. 자금현황표 기준일은 작업일 전날(주말·공휴일이면 직전 영업일)로 자동 적용합니다.",
   examples: ["일일자금일보 작성해줘", "어제 기준 자금일보와 이미지 만들어줘"],
   requiredInputs: ["작업일", "전일 일보가 있는 XLSX", "해당 주 주간자금계획", "기준일(작업일 직전 영업일)의 자금현황표(KC)"],
   fields: [
@@ -78,11 +81,15 @@ export const dailyCashTool: BusinessTool = {
       const [book, statusBook, ...weeks] = await Promise.all([archive.loadSheet(priorName), ...[files.cashStatus[0], ...files.weeklyPlans].map((f) => loadWorkbook(f.bytes))]);
       const candidate = book.getWorksheet(priorName)!;
       const filenameDate = files.cashStatus[0].name.normalize("NFC").match(/^(\d{6})_/)?.[1];
-      const statusDate = filenameDate ? isoSheetDate(filenameDate) : values.statusDate;
-      if (!statusDate) return ask("자금현황표 내부에 기준일이 없습니다. 이 자료의 계좌잔고 마감일(작업일 직전 영업일)을 확인하세요.", [{ key: "statusDate", label: "자금현황표 기준일 YYYY-MM-DD" }]);
+      const statusDate = filenameDate ? isoSheetDate(filenameDate) : reportDate;
       // KC 파일명 YYMMDD는 계좌잔고 마감일(일보 기준일)이다. 작업일 15일이면 14일 자금현황표를 쓴다.
       if (date(statusDate) !== reportDate) throw new Error(`자금현황표 기준일 ${statusDate}와 일보 기준일 ${reportDate}가 다릅니다. 작업일 직전 영업일(${reportDate}) 자금현황표를 지정하세요.`);
       const kc = readCashStatus(statusBook); const l = layout(candidate);
+      // 원천자료 자체의 대사를 통과한 뒤, 일보에 사용하는 모든 금액은 Excel ROUND와 같이 반올림한다.
+      for (const account of kc.accounts) for (const key of ["opening", "incoming", "outgoing", "ledger", "balance", "bookKrw"] as const) account[key] = account[key].round();
+      kc.total = kc.total.round();
+      const roundedTotalDifference = sum(kc.accounts.filter((a) => a.currency === "KRW").map((a) => a.balance)).minus(kc.total);
+      if (!roundedTotalDifference.isZero()) throw new Error(`원천자료는 일치하지만 계좌별 잔고 반올림 합계와 KC 총액 반올림 값에 ${roundedTotalDifference}원 차이가 생깁니다. 실제 거래금액을 임의로 보정하지 않고 결과 발행을 중단합니다.`);
       const weekly = weeks.map((b, i) => readWeekly(b, files.weeklyPlans[i].name));
       for (const day of [reportDate, workDate]) {
         const selected = weekly.filter((w) => w.dates.has(day));
@@ -105,55 +112,63 @@ export const dailyCashTool: BusinessTool = {
         throw new Error(`전일 일보에서 수식의 저장 결과가 없는 셀이 ${previous.missing.length}개입니다 (${previous.missing.slice(0, 12).join(", ")} …). Excel에서 열어 수식을 계산하고 저장한 원본 파일로 새 작업을 시작하세요. 빈 금액을 0으로 추정하지 않습니다.`);
       }
       if (previous.missing.length) return ask(`전일 일보에서 수식의 저장 결과가 없는 셀이 있습니다. 전일 일보 ${candidate.name} 시트에서 확인한 금액을 셀별로 입력하세요. 0으로 추정하지 않습니다.`, previous.missing.map(cellField));
+      const planActual = withPriorPlan(weekly.flatMap((w) => w.movements).filter((m) => m.date === reportDate), candidate, reportDate);
+      const actualField = () => ({ ...movementField("actualEdits", `${reportDate} 실적`, planActual), movementAccounts: cashAccountOptions(candidate) });
+      const planNext = weekly.flatMap((w) => w.movements).filter((m) => m.date === workDate);
+      const planDeposits = weekly.flatMap((w) => w.deposits).filter((m) => m.date === reportDate);
+      const depositField = () => movementField("depositEdits", `${reportDate} 정기예금 집행 (입금: 만기 원금·이자 / 지급: 가입 원금)`, planDeposits);
+      let actual: Movement[], nextPlan: Movement[], deposits: Movement[];
+      try {
+        actual = applyEdits(planActual, values.actualEdits, reportDate); nextPlan = applyEdits(planNext, values.planEdits, workDate); deposits = applyEdits(planDeposits, values.depositEdits, reportDate);
+        if (deposits.some((m) => !depositKind(m))) throw new Error("정기예금 집행은 입금 '정기예금 만기 원금/이자', 지급 '정기예금 가입' 적요만 허용합니다.");
+      } catch (e) { return ask(`${e instanceof SyntaxError || e instanceof z.ZodError ? "거래 입력을 읽을 수 없습니다. 아래 표에서 실제 금액과 추가 거래를 다시 확인해 주세요." : String(e)}\n${correctionHelp}`, [actualField(), movementField("planEdits", `${workDate} 계획`, planNext), depositField()]); }
       let explicit: Record<string, string>;
       const bindingField = (accounts = kc.accounts): BusinessField => ({ key: "accountBindings", label: "계좌별 전일 일보 연결", type: "text", required: true,
         accountRows: accounts.map((a) => ({ key: a.key, name: a.name, currency: a.currency, balance: a.balance.toFixed(), maturity: a.maturity })) });
       try { explicit = values.accountBindings ? z.record(z.string(), z.string().regex(/^[HP]\d{1,3}$/)).parse(JSON.parse(values.accountBindings)) : {}; } catch { return ask("계좌 연결 위치를 읽을 수 없습니다. 아래 계좌별로 일보 영역과 행 번호를 다시 입력해 주세요.", [bindingField()]); }
-      const { bindings, unresolved } = bindAccounts(candidate, kc.accounts, previous.values, explicit, reportDate);
+      const { bindings, unresolved } = bindAccounts(candidate, kc.accounts, previous.values, explicit, reportDate, actual);
       if (unresolved.length) {
         const accounts = kc.accounts.filter((a) => !bindings.has(a.key));
         const details = bullets(unresolved);
         if (!accounts.length) throw new Error(`전일 일보에 대응하는 KC 계좌가 없는 금액이 있습니다. 누락된 계좌 또는 전일 일보를 확인하고 갱신된 파일로 새 작업을 시작하세요.\n${details}`);
         return ask(`전일 일보 **${priorName}** 시트에서 아래 계좌가 기록된 위치를 확인해 주세요. 은행·통화·원금·만기일이 같은 계좌인지 확인한 뒤, **일보 영역**과 **행 번호**를 입력하세요. 예를 들어 H12 셀이면 H열과 12행을 선택합니다. H열은 본표의 금일금액, P열은 사업부문 자금현황표(KC)의 잔고입니다.\n\n${details}\n\n예금 만기가 양쪽 자료에서 다르면 갱신된 전일 일보로 새 작업을 시작해야 합니다.`, [bindingField(accounts)]);
       }
-      const planActual = weekly.flatMap((w) => w.movements).filter((m) => m.date === reportDate);
-      const planNext = weekly.flatMap((w) => w.movements).filter((m) => m.date === workDate);
-      const planDeposits = weekly.flatMap((w) => w.deposits).filter((m) => m.date === reportDate);
-      const depositField = () => movementField("depositEdits", `${reportDate} 정기예금 집행 (입금: 만기 원금·이자 / 지급: 가입 원금)`, planDeposits);
-      if (!values.actualEdits || !values.planEdits || (planDeposits.length && !values.depositEdits)) return ask(`### 집행 내역 확인\n\n자금현황표에는 개별 거래 적요가 없습니다. 아래 표를 확인·수정한 뒤 실행하세요.\n\n- **${reportDate} 실적:** 실제 집행 금액을 입력하세요. 미집행은 **0**으로 바꾸고, 계획에 없던 거래는 추가하세요.\n- **${workDate} 계획:** 예정된 거래와 금액을 확인하세요.\n- **정기예금 집행:** 지주현금 실적과 별도로 확인합니다. 이자는 예금 원금 증감에서 제외합니다.`, [movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length ? [depositField()] : [])]);
-      let actual: Movement[], nextPlan: Movement[], deposits: Movement[];
-      try {
-        actual = applyEdits(planActual, values.actualEdits, reportDate); nextPlan = applyEdits(planNext, values.planEdits, workDate); deposits = applyEdits(planDeposits, values.depositEdits, reportDate);
-        if (deposits.some((m) => !depositKind(m))) throw new Error("정기예금 집행은 입금 '정기예금 만기 원금/이자', 지급 '정기예금 가입' 적요만 허용합니다.");
-      } catch (e) { return ask(`${e instanceof SyntaxError || e instanceof z.ZodError ? "거래 입력을 읽을 수 없습니다. 아래 표에서 실제 금액과 추가 거래를 다시 확인해 주세요." : String(e)}\n${correctionHelp}`, [movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), depositField()]); }
+      if (!values.actualEdits || !values.planEdits || (planDeposits.length && !values.depositEdits)) return ask(`### 집행 내역 확인\n\n자금현황표에는 개별 거래 적요가 없습니다. 아래 표를 확인·수정한 뒤 실행하세요.\n\n- **${reportDate} 실적:** 실제 집행 금액을 입력하세요. 미집행은 **0**으로 바꾸고, 계획에 없던 거래는 추가하세요.\n- **${workDate} 계획:** 예정된 거래와 금액을 확인하세요.\n- **정기예금 집행:** 지주현금 실적과 별도로 확인합니다. 이자는 예금 원금 증감에서 제외합니다.`, [actualField(), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length ? [depositField()] : [])]);
       const termIssues = depositIssues(candidate, previous.values, kc.accounts, bindings, [...actual, ...deposits], reportDate);
-      if (termIssues.length) return ask(`### 정기예금 집행 확인\n\n정기예금 원금과 실제 집행 내역이 맞지 않습니다. **이자는 원금에 합산하지 않습니다.**\n\n${bullets(termIssues)}\n\n${correctionHelp}`, [depositField(), movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+      if (termIssues.length) return ask(`### 정기예금 집행 확인\n\n정기예금 원금과 실제 집행 내역이 맞지 않습니다. **이자는 원금에 합산하지 않습니다.**\n\n${bullets(termIssues)}\n\n${correctionHelp}`, [depositField(), actualField()]);
       const cashAccounts = kc.accounts.filter((a) => bindings.get(a.key)?.startsWith("H") && cashRows.includes(Number(bindings.get(a.key)!.slice(1))));
       const cashField: BusinessField = { key: "cashChanges", label: "계좌별 실제 입금·출금", type: "text", required: true,
         cashRows: cashAccounts.map((a) => ({ key: a.key, name: a.name, currency: a.currency, opening: previous.values[bindings.get(a.key)!].toFixed(), balance: a.balance.toFixed() })) };
       const changes: Record<string, { incoming: Amount; outgoing: Amount }> = {};
       try {
         const parsed = values.cashChanges ? z.record(z.string(), z.object({ incoming: numberInput, outgoing: numberInput }).strict()).parse(JSON.parse(values.cashChanges)) : {};
-        for (const [key, flow] of Object.entries(parsed)) { if (!bindings.get(key)?.startsWith("H") || !cashRows.includes(Number(bindings.get(key)!.slice(1)))) throw new Error("입출금 보정은 연결된 단기성 계좌만 허용합니다."); const incoming = decimal(flow.incoming, key); const outgoing = decimal(flow.outgoing, key); if (incoming.lt(0) || outgoing.lt(0)) throw new Error("입출금은 0 이상이어야 합니다."); changes[key] = { incoming, outgoing }; }
+        for (const [key, flow] of Object.entries(parsed)) { if (!bindings.get(key)?.startsWith("H") || !cashRows.includes(Number(bindings.get(key)!.slice(1)))) throw new Error("입출금 보정은 연결된 단기성 계좌만 허용합니다."); const incoming = decimal(flow.incoming, key); const outgoing = decimal(flow.outgoing, key); if (incoming.lt(0) || outgoing.lt(0)) throw new Error("입출금은 0 이상이어야 합니다."); changes[key] = { incoming: incoming.round(), outgoing: outgoing.round() }; }
       } catch { if (!cashAccounts.length) throw new Error("입출금을 보정할 단기성 계좌가 없습니다. 원천 파일을 확인하고 새 작업을 시작하세요."); return ask("계좌별 실제 입금·출금 금액을 확인해 주세요. 연결된 단기성 계좌에 대해 0 이상의 숫자를 입력하세요. 거래가 없으면 0을 입력하고, 확인하지 못한 금액은 추정하지 마세요.", [cashField]); }
       const flowIssues: string[] = []; const matured = l.activeTerms.filter((row) => maturity(candidate, row) <= reportDate && !previous.values[`H${row}`].isZero()).map((row) => `일보 H${row}: ${previous.values[`H${row}`]} 감소, 만기 ${maturity(candidate, row)}`);
       for (const a of kc.accounts) {
         const target = bindings.get(a.key)!; if (target[0] !== "H") continue;
         const row = Number(target.slice(1)); const opening = previous.values[target]; const flow = changes[a.key] ?? a;
         if (l.activeTerms.includes(row) && maturity(candidate, row) <= reportDate) { if (!a.balance.eq(0)) flowIssues.push(`${a.key}: 만기 도래했지만 계좌잔고가 ${a.balance}입니다. 만기 입금/연장 내역을 확인해 원천을 정정하세요.`); continue; }
-        if (!sameWon(opening.plus(flow.incoming).minus(flow.outgoing), a.balance)) flowIssues.push(`${a.key}: 전일일보 ${opening} + 입금 ${flow.incoming} - 지급 ${flow.outgoing} ≠ 계좌잔고 ${a.balance} (장부잔액 ${a.ledger})`);
+        const closing = opening.plus(flow.incoming).minus(flow.outgoing);
+        if (!sameWon(closing, a.balance)) {
+          if (!changes[a.key] && opening.eq(a.opening) && a.balance.eq(a.ledger)) throw new Error(`${a.key}: 원천자료는 일치하지만 금액별 반올림 후 기초+입금-출금과 계좌잔고에 ${closing.minus(a.balance)} ${a.currency} 차이가 생깁니다. 실제 거래금액을 임의로 보정하지 않고 결과 발행을 중단합니다.`);
+          flowIssues.push(`${a.key}: 전일일보 ${opening} + 입금 ${flow.incoming} - 지급 ${flow.outgoing} ≠ 계좌잔고 ${a.balance} (장부잔액 ${a.ledger})`);
+        }
       }
       if (flowIssues.length) {
         const message = `장부와 실제 잔고 차이/전일 이월을 확인하세요. 차이를 임의로 지급 처리하지 않습니다. 아래 계좌별로 확인한 실제 입금 총액과 출금 총액을 입력하세요. 거래가 없으면 0을 입력하세요.\n${flowIssues.join("\n")}`;
         if (!cashAccounts.length) throw new Error(`입출금 보정으로 해결할 수 없는 예금 잔고입니다. 만기·가입 내역과 원천 파일을 확인하고 새 작업을 시작하세요.\n${flowIssues.join("\n")}`);
-        return ask(message, [cashField, movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+        return ask(message, [cashField, actualField()]);
       }
       const holdingOpening = sum(cashRows.filter((r) => r < 20).map((r) => previous.values[`H${r}`]));
       const holdingClosing = sum(kc.accounts.filter((a) => bindings.get(a.key)?.startsWith("H") && cashRows.includes(Number(bindings.get(a.key)!.slice(1))) && a.currency === "KRW").map((a) => a.balance));
       const actualClosing = holdingOpening.plus(sum(actual.filter((m) => m.direction === "in").map((m) => m.amount))).minus(sum(actual.filter((m) => m.direction === "out").map((m) => m.amount)));
-      if (!sameWon(actualClosing, holdingClosing)) return ask(`실적 내역과 원화 계좌잔고가 맞지 않습니다. 전일 ${holdingOpening} → 실적 반영 ${actualClosing}, 계좌잔고 ${holdingClosing}, 차이 ${actualClosing.minus(holdingClosing)}원. 추가/변경/미집행 내역을 확인하세요.\n\n### 확인할 실적\n\n${listing(actual)}\n\n${correctionHelp}`, [movementField("actualEdits", `${reportDate} 실적`, planActual)]);
+      if (!sameWon(actualClosing, holdingClosing)) return ask(`실적 내역과 원화 계좌잔고가 맞지 않습니다. 전일 ${holdingOpening} → 실적 반영 ${actualClosing}, 계좌잔고 ${holdingClosing}, 차이 ${actualClosing.minus(holdingClosing)}원. 추가/변경/미집행 내역을 확인하세요.\n\n### 확인할 실적\n\n${listing(actual)}\n\n${correctionHelp}`, [actualField()]);
+      const assigned = assignCashMovements(candidate, kc.accounts, bindings, actual, changes);
+      if (assigned.issues.length) return ask(`거래 계좌를 확인해 주세요. 적요와 계좌별 입출금으로 유일하게 연결되는 거래는 자동 처리합니다. 아래 표에서 필요한 거래의 계좌를 선택하거나 실제 금액을 수정하세요.\n\n${bullets(assigned.issues)}`, [actualField()]);
+      actual = assigned.movements;
       let rates = checkpoint.rates as Rates | undefined;
-      if (!rates || rates.requestedDate !== reportDate) {
+      if (!rates || rates.requestedDate !== reportDate || rates.round !== "1") {
         if (values.manualRateDate) {
           try { rates = manualRates(values, reportDate); } catch (e) { return ask(`수동 입력한 환율을 확인하세요: ${String(e)}`, MANUAL_RATE_FIELDS, checkpoint); }
           checkpoint.rates = rates;
@@ -161,8 +176,8 @@ export const dailyCashTool: BusinessTool = {
           try { rates = await fetchHana(reportDate, signal); checkpoint.rates = rates; }
           catch (e) {
             signal.throwIfAborted();
-            if (values.retryRates !== "확인") return ask(`하나은행 기준일 최종 고시를 조회하지 못했습니다: ${String(e)}. 네트워크를 확인한 뒤 재시도해 주세요. 환율을 추정하여 완성하지 않습니다.`, [{ key: "retryRates", label: "하나은행 고시 재조회", confirm: "확인" }], checkpoint);
-            return ask(`재조회도 실패했습니다: ${String(e)}. 하나은행 고시환율 화면에서 ${reportDate} 최종 고시의 매매기준율을 확인해 직접 입력하세요. 입력값은 "담당자 수동 입력"으로 작업 기록과 최종 확인에 기록됩니다.`, MANUAL_RATE_FIELDS, checkpoint);
+            if (values.retryRates !== "확인") return ask(`하나은행 기준일 최초 고시를 조회하지 못했습니다: ${String(e)}. 네트워크를 확인한 뒤 재시도해 주세요. 환율을 추정하여 완성하지 않습니다.`, [{ key: "retryRates", label: "하나은행 최초고시 재조회", confirm: "확인" }], checkpoint);
+            return ask(`재조회도 실패했습니다: ${String(e)}. 하나은행 고시환율 화면에서 ${reportDate} 최초 고시(1회차)의 매매기준율을 확인해 직접 입력하세요. 입력값은 "담당자 수동 입력"으로 작업 기록과 최종 확인에 기록됩니다.`, MANUAL_RATE_FIELDS, checkpoint);
           }
         }
       }
@@ -176,23 +191,32 @@ export const dailyCashTool: BusinessTool = {
         `### 최종 확인\n\n**작업일 ${workDate} → 일보 기준일 ${reportDate}**\n\n${candidate.name} 금일금액을 전일금액으로 이월합니다.`,
         "- 원천 수식의 저장된 계산 결과를 사용합니다. 재계산·저장이 완료된 자료인지 확인하세요.\n- 미매핑 빈 계좌 및 기타 채권·적금·신탁에 변동이 없는지 확인하세요.",
         `### 계좌 연결\n\n${bullets(kc.accounts.map((a) => `${a.key} → ${bindings.get(a.key)} (${a.name}, ${a.balance})`))}`,
+        `### 집행 거래별 계좌\n\n${bullets(actual.map((m) => `${m.direction === "in" ? "입금" : "지급"} ${m.amount}원 / ${m.description} → ${text(candidate.getCell(`C${m.account!.slice(1)}`))}`)) || "없음"}`,
         `### 계획 대비 실적 차이\n\n${diff.length ? diff.map((d) => `- ${markdownText(d.key.join(" / "))}: 계획 **${d.planned}원** → 실적 **${d.actual}원**`).join("\n") : "차이 없음 (담당자가 실제 집행 확인)"}`,
         `### 정기예금 집행\n\n**이자는 원금 증감에서 제외합니다.**\n\n${deposits.length ? listing(deposits) : "없음"}`,
         `### 신규 가입\n\n${bullets(newDeposits.map((a) => `${a.bank}: ${a.amount} ${a.currency}, ${a.start}~${a.maturity} → ${a.target}`)) || "없음"}`,
         `### 만기\n\n${bullets(matured) || "없음"}`,
-        `### 원화 대사 및 환율\n\n- **원화 대사 대상: ${kc.total}원** (${markdownText(kc.totalSource)}, 계좌잔고)\n- 고시: ${rates.date} 최종 ${markdownText(rates.round)}회\n- USD ${rates.perUnit.USD}, JPY(1엔) ${rates.perUnit.JPY}, CNY ${rates.perUnit.CNY}`,
+        `### 원화 대사 및 환율\n\n- **원화 대사 대상: ${kc.total}원** (${markdownText(kc.totalSource)}, 계좌잔고)\n- 고시: ${rates.date} 최초 ${markdownText(rates.round)}회\n- USD ${rates.perUnit.USD}, JPY(1엔) ${rates.perUnit.JPY}, CNY ${rates.perUnit.CNY}`,
         "확정하려면 **확인하고 계속**을 누르세요. 표를 수정하면 새 확인 코드로 다시 확인합니다.",
-      ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, movementField("actualEdits", `${reportDate} 실적`, planActual), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
+      ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, actualField(), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
       const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes, await rolloverFormulas(archive, candidate));
       if (!sameWon(built.totalKrw, kc.total)) throw new Error(`총 원화 대사 불일치: 일보 ${built.totalKrw}, KC ${kc.total}, 차이 ${built.totalKrw.minus(kc.total)}. 결과를 발행하지 않습니다.`);
       signal.throwIfAborted();
       const prepared = await archive.appendSheet(book, built.sheet.name);
-      const { bytes, image, sheet: calculated, engine, fallbackReason } = await renderSheet(prepared, built.sheet.name, built.rolloverChecks, signal, built.textFitRanges);
+      const { bytes, image, sheet: calculated, engine, fallbackReason } = await renderSheet(prepared, built.sheet.name, built.rolloverChecks, signal);
       const calculatedLayout = layout(calculated);
       if (!sameWon(money(calculated.getCell(`G${calculatedLayout.total}`)), kc.total) || !money(calculated.getCell(`D${calculatedLayout.closing}`)).eq(money(calculated.getCell("H17")))) throw new Error(`${engine} 재계산 후 총 원화 또는 주요 집행 마감잔액이 일치하지 않습니다.`);
-      for (const account of kc.accounts) if (!sameWon(money(calculated.getCell(bindings.get(account.key)!)), account.balance)) throw new Error(`${account.key}: ${engine} 재계산 후 계좌 잔고가 일치하지 않습니다.`);
+      for (const account of kc.accounts) {
+        const target = bindings.get(account.key)!;
+        if (!sameWon(money(calculated.getCell(target)), account.balance)) throw new Error(`${account.key}: ${engine} 재계산 후 계좌 잔고가 일치하지 않습니다.`);
+        if (!target.startsWith("H")) continue;
+        for (const col of ["E", "G", ...(account.currency !== "KRW" ? ["I"] : [])]) {
+          const address = `${col}${target.slice(1)}`;
+          if (!money(calculated.getCell(address)).eq(money(built.sheet.getCell(address)))) throw new Error(`${account.key}: ${engine} 재계산 후 ${address}의 증감·장부금액이 확인한 원천금액과 다릅니다. 집행내역의 거래 계좌 연결과 원천금액을 확인하세요.`);
+        }
+      }
       signal.throwIfAborted();
-      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치. 출력 엔진: ${engine}${fallbackReason ? " (Excel 출력 실패로 자동 전환)" : ""}.`, file: { name: files.previousReport[0].name, bytes }, validationSheet: built.sheet.name, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최종 환율·만기·계좌 연결 확인", passed: true }], externalData: { ...audit, outputEngine: engine, fallbackReason: fallbackReason ?? null } };
+      return { status: "completed", summary: `${reportDate} 기준 일보 시트 ${built.sheet.name}를 원본 통합문서에 추가했습니다. 총 원화 ${kc.total.toFixed()}원 대사 일치. 출력 엔진: ${engine}${fallbackReason ? " (Excel 출력 실패로 자동 전환)" : ""}.`, file: { name: files.previousReport[0].name, bytes }, validationSheet: built.sheet.name, image: { name: `일일자금일보_${sheetDate(reportDate)}.png`, bytes: image }, checks: [{ name: "전일금액 이월 및 계좌별 증감 대사", passed: true }, { name: "실적 확인 및 주요 집행 마감잔액 대사", passed: true }, { name: "총 원화 = KC 원화 계좌잔고 합계", passed: true }, { name: "정기예금 만기·가입 원금 대사 (이자 제외)", passed: true }, { name: "최초고시 환율·만기·계좌 연결 확인", passed: true }], externalData: { ...audit, outputEngine: engine, fallbackReason: fallbackReason ?? null } };
     } catch (error) { signal.throwIfAborted(); return { status: "failed", message: error instanceof Error ? error.message : String(error) }; }
   },
 };

@@ -10,11 +10,8 @@ import {
   LuBrain,
   LuCirclePause,
   LuFileText,
-  LuFolderSearch,
-  LuSettings,
 } from "react-icons/lu";
-import Sidebar from "@Features/Sidebar/components/Sidebar";
-import NavRail from "@Features/Sidebar/components/NavRail";
+import Navigation from "@Features/Sidebar/components/Navigation";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
 import { useAgentApi } from "@Features/Agent/hooks/useAgentApi";
@@ -35,18 +32,15 @@ import AgentMessages from "@Features/Agent/components/AgentMessages";
 import CanvasPanel from "@Features/Agent/components/CanvasPanel";
 import MissingTermsForm from "@Features/Agent/components/MissingTermsForm";
 import AnchorChoicePrompt from "@Features/Agent/components/AnchorChoicePrompt";
-import CollectionPanel from "@Features/Agent/components/CollectionPanel";
+import FolderPanel from "@Features/Agent/components/FolderPanel";
 import MemoryPanel from "@Features/Agent/components/MemoryPanel";
-import ModelSettingsForm from "@Features/Agent/components/ModelSettingsForm";
-import MaruStoragePanel from "@Features/Agent/components/MaruStoragePanel";
 import WorkSourcePanel from "@Features/Agent/components/WorkSourcePanel";
 // import { guideCopy } from "@config/guideCopy";
 
 const TAB_TITLES: Record<AppTab, string> = {
   home: "케찹이",
-  settings: "모델 설정",
   work: "업무",
-  upload: "파일 업로드",
+  upload: "문서",
   context: "컨텍스트",
 };
 
@@ -71,7 +65,6 @@ const AgentPage = (): React.JSX.Element => {
   const collectionsState = useCollections(api, WORKSPACE_ID);
   const memoriesState = useMemories(api, WORKSPACE_ID);
   const [tab, setTab] = useState<AppTab>("home");
-  const [modelConfigurable, setModelConfigurable] = useState(false);
   const [input, setInput] = useState("");
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   // Business results open in their own right-hand panel; closing it leaves a reopen button above the input.
@@ -113,12 +106,6 @@ const AgentPage = (): React.JSX.Element => {
     });
   }, [api]);
 
-  useEffect(() => {
-    void api?.getModelSettings().then((settings) => {
-      setModelConfigurable(settings.configurable);
-    });
-  }, [api]);
-
   // Any navigation (thread pick, 새 질문, workflow start) brings the chat screen back.
   useEffect(() => {
     setTab("home");
@@ -138,7 +125,7 @@ const AgentPage = (): React.JSX.Element => {
   if (!api) {
     return (
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <Sidebar />
+        <Navigation tab={tab} onChange={setTab} />
         <div className="flex flex-1 items-center justify-center text-sm text-[#71717A]">
           케찹이는 데스크톱 앱에서만 사용할 수 있습니다.
         </div>
@@ -335,8 +322,7 @@ const AgentPage = (): React.JSX.Element => {
 
   return (
     <div className="flex flex-1 min-h-0 overflow-hidden font-['Inter',sans-serif]">
-      <NavRail tab={tab} onChange={setTab} />
-      <Sidebar />
+      <Navigation tab={tab} onChange={setTab} />
 
       <div className="flex flex-col flex-1 min-w-0 min-h-0 bg-white dark:bg-[#0F0F0F]">
         <div className="flex items-center gap-3 h-[60px] px-6 border-b border-[#E4E4E7] dark:border-[#27272A]">
@@ -356,9 +342,9 @@ const AgentPage = (): React.JSX.Element => {
         {tab !== "home" && (
           <div
             role="tabpanel"
-            className="flex-1 overflow-y-auto px-6 md:px-8 py-6"
+            className={`flex-1 min-h-0 px-6 md:px-8 py-6 ${tab === "upload" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
           >
-            <div className="mx-auto w-full max-w-3xl">
+            <div className={`mx-auto w-full max-w-3xl ${tab === "upload" ? "flex min-h-0 flex-1 flex-col" : ""}`}>
               {tab === "work" && (
                 <>
                   <p className="mb-4 text-sm text-[#71717A]">
@@ -381,25 +367,10 @@ const AgentPage = (): React.JSX.Element => {
               )}
               {tab === "upload" && (
                 <>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-[#18181B] dark:text-[#FAFAFA]">
-                    <LuFolderSearch className="h-4 w-4" />
-                    검색 폴더
-                  </h3>
-                  <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                    활성화한 폴더만 검색하며, 답변에는 실제 인용한 문서가
-                    표시됩니다.
-                  </p>
-                  <CollectionPanel
-                    collections={collectionsState.collections}
-                    error={collectionsState.error}
+                  <FolderPanel api={api} workspaceId={WORKSPACE_ID}
+                    collections={collectionsState.collections} error={collectionsState.error}
                     onAdd={() => void collectionsState.add()}
-                    onRemove={(name) => void collectionsState.remove(name)}
-                    onSync={(name) => void collectionsState.sync(name)}
-                    onToggle={(name, active) =>
-                      void collectionsState.setActive(name, active)
-                    }
-                  />
-                  {api && <MaruStoragePanel api={api} workspaceId={WORKSPACE_ID} />}
+                    onRemove={collectionsState.remove} onSync={collectionsState.sync} />
                 </>
               )}
               {tab === "context" && (
@@ -440,27 +411,7 @@ const AgentPage = (): React.JSX.Element => {
                   />
                 </section>
               )}
-              {tab === "settings" && (
-                <>
-                  <h3 className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-[#18181B] dark:text-[#FAFAFA]">
-                    <LuSettings className="h-4 w-4" />
-                    모델 연결
-                  </h3>
-                  {modelConfigurable ? (
-                    <>
-                      <p className="mb-4 text-xs leading-relaxed text-[#71717A]">
-                        로그인한 계정의 LiteLLM 게이트웨이에서 사용할 모델을
-                        선택합니다.
-                      </p>
-                      <ModelSettingsForm api={api} />
-                    </>
-                  ) : (
-                    <p className="text-xs text-[#71717A]">
-                      로그인한 계정의 LiteLLM·MARU 키를 사용합니다. 연결 정보는 이메일 인증을 통해 자동으로 설정됩니다.
-                    </p>
-                  )}
-                </>
-              )}
+
             </div>
           </div>
         )}

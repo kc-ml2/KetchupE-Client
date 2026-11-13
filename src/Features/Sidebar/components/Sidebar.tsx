@@ -1,10 +1,8 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { isMobile as isMobileDevice } from "react-device-detect";
-import { LuLogOut, LuSun, LuMoon, LuFolderSearch } from "react-icons/lu";
-import { ThemeContext, ThemeContextType } from "@Contexts/ThemeContext";
+import { LuFolderSearch } from "react-icons/lu";
 import { ThreadsContext, ThreadsContextType } from "@Contexts/ThreadsContext";
-import { AccountContext } from "@Contexts/AccountContext";
 import ThreadHistory from "./ThreadHistory";
 
 const SIDEBAR_MIN_WIDTH = 220;
@@ -18,7 +16,6 @@ const clampSidebarWidth = (width: number): number => {
 
 const Sidebar = (): React.JSX.Element => {
   const { threads, renameThread, deleteThread } = useContext(ThreadsContext) as ThreadsContextType;
-  const account = useContext(AccountContext);
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
     if (typeof window === "undefined") return SIDEBAR_DEFAULT_WIDTH;
     const saved = Number(
@@ -34,7 +31,6 @@ const Sidebar = (): React.JSX.Element => {
     previousCursor: string;
     previousUserSelect: string;
   } | null>(null);
-  const { theme, setTheme } = useContext(ThemeContext) as ThemeContextType;
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -42,14 +38,6 @@ const Sidebar = (): React.JSX.Element => {
   const activeThreadId = location.pathname.startsWith("/agent/")
     ? decodeURIComponent(location.pathname.slice("/agent/".length))
     : null;
-
-  const handleLogout = async () => {
-    try {
-      await account?.logout();
-    } catch {
-      window.alert("로그아웃하지 못했습니다. 다시 시도해 주세요.");
-    }
-  };
 
   const handleDeleteThread = async (id: string) => {
     try {
@@ -115,10 +103,9 @@ const Sidebar = (): React.JSX.Element => {
 
   return (
     <>
-      {!isMobileDevice && (
         <div
           className="flex relative flex-col h-full bg-[#18181B] px-3 py-4 flex-shrink-0"
-          style={{ width: `${sidebarWidth}px` }}
+          style={{ width: `${sidebarWidth}px`, maxWidth: "calc(100vw - 68px)" }}
         >
           {/* App Header */}
           <div className="flex items-center gap-2.5 h-11 px-1">
@@ -163,50 +150,6 @@ const Sidebar = (): React.JSX.Element => {
             onDelete={(id) => void handleDeleteThread(id)}
           />
 
-          {/* Divider */}
-          <div className="h-px w-full bg-[#27272A]" />
-
-          {/* Account */}
-          {account && (
-            <p className="mt-3 mb-2 px-1 truncate text-xs text-[#A1A1AA]" title={account.email}>
-              {account.email}
-            </p>
-          )}
-          <button
-            onClick={() => void handleLogout()}
-            className="flex items-center justify-center gap-2 h-10 rounded-lg border border-[#ffffff] w-full cursor-pointer text-[#ffffff] hover:border-[#0066FF] hover:bg-[#0066FF] transition-colors"
-          >
-            <LuLogOut className="w-[18px] h-[18px]" />
-            <span className="text-sm font-medium">로그아웃</span>
-          </button>
-
-          {/* Divider */}
-          <div className="h-px w-full bg-[#27272A] mt-3" />
-
-          {/* Theme */}
-          <div className="flex items-center gap-1 h-9 p-1 mt-3 rounded-lg bg-[#27272A] w-full">
-            <button
-              type="button"
-              onClick={() => setTheme("light")}
-              className={`flex items-center justify-center flex-1 h-full rounded-md cursor-pointer transition-colors ${
-                theme === "light" ? "bg-[#3F3F46]" : "hover:bg-[#3F3F46]"
-              }`}
-              aria-label="라이트 테마"
-            >
-              <LuSun className={`w-3.5 h-3.5 ${theme === "light" ? "text-[#FAFAFA]" : "text-[#71717A]"}`} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setTheme("dark")}
-              className={`flex items-center justify-center flex-1 h-full rounded-md cursor-pointer transition-colors ${
-                theme === "dark" ? "bg-[#3F3F46]" : "hover:bg-[#3F3F46]"
-              }`}
-              aria-label="다크 테마"
-            >
-              <LuMoon className={`w-3.5 h-3.5 ${theme === "dark" ? "text-[#FAFAFA]" : "text-[#71717A]"}`} />
-            </button>
-          </div>
-
           <button
             type="button"
             onPointerDown={handleResizeStart}
@@ -215,8 +158,6 @@ const Sidebar = (): React.JSX.Element => {
             style={{ touchAction: "none" }}
           />
         </div>
-      )}
-
 
     </>
   );

@@ -50,6 +50,11 @@ export type RunKind = string;
 export type RunAction = { id: string; type: "work_sources"; title: string; question: string } | BusinessAction;
 export type StartRunResult = { runId: string; kind: RunKind; action?: RunAction; status?: RunStatus };
 
+export type DocumentSearchStatus = "searchable" | "pending" | "analyzing" | "failed" | "ignored";
+export type FolderEntry = { counts?: { searchable: number; failed: number }; searchStatus?: DocumentSearchStatus; statusReason?: string; name: string; path: string; kind: "directory" | "file"; size?: number; modifiedAt?: string };
+export type FolderListing = { entries: FolderEntry[]; truncated: boolean };
+export type FolderLocation = { kind: "local" | "maru"; id: string; path: string };
+
 export type MaruStorageSummary = { storageId: string; name: string; active: boolean };
 
 export type CollectionSummary = {
@@ -60,7 +65,11 @@ export type CollectionSummary = {
   chunks: number;
   embedded: number;
   syncing: boolean;
+  analysisStatus?: "pending" | "analyzing" | "idle";
+  retryingFile?: string;
   lastError?: string;
+  syncCounts?: { succeeded: number; failed: number };
+  failedFiles?: Array<{ path: string; error: string }>;
 };
 
 export type SyncSummary = { scanned: number; updated: number; removed: number; failed: number };
@@ -119,6 +128,10 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   recordInteraction(runId: string, kind: InteractionKind): Promise<void>;
   openCitation(runId: string, evidenceId: string): Promise<void>;
 
+  browseFolder(location: FolderLocation): Promise<FolderListing>;
+  revealFolderFile(location: FolderLocation): Promise<void>;
+  openLocalFolderFile(location: FolderLocation): Promise<void>;
+  retryFolderFile(location: FolderLocation): Promise<void>;
   addCollection(): Promise<CollectionSummary | null>;
   removeCollection(name: string): Promise<void>;
   syncCollection(name: string): Promise<SyncSummary>;
@@ -136,7 +149,6 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   deleteMemory(id: string): Promise<void>;
 
   getModelSettings(): Promise<{ baseURL: string; modelAlias: string; hasApiKey: boolean; configurable: boolean }>;
-  setModelSettings(settings: { modelAlias: string }): Promise<void>;
   listModels(): Promise<string[]>;
   testModelConnection(): Promise<{ ok: boolean; models: string[]; resolvedAlias: string }>;
 

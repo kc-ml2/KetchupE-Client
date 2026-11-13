@@ -1,9 +1,9 @@
 import Decimal from "decimal.js";
 import type ExcelJS from "exceljs";
 
-export const Money = Decimal.clone({ precision: 30 });
+export const Money = Decimal.clone({ precision: 30, rounding: Decimal.ROUND_HALF_UP });
 export type Amount = Decimal;
-/** KC 계좌잔고는 원 단위 정수이고 일보는 이자 소수 원을 그대로 이월하므로, 1원 미만 차이는 같은 금액으로 본다. 그 이상은 허용오차 없음. */
+/** 원천자료의 소수 금액과 정수로 작성한 일보의 대사는 1원 미만 차이만 허용한다. */
 export const sameWon = (a: Decimal, b: Decimal.Value) => a.minus(b).abs().lt(1);
 export const sum = (values: Decimal.Value[]) => values.reduce<Decimal>((total, value) => total.plus(value), new Money(0));
 export function decimal(value: unknown, label: string): Decimal {
@@ -46,4 +46,4 @@ export function previousBusinessDay(value: string) {
 }
 export const sheetDate = (value: string) => date(value).slice(2).replaceAll("-", "");
 export const isoSheetDate = (value: string) => date(`20${value.slice(0, 2)}-${value.slice(2, 4)}-${value.slice(4, 6)}`);
-export function numeric(cell: ExcelJS.Cell, value: Decimal.Value) { cell.value = decimal(value instanceof Money ? value.toString() : value, cell.address).toNumber(); }
+export function numeric(cell: ExcelJS.Cell, value: Decimal.Value) { cell.value = decimal(value instanceof Money ? value.toString() : value, cell.address).round().toNumber(); }

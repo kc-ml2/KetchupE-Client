@@ -9,6 +9,7 @@ export function parseHana(html: string, requestedDate: string): Rates {
   const basis = content.match(/기준일\s*:\s*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일/);
   const round = content.match(/\((\d+)회차\)/)?.[1];
   if (!basis || !round || !/매매[\s\S]*기준율/.test(html)) throw new Error("하나은행 응답 형식이 변경되었거나 고시가 없습니다.");
+  if (round !== "1") throw new Error("하나은행 최초고시(1회차)가 아닙니다.");
   const basisDate = date(`${basis[1]}-${basis[2].padStart(2, "0")}-${basis[3].padStart(2, "0")}`);
   const perUnit = {} as Rates["perUnit"];
   for (const code of ["USD", "JPY", "CNY"] as const) {
@@ -22,7 +23,7 @@ export function parseHana(html: string, requestedDate: string): Rates {
 }
 export async function fetchHana(reportDate: string, signal: AbortSignal): Promise<Rates> {
   date(reportDate);
-  const response = await fetch(HANA_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ajax: "true", curCd: "", inqStrDt: reportDate.replaceAll("-", ""), tmpInqStrDt: reportDate, pbldDvCd: "0", pbldSqn: "" }), signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]), redirect: "error" });
+  const response = await fetch(HANA_URL, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ajax: "true", curCd: "", inqStrDt: reportDate.replaceAll("-", ""), tmpInqStrDt: reportDate, pbldDvCd: "1", pbldSqn: "1" }), signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]), redirect: "error" });
   if (!response.ok || !response.body) throw new Error(`하나은행 조회 실패 (${response.status})`);
   const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
   try { while (true) { const { value, done } = await reader.read(); if (done) break; size += value.length; if (size > 1024 * 1024) throw new Error("환율 응답 크기 초과"); chunks.push(value); } }
