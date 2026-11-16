@@ -1,5 +1,9 @@
 import { EXCEL_LIMITS } from "./limits.ts";
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { BrowserWindow } from "electron";
 
 /** Prints app-owned, escaped HTML in a disposable renderer with no scripts or external resources. */
@@ -18,26 +22,31 @@ export async function captureChartPng(svg: string, signal: AbortSignal): Promise
 
 async function renderReportPage(html: string, signal: AbortSignal, size?: { width: number; height: number }): Promise<Uint8Array> {
   signal.throwIfAborted();
-  const window = new BrowserWindow({ show: false, ...(size ?? {}), useContentSize: true, webPreferences: { partition: `excel-print-${randomUUID()}`, sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false, backgroundThrottling: false } });
-  const session = window.webContents.session;
-  const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
-  session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  session.setPermissionCheckHandler(() => false);
-  session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: details.resourceType !== "mainFrame" || details.url !== url }));
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  window.webContents.on("will-navigate", (event) => event.preventDefault());
+  const directory = await mkdtemp(join(tmpdir(), "ketchupe-excel-render-"));
+  let window: BrowserWindow | undefined;
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(EXCEL_LIMITS.workerMs)]);
   let abort: () => void = () => undefined;
   try {
+    // Large SVGs exceed Chromium's URL limit when embedded in a data: URL.
+    const file = join(directory, "report.html"), url = pathToFileURL(file).href;
+    await writeFile(file, html, { mode: 0o600 });
+    deadline.throwIfAborted();
+    const renderer = window = new BrowserWindow({ show: false, ...(size ?? {}), useContentSize: true, webPreferences: { partition: `excel-print-${randomUUID()}`, sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false, backgroundThrottling: false } });
+    const session = renderer.webContents.session;
+    session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    session.setPermissionCheckHandler(() => false);
+    session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: details.resourceType !== "mainFrame" || details.url !== url }));
+    renderer.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    renderer.webContents.on("will-navigate", (event) => event.preventDefault());
     return await Promise.race([
       (async () => {
-        await window.loadURL(url); deadline.throwIfAborted();
-        if (!size) return window.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true });
+        await renderer.loadURL(url); deadline.throwIfAborted();
+        if (!size) return renderer.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true });
         // A hidden window's first capture can contain only part of a long SVG path.
-        await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+        await renderer.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
         await new Promise(resolve => setTimeout(resolve, 200));
         deadline.throwIfAborted();
-        return (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG();
+        return (await renderer.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG();
       })(),
       new Promise<never>((_, reject) => {
         abort = () => reject(new Error("파일 렌더링이 중단되었거나 60초를 초과했습니다."));
@@ -47,6 +56,7 @@ async function renderReportPage(html: string, signal: AbortSignal, size?: { widt
     ]);
   } finally {
     deadline.removeEventListener("abort", abort);
-    if (!window.isDestroyed()) window.destroy();
+    if (window && !window.isDestroyed()) window.destroy();
+    await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 }
