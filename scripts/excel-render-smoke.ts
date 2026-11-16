@@ -13,6 +13,10 @@ import { reportPageImages } from "../electron/excel/imageExport.ts";
 import type { Report } from "../electron/excel/contracts.ts";
 
 app.on("window-all-closed", () => undefined);
+app.on("browser-window-created", (_event, window) => {
+  window.webContents.on("did-finish-load", () => console.log("Renderer loaded"));
+  window.webContents.on("render-process-gone", (_event, details) => console.log("Renderer exited:", details.reason));
+});
 
 async function main() {
   const [outputArg, ...files] = process.argv.filter(arg => arg !== "--no-sandbox").slice(2);
@@ -48,6 +52,7 @@ async function main() {
       }
       const signal = AbortSignal.timeout(60000);
       const start = performance.now();
+      console.log(`Rendering PNG: ${name}`);
       const png = await captureChartPng(svg, signal), pngMs = Math.round(performance.now() - start);
       const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
       assert.equal(info.width, 1600);
@@ -58,6 +63,7 @@ async function main() {
         if (r > 150 && g < 100 && b < 100) red++;
       }
       assert(blue > 100 && red > 100, `${name}: both series must be visible, blue=${blue}, red=${red}`);
+      console.log(`Rendering PDF: ${name}`);
       const pdfStart = performance.now(), pdf = await printReportPdf(html, signal);
       const pdfMs = Math.round(performance.now() - pdfStart);
       const pages = await reportPageImages(pdf, signal);
@@ -71,7 +77,11 @@ async function main() {
     assert(reproduced, "At least one chart must exceed the old URL limit");
     await writeFile(join(output, "metrics.json"), JSON.stringify({ platform: process.platform, electron: process.versions.electron, metrics }, null, 2));
   } finally {
-    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // Windows keeps Chromium's profile database open until Electron exits.
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(error => {
+      if (process.platform !== "win32" || !["EBUSY", "EPERM", "ENOTEMPTY"].includes(error.code)) throw error;
+      console.warn("Temporary Electron profile cleanup deferred:", profile);
+    });
   }
 }
 
