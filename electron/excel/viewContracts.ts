@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EXCEL_LIMITS } from "./limits.ts";
 
 const title = z.string().max(120);
 const axisFields = {
@@ -16,7 +17,8 @@ const annotationShape = (item: { kind: string; x?: number }, ctx: z.RefinementCt
 const referenceLine = z.object({ axis: z.enum(["x", "left", "right"]), value: z.number().finite(), label: title.optional() }).strict();
 const annotation = z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape).transform(item => ({ ...item, label: item.label ?? annotationLabels[item.kind] }));
 const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
-const chartFields = { title: title.optional(), description: z.string().max(2000).optional(), axes: z.object({ x: axisView.optional(), left: axisView.optional(), right: axisView.optional() }).strict().optional(), labels: z.boolean().optional(), colors: z.array(color).min(1).max(8).optional(), grid: z.enum(["none", "solid", "dashed"]).optional(), referenceLines: z.array(referenceLine).max(12).optional() };
+const samplePoints = z.number().int().min(2).max(EXCEL_LIMITS.chartRows);
+const chartFields = { title: title.optional(), description: z.string().max(2000).optional(), axes: z.object({ x: axisView.optional(), left: axisView.optional(), right: axisView.optional() }).strict().optional(), labels: z.boolean().optional(), samplePoints: samplePoints.optional(), colors: z.array(color).min(1).max(8).optional(), grid: z.enum(["none", "solid", "dashed"]).optional(), referenceLines: z.array(referenceLine).max(12).optional() };
 const chartView = z.object({ ...chartFields, annotations: z.array(annotation).max(12).optional() }).strict();
 export const reportView = z.object({ charts: z.record(z.string().regex(/^[0-9]$/), chartView) }).strict();
 const axisPatch = z.object(Object.fromEntries(Object.entries(axisFields).map(([key, schema]) => [key, schema.nullable().optional()])) as { [K in keyof typeof axisFields]: z.ZodOptional<z.ZodNullable<(typeof axisFields)[K]>> }).strict();
@@ -25,6 +27,7 @@ const chartPatch = z.object({
   axes: z.object({ x: axisPatch.nullable().optional(), left: axisPatch.nullable().optional(), right: axisPatch.nullable().optional() }).strict().optional(),
   annotations: z.array(z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape)).max(12).optional(),
   labels: z.boolean().nullable().optional(), colors: z.array(color).min(1).max(8).nullable().optional(),
+  samplePoints: samplePoints.nullable().optional(),
   grid: z.enum(["none", "solid", "dashed"]).nullable().optional(), referenceLines: z.array(referenceLine).max(12).nullable().optional(),
 }).strict();
 export const viewPatch = z.object({ charts: z.record(z.string().regex(/^[0-9]$/), chartPatch) }).strict();

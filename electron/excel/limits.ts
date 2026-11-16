@@ -4,7 +4,7 @@ export const EXCEL_LIMITS = {
   tableRows: 5000, chartRows: 20000, categoricalChartRows: 500,
   resultChars: 4 * 1024 * 1024, analysisChars: 6 * 1024 * 1024,
   codeChars: 30000, responseChars: 60000, outputTokens: 10000,
-  calculationMs: 5000, workerMs: 30000, submissionMs: 15 * 60 * 1000,
+  calculationMs: 15000, workerMs: 60000, submissionMs: 15 * 60 * 1000,
   turns: 24, inspections: 12, executions: 4, repairs: 2, inspectRows: 80, profileChars: 20000, contextChars: 200000,
 } as const;
 

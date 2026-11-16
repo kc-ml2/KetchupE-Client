@@ -1,3 +1,4 @@
+import { EXCEL_LIMITS } from "./limits.ts";
 import { randomUUID } from "node:crypto";
 import { BrowserWindow } from "electron";
 
@@ -25,7 +26,7 @@ async function renderReportPage(html: string, signal: AbortSignal, size?: { widt
   session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: details.resourceType !== "mainFrame" || details.url !== url }));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event) => event.preventDefault());
-  const deadline = AbortSignal.any([signal, AbortSignal.timeout(30000)]);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(EXCEL_LIMITS.workerMs)]);
   let abort: () => void = () => undefined;
   try {
     return await Promise.race([
@@ -39,7 +40,7 @@ async function renderReportPage(html: string, signal: AbortSignal, size?: { widt
         return (await window.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG();
       })(),
       new Promise<never>((_, reject) => {
-        abort = () => reject(new Error("파일 렌더링이 중단되었거나 30초를 초과했습니다."));
+        abort = () => reject(new Error("파일 렌더링이 중단되었거나 60초를 초과했습니다."));
         deadline.addEventListener("abort", abort, { once: true });
         if (deadline.aborted) abort();
       }),

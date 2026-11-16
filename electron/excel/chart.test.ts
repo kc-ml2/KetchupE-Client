@@ -6,7 +6,7 @@ import { fixtureReport } from "./fixtures.ts";
 import { chartOption, chartSvg } from "./chart.ts";
 import { renderHtml, renderXlsx, validReportHtml } from "./render.ts";
 import { validateResult, type ChartSpec, type InputRow, type Report } from "./contracts.ts";
-import { mergeView, type ReportView } from "./view.ts";
+import { mergeView, viewSummary, type ReportView } from "./view.ts";
 
 type View = ReportView["charts"][string];
 function report(columns: string[], rows: (string | number)[][], chart: Partial<ChartSpec>, view?: View): Report {
@@ -165,6 +165,28 @@ it("rejects guides that the chart cannot place", () => {
   expect(() => renderHtml(report(columns, sales, { type: "line" }, { annotations: [{ series: 0, kind: "valueAt", x: 2, label: "값", scope: "selectedData" }] }))).toThrow("숫자형 X축");
   expect(() => renderHtml(report(columns, sales, { type: "pie" }, { grid: "dashed" }))).toThrow("그리드·보조선");
   expect(() => renderHtml(report(columns, sales, { type: "bar" }, { grid: "dashed", referenceLines: [{ axis: "left", value: 110, label: "목표" }] }))).not.toThrow();
+});
+
+it("samples both series at the same rows while preserving gaps, isolated points and full-data means", () => {
+  const value = report(["x", "y", "z"], Array.from({ length: 100 }, (_, i) => [i, i === 7 ? 1000 : i, i * 2]),
+    { type: "line", xScale: "linear", dataset: true, series: [{ y: 1, axis: "left" }, { y: 2, axis: "right" }] });
+  value.result.datasets = value.result.tables;
+  value.result.tables = [];
+  value.result.datasets[0].rows.splice(51, 1);
+  value.result.datasets[0].rows.splice(49, 1);
+  value.view = mergeView(undefined, { charts: { "0": { samplePoints: 10, annotations: [{ series: 0, kind: "max" }, { series: 0, kind: "mean" }] } } });
+  const { option: display } = option(value), lines = display.series.filter(series => series.type === "line");
+  expect(lines.map(line => line.data.filter(point => (point as number[])[1] === null))).toEqual([[[50, null], [52, null]], [[50, null], [52, null]]]);
+  expect(lines[0].data.map(point => (point as number[])[0])).toEqual(lines[1].data.map(point => (point as number[])[0]));
+  for (const x of [0, 7, 48, 50, 52, 99]) expect(lines[0].data).toContainEqual([x, x === 7 ? 1000 : x]);
+  expect(lines[0].markLine).toMatchObject({ data: [{ xAxis: 7 }, { yAxis: expect.closeTo((4950 + 993 - 49 - 51) / 98, 10) }] });
+  expect(display.series.filter(series => series.type === "scatter").map(series => series.data)).toEqual([[[50, 50]], [[50, 100]]]);
+  expect(viewSummary(undefined, value.view).join(" ")).toContain("약 10점");
+  value.view = mergeView(value.view, { charts: { "0": { samplePoints: null } } });
+  expect(value.view.charts["0"]).not.toHaveProperty("samplePoints");
+  expect(option(value).option.series[0].data).toHaveLength(100); // 98 measurements and two gap markers
+  for (const samplePoints of [1, 1.5, 20001]) expect(() => mergeView(undefined, { charts: { "0": { samplePoints } } })).toThrow();
+  expect(() => renderHtml(report(columns, sales, { type: "bar" }, { samplePoints: 2 }))).toThrow("선·영역");
 });
 
 it("accepts the revision a model returns for 'show the Weight at 800℃' and tells it not to refuse", async () => {

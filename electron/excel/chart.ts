@@ -71,7 +71,7 @@ const quantile = (sorted: number[], p: number) => {
   return sorted[low] + (sorted[Math.min(low + 1, sorted.length - 1)] - sorted[low]) * (at - low);
 };
 
-/** Lines keep acquisition order and break at missing source rows; no point is sampled away. */
+/** Lines keep acquisition order and gaps; optional display sampling leaves analysis data intact. */
 export function chartOption(report: Report, chart: ChartSpec): ChartRender {
   const data = chartTable(report, chart)!;
   const view = report.view?.charts[String(reportCharts(report).indexOf(chart))] ?? {};
@@ -142,6 +142,10 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
       return i > 0 && Boolean(chart.dataset && (!before || !current || before.fileId !== current.fileId || before.sheet !== current.sheet || before.rangeId !== current.rangeId || current.row !== before.row + 1));
     });
     const connected = chart.type === "line" || chart.type === "area";
+    const sampled = connected && view.samplePoints !== undefined && data.rows.length > view.samplePoints
+      ? new Set(Array.from({ length: view.samplePoints }, (_, i) => Math.round(i * (data.rows.length - 1) / (view.samplePoints! - 1)))) : undefined;
+    // shortcut: uniform sampling can miss unmarked narrow peaks; use envelope sampling if those must be preserved.
+    for (const [i, gap] of gaps.entries()) if (gap) { sampled?.add(i - 1); sampled?.add(i); }
     for (const [index, item] of series.entries()) {
       const [yMin, yMax] = bounds(view.axes?.[item.axis]);
       const name = data.columns[item.y] + (rightAxis ? ` (${item.axis === "left" ? "왼쪽" : "오른쪽"} 축)` : ""), color = colors[index];
@@ -184,6 +188,7 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
           ties = candidates.filter(value => value === extreme).length;
         }
         const target = values[selected];
+        sampled?.add(selected);
         const text = `${annotation.label}: X=${numeric ? label(xs[selected], view.axes?.x) : names[selected]}, Y=${label(target)}`;
         const inside = xs[selected] >= xMin && xs[selected] <= xMax && target >= yMin && target <= yMax;
         if (inside) {
@@ -205,6 +210,13 @@ export function chartOption(report: Report, chart: ChartSpec): ChartRender {
       // A lone measurement between two gaps has no segment to draw, so it gets a visible point.
       if (isolated.length && !entry.showSymbol) option.series.push({ type: "scatter", data: isolated, yAxisIndex: entry.yAxisIndex, symbolSize: 5, itemStyle: { color }, isolated: index });
       legend.push(name);
+    }
+    if (sampled) {
+      for (const entry of option.series.filter(series => series.type === "line")) {
+        let row = 0;
+        entry.data = entry.data.filter(point => (point as [number, number | null])[1] === null || sampled.has(row++));
+      }
+      notes.push(`표시 샘플링: 전체 ${data.rows.length.toLocaleString("en-US")}점 중 ${sampled.size.toLocaleString("en-US")}점 (강조점·구간 경계 유지, 계산은 전체 데이터)`);
     }
     if (chart.type === "scatter" && chart.trendline) {
       const ys = data.rows.map(row => Number(row.cells[chart.y]));
