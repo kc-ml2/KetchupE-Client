@@ -15,7 +15,7 @@ import type { Report } from "../electron/excel/contracts.ts";
 app.on("window-all-closed", () => undefined);
 
 async function main() {
-  const [outputArg, ...files] = process.argv.slice(2);
+  const [outputArg, ...files] = process.argv.filter(arg => arg !== "--no-sandbox").slice(2);
   assert(outputArg, "Expected output directory, optionally followed by SVG paths");
   const output = resolve(outputArg), profile = await mkdtemp(join(tmpdir(), "excel-render-smoke-"));
   app.setPath("userData", profile);
