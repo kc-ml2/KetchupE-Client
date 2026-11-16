@@ -30,6 +30,11 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
+      - name: Verify PNG rasterization without a display server
+        run: npx vitest run electron/excel/pdf.test.ts
+        env:
+          DISPLAY: ""
+          WAYLAND_DISPLAY: ""
       - run: npx esbuild scripts/excel-render-smoke.ts --bundle --platform=node --packages=external --format=cjs --outfile=outputs/excel-render-smoke.cjs
       - name: Render large charts on Linux
         if: runner.os == 'Linux'
