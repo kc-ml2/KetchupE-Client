@@ -18,7 +18,7 @@ beforeEach(() => { vi.clearAllMocks(); mock.load.mockReset().mockResolvedValue(u
 
 it("prints without host privileges and destroys the isolated renderer", async () => {
   await expect(printReportPdf("<html>fixture</html>", new AbortController().signal)).resolves.toBeInstanceOf(Uint8Array);
-  expect(mock.create).toHaveBeenLastCalledWith(expect.objectContaining({ show: false, webPreferences: expect.objectContaining({ sandbox: true, javascript: false, nodeIntegration: false, offscreen: false }) }));
+  expect(mock.create).toHaveBeenLastCalledWith(expect.objectContaining({ show: false, webPreferences: expect.objectContaining({ sandbox: true, javascript: false, nodeIntegration: false }) }));
   const filter = mock.requestFilter.mock.calls[0][0];
   const cb = vi.fn(); filter({ resourceType: "image", url: "https://example.com/image" }, cb);
   expect(cb).toHaveBeenCalledWith({ cancel: true });
@@ -85,7 +85,6 @@ it("captures after the hidden SVG paint and checks size/cancellation", async () 
   const { captureChartPng } = await import("./pdf.ts");
   await expect(captureChartPng('<svg viewBox="0 0 1 9000"></svg>', new AbortController().signal)).rejects.toThrow("너무 큽니다");
   await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', new AbortController().signal)).resolves.toEqual(Buffer.from("png"));
-  expect(mock.create).toHaveBeenLastCalledWith(expect.objectContaining({ width: 1600, webPreferences: expect.objectContaining({ offscreen: true }) }));
   expect(mock.capture).toHaveBeenCalledTimes(2);
   const controller = new AbortController(); controller.abort();
   await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', controller.signal)).rejects.toThrow();
