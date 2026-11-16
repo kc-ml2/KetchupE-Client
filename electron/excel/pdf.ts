@@ -31,7 +31,8 @@ async function renderReportPage(html: string, signal: AbortSignal, size?: { widt
     const file = join(directory, "report.html"), url = pathToFileURL(file).href;
     await writeFile(file, html, { mode: 0o600 });
     deadline.throwIfAborted();
-    const renderer = window = new BrowserWindow({ show: false, ...(size ?? {}), useContentSize: true, webPreferences: { partition: `excel-print-${randomUUID()}`, sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false, backgroundThrottling: false } });
+    // PNG dimensions must not be clamped to the desktop's available screen size.
+    const renderer = window = new BrowserWindow({ show: false, ...(size ?? {}), useContentSize: true, webPreferences: { partition: `excel-print-${randomUUID()}`, sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: false, backgroundThrottling: false, offscreen: Boolean(size) } });
     const session = renderer.webContents.session;
     session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     session.setPermissionCheckHandler(() => false);
