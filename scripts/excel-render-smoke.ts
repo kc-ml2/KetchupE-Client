@@ -54,10 +54,11 @@ async function main() {
       const start = performance.now();
       console.log(`Rendering PNG: ${name}`);
       const png = await captureChartPng(svg, signal), pngMs = Math.round(performance.now() - start);
-      console.log(`PNG captured: ${name}, ${pngMs}ms`);
+      console.log(`PNG rendered: ${name}, ${pngMs}ms`);
       const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-      // Native window bounds and display scaling vary across desktops; verify rendered content below.
-      assert(info.width > 0 && info.height > 0);
+      const viewBox = svg.match(/viewBox="0 0 (\d+) (\d+)"/)!;
+      assert.equal(info.width, 1600);
+      assert.equal(info.height, Math.ceil(1600 * Number(viewBox[2]) / Number(viewBox[1])));
       let blue = 0, red = 0;
       for (let i = 0; i < data.length; i += info.channels) {
         const [r, g, b] = data.subarray(i, i + 3);
