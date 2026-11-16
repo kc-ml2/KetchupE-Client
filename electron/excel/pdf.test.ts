@@ -12,7 +12,8 @@ vi.mock("electron", () => ({ BrowserWindow: class {
   destroy = () => { this.destroyed = true; mock.destroy(); };
   constructor(options: unknown) { mock.create(options); }
 } }));
-import { printReportPdf } from "./pdf.ts";
+import sharp from "sharp";
+import { captureChartPng, printReportPdf } from "./pdf.ts";
 
 beforeEach(() => { vi.clearAllMocks(); mock.load.mockReset().mockResolvedValue(undefined); });
 
@@ -81,11 +82,51 @@ it("rejects pre-cancelled printing without creating a window", async () => {
   expect(mock.create).toHaveBeenCalledTimes(count);
 });
 
-it("captures after the hidden SVG paint and checks size/cancellation", async () => {
-  const { captureChartPng } = await import("./pdf.ts");
+const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500"><rect x="240" y="125" width="480" height="250" fill="#ff0000"/></svg>';
+
+it("rasterizes PNG at exact size with colors and white background without creating a window", async () => {
+  const png = await captureChartPng(svg, new AbortController().signal);
+  const { data, info } = await sharp(png).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  expect([info.width, info.height]).toEqual([1600, 834]);
+  expect([...data.subarray(0, 3)]).toEqual([255, 255, 255]);
+  const center = (417 * info.width + 800) * info.channels;
+  expect([...data.subarray(center, center + 3)]).toEqual([255, 0, 0]);
+  expect(mock.create).not.toHaveBeenCalled();
+  expect(mock.capture).not.toHaveBeenCalled();
+});
+
+it("rejects invalid or oversized SVG dimensions and malformed SVG", async () => {
+  for (const box of ["", 'viewBox="0 0 0 500"', 'viewBox="0 0 960 0"']) {
+    await expect(captureChartPng(`<svg ${box}></svg>`, new AbortController().signal)).rejects.toThrow("크기");
+  }
   await expect(captureChartPng('<svg viewBox="0 0 1 9000"></svg>', new AbortController().signal)).rejects.toThrow("너무 큽니다");
-  await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', new AbortController().signal)).resolves.toEqual(Buffer.from("png"));
-  expect(mock.capture).toHaveBeenCalledTimes(2);
+  await expect(captureChartPng('<svg viewBox="0 0 960 500">', new AbortController().signal)).rejects.toThrow();
+  expect(mock.create).not.toHaveBeenCalled();
+});
+
+it("rejects cancelled PNG rendering before and during conversion", async () => {
   const controller = new AbortController(); controller.abort();
-  await expect(captureChartPng('<svg viewBox="0 0 960 500"></svg>', controller.signal)).rejects.toThrow();
+  await expect(captureChartPng(svg, controller.signal)).rejects.toThrow();
+  const active = new AbortController();
+  const pending = captureChartPng(svg, active.signal);
+  active.abort();
+  await expect(pending).rejects.toThrow("중단");
+  expect(mock.create).not.toHaveBeenCalled();
+});
+
+it("bounds PNG rendering time even while native work is queued", async () => {
+  vi.useFakeTimers();
+  const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  });
+  const buffer = vi.spyOn(sharp.prototype, "toBuffer").mockImplementation(() => new Promise(() => undefined));
+  try {
+    const pending = expect(captureChartPng(svg, new AbortController().signal)).rejects.toThrow("60초");
+    await vi.advanceTimersByTimeAsync(60000);
+    await pending;
+  } finally {
+    buffer.mockRestore(); timeout.mockRestore(); vi.useRealTimers();
+  }
 });
