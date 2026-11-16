@@ -1,0 +1,45 @@
+name: Excel render regression
+
+on:
+  pull_request:
+    paths:
+      - "electron/excel/**"
+      - "scripts/excel-render-smoke.ts"
+      - "package*.json"
+      - ".github/workflows/excel-render-smoke.yml"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx esbuild scripts/excel-render-smoke.ts --bundle --platform=node --packages=external --format=cjs --outfile=outputs/excel-render-smoke.cjs
+      - name: Render large charts on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx electron --no-sandbox outputs/excel-render-smoke.cjs outputs/render-regression
+      - name: Render large charts on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npx electron outputs/excel-render-smoke.cjs outputs/render-regression
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: excel-render-${{ matrix.os }}
+          path: outputs/render-regression/
+          if-no-files-found: ignore
