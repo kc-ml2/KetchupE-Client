@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 const mock = vi.hoisted(() => ({ fork: vi.fn() }));
 vi.mock("electron", () => ({ utilityProcess: { fork: mock.fork } }));
 import { executeExcelJob } from "./workerClient.ts";
+import type { ExcelJob } from "./workerClient.ts";
 const job = { kind: "profile" as const, bytes: new Uint8Array([1]) };
 const child = () => {
   const process = Object.assign(new EventEmitter(), { kill: vi.fn(), postMessage: vi.fn() });
@@ -18,14 +19,41 @@ it("passes only job data to the worker and terminates on completion", async () =
   process.emit("message", { ok: true, result: { sheets: [] } });
   await expect(pending).resolves.toEqual({ sheets: [] }); expect(process.kill).toHaveBeenCalledOnce();
 });
-it("terminates cancelled and timed-out workers without accepting late results", async () => {
+it("terminates cancelled workers without accepting late results", async () => {
   const process = child(), controller = new AbortController();
   const pending = executeExcelJob("worker", job, controller.signal);
   controller.abort(); process.emit("message", { ok: true, result: { sheets: [] } });
   await expect(pending).rejects.toThrow("중단"); expect(process.kill).toHaveBeenCalledOnce();
+});
+it.each(["profile", "analyze"] as const)("allows %s parsing beyond 30 seconds and accepts its result", async (kind) => {
+  vi.useFakeTimers();
+  const process = child();
+  const input = { ...job, kind } as ExcelJob;
+  const pending = executeExcelJob("worker", input, new AbortController().signal);
+  process.emit("spawn");
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(process.postMessage).toHaveBeenCalledWith(input);
+  expect(process.kill).not.toHaveBeenCalled();
+  process.emit("message", { ok: true, result: { sheets: [] } });
+  await expect(pending).resolves.toEqual({ sheets: [] });
+});
+it("still terminates slow parsing when the caller deadline aborts", async () => {
+  vi.useFakeTimers();
+  const process = child(), controller = new AbortController();
+  const pending = executeExcelJob("worker", job, controller.signal);
+  process.emit("spawn");
+  await vi.advanceTimersByTimeAsync(60000);
+  controller.abort();
+  process.emit("message", { ok: true, result: { sheets: [] } });
+  await expect(pending).rejects.toThrow("중단");
+  expect(process.kill).toHaveBeenCalledOnce();
+});
+it("retains the export timeout", async () => {
   vi.useFakeTimers(); const other = child();
-  const timed = executeExcelJob("worker", job, new AbortController().signal);
-  const assertion = expect(timed).rejects.toThrow("30초");
+  const timed = executeExcelJob("worker", { kind: "export" } as ExcelJob, new AbortController().signal);
+  const assertion = expect(timed).rejects.toThrow("60초");
+  await vi.advanceTimersByTimeAsync(30000);
+  expect(other.kill).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(30000); await assertion;
   expect(other.kill).toHaveBeenCalledOnce();
 });

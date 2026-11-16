@@ -38,7 +38,10 @@ export function createExcelWorker(workerPath: string) {
         // A job error leaves the worker healthy; keep it and its cache for the next turn.
         else finish(new ExcelError(reply.code ?? "CONTRACT", reply.error), undefined, true);
       };
-      const timer = setTimeout(() => finish(new Error("엑셀 작업이 30초를 초과했습니다. 데이터 범위를 줄여 주세요.")), L.workerMs);
+      // Workbook parsing can exceed 30 seconds; profile/analyze use the submission deadline and cancellation.
+      const timer = job.kind === "export"
+        ? setTimeout(() => finish(new Error("엑셀 파일 출력이 60초를 초과했습니다. 데이터 범위를 줄여 주세요.")), L.workerMs)
+        : undefined;
       signal.addEventListener("abort", abort, { once: true });
       process.on("exit", exit);
       process.on("message", message);

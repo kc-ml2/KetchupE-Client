@@ -121,6 +121,48 @@ it("uses numeric spacing and breaks a line across missing source rows", async ()
   expect(evidenceText(report, [1, 2, 4, 5])).toContain("2-3, 5-6행");
 });
 
+it("resumes an approved 1,500-point display sample without losing full-data peaks, axes or evidence", async () => {
+  const { input, deps, tool } = await setup(10850);
+  vi.mocked(deps.complete).mockResolvedValueOnce(JSON.stringify({ kind: "ask", reason: "criteria", question: "약 1,500점으로 표시할까요?" }));
+  const asked = await tool.execute(input);
+  if (asked.status !== "needs_input") throw new Error("not waiting");
+  vi.mocked(deps.complete).mockResolvedValue(JSON.stringify({ ...chart, view: { charts: { "0": {
+    samplePoints: 1500, axes: { x: { min: 0, max: 1000, tickStep: 200 }, left: { min: 0, max: 100, tickStep: 20 }, right: { min: 0, max: 10, tickStep: 2 } },
+    annotations: [{ series: 1, kind: "max", label: "최대" }, { series: 0, kind: "valueAt", x: 800, label: "잔량" }],
+  } } } }));
+  const result = await tool.execute({ ...input, checkpoint: asked.checkpoint!, values: { ...input.values, answer1: "2번, 약 1,500점으로 표시" }, changedKeys: ["answer1"] });
+  if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const report = vi.mocked(deps.export).mock.calls[0][0], data = report.result.datasets![0];
+  expect(data.rows).toHaveLength(10850);
+  expect(new Set(data.rows.flatMap(row => row.sourceRows)).size).toBe(10850);
+  expect(report.result.excluded).toEqual([]);
+  const display = drawn(report);
+  expect(display.axes.x).toMatchObject({ type: "value", min: 0, max: 1000 });
+  expect(display.ticks("x").customValues).toEqual([0, 200, 400, 600, 800, 1000]);
+  expect(display.ticks("left").customValues).toEqual([0, 20, 40, 60, 80, 100]);
+  expect(display.lines[0].data.length).toBeGreaterThanOrEqual(1500);
+  expect(display.lines[0].data.length).toBeLessThanOrEqual(1502);
+  const nearest = data.rows.reduce((a, b) => Math.abs(Number(a.cells[0]) - 800) <= Math.abs(Number(b.cells[0]) - 800) ? a : b);
+  expect(display.lines[0].markPoint).toMatchObject({ data: [{ coord: nearest.cells.slice(0, 2) }] });
+  expect(display.lines[1].markPoint).toMatchObject({ data: [{ coord: [data.rows[3].cells[0], 9] }] });
+  expect(display.lines[0].data).toContainEqual(nearest.cells.slice(0, 2));
+  expect(display.lines[1].data).toContainEqual([data.rows[3].cells[0], 9]);
+  expect(display.notes.join(" ")).toContain("계산은 전체 데이터");
+  expect(result.checkpoint).toHaveProperty("excelState.view.charts.0.samplePoints", 1500);
+}, 30000);
+
+it("repairs a generated categorical X axis instead of rejecting a numeric-axis request", async () => {
+  const { input, deps, tool } = await setup();
+  const wrong = compileChart(chart);
+  wrong.code = wrong.code.replace('"xScale":"linear"', '"xScale":"category"');
+  const view = { charts: { "0": { axes: { x: { min: 0, max: 1000, tickStep: 200 } } } } };
+  vi.mocked(deps.complete).mockResolvedValueOnce(JSON.stringify({ ...wrong, view })).mockResolvedValue(JSON.stringify({ ...chart, view }));
+  expect(await tool.execute(input)).toMatchObject({ status: "completed" });
+  expect(deps.complete).toHaveBeenCalledTimes(2);
+  expect(JSON.parse(vi.mocked(deps.complete).mock.calls[1][1]).failure).toContain('xScale:"linear"');
+  expect(drawn(vi.mocked(deps.export).mock.calls[0][0]).axes.x.type).toBe("value");
+});
+
 it("shows isolated measurements instead of leaving a single-point line invisible", async () => {
   const { input, deps, tool } = await setup(1);
   await tool.execute(input);

@@ -23,3 +23,5 @@
 # Do Not Section
 
 - Do not commit directly to the branch.
+- Do not edit files, commit, or push directly on `main`.
+- Before making changes, check the current branch. Use `dev` by default; if on `main`, switch to `dev` while preserving local changes before editing.

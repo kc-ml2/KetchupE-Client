@@ -14,6 +14,7 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
       else if (patch[key] !== undefined) chart[key] = patch[key];
     }
     if (patch.labels === null) delete chart.labels; else if (patch.labels !== undefined) chart.labels = patch.labels;
+    if (patch.samplePoints === null) delete chart.samplePoints; else if (patch.samplePoints !== undefined) chart.samplePoints = patch.samplePoints;
     if (patch.colors === null) delete chart.colors; else if (patch.colors !== undefined) chart.colors = patch.colors;
     if (patch.grid === null) delete chart.grid; else if (patch.grid !== undefined) chart.grid = patch.grid;
     // Reference lines have no identity to merge on, so a patch states the whole list; [] or null removes them.
@@ -59,6 +60,7 @@ export function validateView(report: Report) {
     if (!numericX(chart) && settings.axes?.x && Object.keys(settings.axes.x).some(key => key !== "label")) throw new ExcelError("UNSUPPORTED", "숫자형 X축에서만 범위·눈금·로그 스케일을 수정할 수 있습니다.");
     for (const axis of Object.values(settings.axes ?? {})) if (axis?.scale === "log" && axis.tickStep !== undefined) throw new ExcelError("UNSUPPORTED", "로그 축의 눈금은 간격 대신 tickValues로 지정해 주세요.");
     if (settings.labels && (chartTable(report, chart)?.rows.length ?? 0) > 500) throw new ExcelError("UNSUPPORTED", "값 라벨은 500점 이하 차트에서 지원합니다.");
+    if (settings.samplePoints !== undefined && !["line", "area"].includes(chart.type)) throw new ExcelError("UNSUPPORTED", "표시 샘플링은 선·영역 그래프에서 지원합니다.");
     if ((settings.grid || settings.referenceLines) && !cartesian) throw new ExcelError("UNSUPPORTED", "원형 차트와 히트맵은 그리드·보조선을 지원하지 않습니다.");
     for (const line of settings.referenceLines ?? []) {
       if (line.axis === "x" && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "세로 보조선은 숫자형 X축에서 지원합니다.");
@@ -84,6 +86,7 @@ export function viewSummary(before: ReportView | undefined, after: ReportView): 
     if (chart.grid !== old.grid) changes.push(`${prefix} 그리드: ${chart.grid === "none" ? "숨김" : chart.grid === "dashed" ? "점선" : chart.grid === "solid" ? "실선" : "기본값"}`);
     if (JSON.stringify(chart.referenceLines) !== JSON.stringify(old.referenceLines)) changes.push(`${prefix} 보조선: ${chart.referenceLines?.map(line => `${line.axis === "x" ? "X" : line.axis === "left" ? "왼쪽 Y" : "오른쪽 Y"}=${line.value}`).join(", ") ?? "없음"}`);
     if (chart.labels !== old.labels) changes.push(`${prefix} 값 라벨: ${chart.labels ? "표시" : "숨김"}`);
+    if (chart.samplePoints !== old.samplePoints) changes.push(`${prefix} 표시 샘플링: ${chart.samplePoints ? `약 ${chart.samplePoints}점 (강조점·구간 경계 추가 유지)` : "전체 측정점"}`);
     if (JSON.stringify(chart.colors) !== JSON.stringify(old.colors)) changes.push(`${prefix} 색상: ${chart.colors?.join(", ") ?? "기본값"}`);
   }
   return changes;
