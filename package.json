@@ -7,6 +7,7 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
+    "dev:observe": "vite-node scripts/dev-observe.ts",
     "dev:electron": "vite",
     "build": "tsc -b && vite build",
     "build:electron": "tsc -b && vite build && electron-builder",
@@ -21,7 +22,7 @@
     "smoke:litellm": "vite-node scripts/litellm-smoke.ts",
     "probe:maru": "vite-node scripts/maru-probe.ts",
     "probe:trolley": "vite-node scripts/trolley-probe.ts",
-    "telemetry:gateway": "vite-node scripts/telemetry-gateway.ts"
+    "telemetry:gateway": "vite-node scripts/start-telemetry-gateway.ts"
   },
   "build": {
     "appId": "com.kcml2.ketchupe",
