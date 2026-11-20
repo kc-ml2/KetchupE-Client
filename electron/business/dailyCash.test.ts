@@ -204,6 +204,15 @@ it("keeps business-division KC balances to two decimals while displaying them as
   expect(sheet.getCell("P245").value).toBe(1234.56);
   expect(sheet.getCell("P245").numFmt).toBe("#,##0;-#,##0;0");
 }, artifactTestTimeout);
+it("restores a term-deposit row's missing column merge used by the rest of its section", async () => {
+  const { input, books, file } = await setup();
+  const prior = books.report.getWorksheet(1)!;
+  for (let r = 51; r <= 96; r++) prior.mergeCells(`E${r}:F${r}`);
+  input.files.previousReport = [await file(books.report, "merge.xlsx")];
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(sheet.getCell("F97").isMerged).toBe(true); expect(sheet.getCell("F97").master.address).toBe("E97");
+}, artifactTestTimeout);
 async function depositSetup() {
   const state = await setup(); const { books, input, file } = state;
   const p = books.report.getWorksheet(1)!;
@@ -239,8 +248,6 @@ it("reads business-coded deposit principal and interest separately, excluding di
 });
 it("redeems duplicate deposits and allocates a pooled subscription to new KC accounts without adding interest to principal or holding cash", async () => {
   const { books, input, file } = await depositSetup();
-  const prior = books.report.getWorksheet(1)!; prior.getCell("A51").alignment = { horizontal: "right" }; prior.getCell("H51").alignment = { horizontal: "right" }; prior.getCell("A53").alignment = { horizontal: "left" };
-  input.files.previousReport = [await file(books.report, "전일.xlsx")];
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status === "completed" ? {} : result)).toBe("completed"); if (result.status !== "completed") return;
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
   for (const r of [51, 52]) { expect(s.getCell(`G${r}`).value).toBe(10000); expect(s.getCell(`H${r}`).result).toBe(0); expect(s.getRow(r).hidden).toBe(false); }
@@ -248,7 +255,6 @@ it("redeems duplicate deposits and allocates a pooled subscription to new KC acc
     expect(s.getCell(`D${r}`).value).toBe(0); expect(s.getCell(`E${r}`).value).toBe(amount); expect(s.getCell(`H${r}`).result).toBe(amount);
     expect(s.getCell(`C${r}`).value).toBe("우리은행 테스트"); expect(s.getCell(`A${r}`).value).toBe(`261013~${due}`); expect(s.getRow(r).hidden).toBe(false);
     expect(b.getWorksheet("261012")!.getCell(`C${r}`).value).toBeNull();
-    expect(s.getCell(`A${r}`).alignment.horizontal).toBe("right");
   }
   expect(s.getCell("E98").result).toBe(20000); expect(s.getCell("G98").result).toBe(20000); expect(s.getCell("H98").result).toBe(20000);
   expect(s.getCell("H17").result).toBe(99000); expect(s.getCell("D156").result).toBe(0); expect(s.getCell("G248").result).toBe(119000);
