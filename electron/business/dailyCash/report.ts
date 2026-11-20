@@ -259,6 +259,20 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   s.model = { ...model, id, name };
   // ExcelJS 4.4 serializes `merges` but its model setter reads `mergeCells`.
   for (const range of model.merges) s.mergeCellsWithoutStyle(range);
+  // 일부 원본 행은 같은 구역 다른 행의 열 병합(예: 증가 E:F)이 빠져 있어 숫자가 좁은 셀 안에서 정렬된다. 구역 과반이 쓰는 병합을 빈 셀에만 보완한다.
+  for (const section of [l.krwTermRows, l.fxTermRows, l.trustRows]) {
+    const spans = new Map<string, number>();
+    for (const merge of model.merges as string[]) { const m = merge.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/); if (m && m[2] === m[4] && section.includes(Number(m[2]))) spans.set(`${m[1]}:${m[3]}`, (spans.get(`${m[1]}:${m[3]}`) ?? 0) + 1); }
+    for (const [span, count] of spans) {
+      if (count * 2 <= section.length) continue;
+      const [from, to] = span.split(":").map((c) => s.getColumn(c).number);
+      for (const r of section) {
+        const cells = range(from, to).map((c) => s.getCell(r, c));
+        if (cells.some((cell) => cell.isMerged) || cells.slice(1).some((cell) => raw(cell) != null && raw(cell) !== "")) continue;
+        s.mergeCellsWithoutStyle(r, from, r, to);
+      }
+    }
+  }
   // The model setter skips merged child cells, whose styles carry the outside edges.
   previous.eachRow({ includeEmpty: true }, (row) => row.eachCell({ includeEmpty: true }, (cell) => { s.getCell(cell.address).style = structuredClone(cell.style); }));
   const calculated = (address: string, expression: string, value: Amount) => formula(s, address, previous.getCell(address).formula || expression, value.round());
@@ -293,10 +307,6 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
       s.getCell(`A${row}`).value = `${sheetDate(account.start!)}~${sheetDate(account.maturity!)}`;
       s.getCell(`C${row}`).value = account.bank;
       s.getRow(row).hidden = false;
-      // 빈 슬롯 행은 양식 서식이 다를 수 있으므로 같은 구역의 기존 예금 행 서식을 따른다.
-      const section = l.krwTermRows.includes(row) ? l.krwTermRows : l.fxTermRows;
-      const reference = l.activeTerms.find((r) => section.includes(r));
-      if (reference) s.getRow(reference).eachCell({ includeEmpty: true }, (cell) => { s.getCell(row, Number(cell.col)).style = structuredClone(cell.style); });
     }
     const flow = changes[account.key] ?? account;
     numeric(s.getCell(`E${row}`), flow.incoming); numeric(s.getCell(`G${row}`), flow.outgoing);
