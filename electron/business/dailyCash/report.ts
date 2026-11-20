@@ -284,13 +284,19 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   s.getRow(l.businessRows[0] - 1).hidden = false;
   for (const row of l.businessRows) { numeric(s.getCell(`P${row}`), 0); s.getRow(row).hidden = false; }
   for (const account of accounts) {
-    const target = bindings.get(account.key)!; const row = Number(target.slice(1)); numeric(s.getCell(target), account.balance);
+    const target = bindings.get(account.key)!; const row = Number(target.slice(1));
+    // 사업부문(P열)은 원본 일보처럼 소수 둘째 자리까지 값을 유지하고 표시만 정수로 한다.
+    if (target[0] === "P") s.getCell(target).value = account.exactBalance.toNumber(); else numeric(s.getCell(target), account.balance);
     s.getCell(target).note = `출처: 자금현황표/${account.source}; 계좌키 ${account.key}; 계좌잔고(O열)`;
     if (target[0] !== "H") continue;
     if (l.termRows.includes(row) && !l.activeTerms.includes(row)) {
       s.getCell(`A${row}`).value = `${sheetDate(account.start!)}~${sheetDate(account.maturity!)}`;
       s.getCell(`C${row}`).value = account.bank;
       s.getRow(row).hidden = false;
+      // 빈 슬롯 행은 양식 서식이 다를 수 있으므로 같은 구역의 기존 예금 행 서식을 따른다.
+      const section = l.krwTermRows.includes(row) ? l.krwTermRows : l.fxTermRows;
+      const reference = l.activeTerms.find((r) => section.includes(r));
+      if (reference) s.getRow(reference).eachCell({ includeEmpty: true }, (cell) => { s.getCell(row, Number(cell.col)).style = structuredClone(cell.style); });
     }
     const flow = changes[account.key] ?? account;
     numeric(s.getCell(`E${row}`), flow.incoming); numeric(s.getCell(`G${row}`), flow.outgoing);
@@ -325,7 +331,7 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
       if (r === l.inSum || r === l.outSum) continue;
       const description = s.getCell(`${descCol}${r}`), adjacent = s.getCell(r, Number(description.col) + 1);
       description.value = null; if (!adjacent.isMerged) adjacent.value = null;
-      const amount = s.getCell(`${amountCol}${r}`); numeric(amount, 0); if (amount.note) amount.note = "";
+      const amount = s.getCell(`${amountCol}${r}`); amount.value = null; if (amount.note) amount.note = "";
       for (const cell of [description, adjacent, amount]) {
         cell.font = { name: "맑은 고딕", size: 11, color: { argb: "FF000000" } };
         cell.alignment = { ...cell.alignment, vertical: "middle", wrapText: false, shrinkToFit: false };
@@ -350,8 +356,8 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
   for (const col of ["D", "H"]) calculated(`${col}${l.closing}`, `${col}${l.opening}+${col}${l.inSum}-${col}${l.outSum}`, money(s.getCell(`${col}${l.opening}`)).plus(money(s.getCell(`${col}${l.inSum}`))).minus(money(s.getCell(`${col}${l.outSum}`))));
   if (!money(s.getCell(`D${l.closing}`)).eq(money(s.getCell("H17")))) throw new Error("주요 집행내역의 마감잔액과 단기성 원화 금일금액이 다릅니다.");
   const bValues = accounts.filter((a) => bindings.get(a.key)?.startsWith("P"));
-  const businessKrw = sum(bValues.filter((a) => a.currency === "KRW").map((a) => a.balance.round()));
-  const businessFx = sum(bValues.filter((a) => a.currency !== "KRW").map((a) => a.balance.round().mul(rates.perUnit[a.currency as keyof Rates["perUnit"]]))).round();
+  const businessKrw = sum(bValues.filter((a) => a.currency === "KRW").map((a) => a.exactBalance));
+  const businessFx = sum(bValues.filter((a) => a.currency !== "KRW").map((a) => a.exactBalance.mul(rates.perUnit[a.currency as keyof Rates["perUnit"]]))).round();
   const holdingFx = sum(cashRows.filter((r) => currencyAt(r, l) !== "KRW").map((r) => money(s.getCell(`L${r}`))));
   const termFx = sum(l.fxTermRows.map((r) => money(s.getCell(`L${r}`))));
   const totals = [[holdingFx, money(s.getCell("H17"))], [businessFx, businessKrw], [termFx, money(s.getCell(`H${l.krwTermSum}`))]];
@@ -385,7 +391,7 @@ export function buildReport(book: ExcelJS.Workbook, previous: ExcelJS.Worksheet,
     const value = raw(cell);
     if (typeof value !== "number") return;
     const rate = [10, 11].includes(Number(cell.col)) && [...cashRows, ...l.fxTermRows].includes(row.number) && currencyAt(row.number, l) !== "KRW";
-    if (!rate && !cell.formula) numeric(cell, value);
+    if (!rate && !cell.formula && !l.businessRows.includes(row.number)) numeric(cell, value);
     cell.numFmt = rate ? "#,##0.########" : "#,##0;-#,##0;0";
     cell.alignment = { ...cell.alignment, horizontal: "right", wrapText: false };
   }));
