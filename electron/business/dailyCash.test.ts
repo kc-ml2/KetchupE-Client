@@ -193,6 +193,17 @@ it("extracts both directions of holding cash, ignores other categories and total
   const parsed = readWeekly(weekly, "wrong-filename-date.xlsx"); expect(parsed.movements.map((m) => m.amount.toString())).toEqual(["10000", "1000", "2000"]);
   s.getCell("C7").value = "사업현금"; expect(readWeekly(weekly, "weekly").movements).toHaveLength(2);
 });
+it("keeps business-division KC balances to two decimals while displaying them as integers", async () => {
+  const { input, books, file } = await setup();
+  const status = books.status.getWorksheet(1)!;
+  status.addRow([4, "하나은행 테스트", "33889000081904", "보통예금하나", "33889000081904", "KRW", 1000.25, 1000.25, 234.311, 234.311, 0, 0, 1234.561, 1234.561, 1234.561, 0, "보통예금"]);
+  for (const c of ["N", "O"]) status.getCell(`${c}4`).value = 110234.561;
+  input.files.cashStatus = [await file(books.status, "261013_KC.xlsx")];
+  const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
+  const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
+  expect(sheet.getCell("P245").value).toBe(1234.56);
+  expect(sheet.getCell("P245").numFmt).toBe("#,##0;-#,##0;0");
+}, artifactTestTimeout);
 async function depositSetup() {
   const state = await setup(); const { books, input, file } = state;
   const p = books.report.getWorksheet(1)!;
@@ -228,6 +239,8 @@ it("reads business-coded deposit principal and interest separately, excluding di
 });
 it("redeems duplicate deposits and allocates a pooled subscription to new KC accounts without adding interest to principal or holding cash", async () => {
   const { books, input, file } = await depositSetup();
+  const prior = books.report.getWorksheet(1)!; prior.getCell("A51").alignment = { horizontal: "right" }; prior.getCell("H51").alignment = { horizontal: "right" }; prior.getCell("A53").alignment = { horizontal: "left" };
+  input.files.previousReport = [await file(books.report, "전일.xlsx")];
   const result = await confirm(input); expect(result.status, JSON.stringify(result.status === "completed" ? {} : result)).toBe("completed"); if (result.status !== "completed") return;
   const b = new ExcelJS.Workbook(); await b.xlsx.load(Buffer.from(result.file.bytes) as unknown as ExcelJS.Buffer); const s = b.getWorksheet("261013")!;
   for (const r of [51, 52]) { expect(s.getCell(`G${r}`).value).toBe(10000); expect(s.getCell(`H${r}`).result).toBe(0); expect(s.getRow(r).hidden).toBe(false); }
@@ -235,6 +248,7 @@ it("redeems duplicate deposits and allocates a pooled subscription to new KC acc
     expect(s.getCell(`D${r}`).value).toBe(0); expect(s.getCell(`E${r}`).value).toBe(amount); expect(s.getCell(`H${r}`).result).toBe(amount);
     expect(s.getCell(`C${r}`).value).toBe("우리은행 테스트"); expect(s.getCell(`A${r}`).value).toBe(`261013~${due}`); expect(s.getRow(r).hidden).toBe(false);
     expect(b.getWorksheet("261012")!.getCell(`C${r}`).value).toBeNull();
+    expect(s.getCell(`A${r}`).alignment.horizontal).toBe("right");
   }
   expect(s.getCell("E98").result).toBe(20000); expect(s.getCell("G98").result).toBe(20000); expect(s.getCell("H98").result).toBe(20000);
   expect(s.getCell("H17").result).toBe(99000); expect(s.getCell("D156").result).toBe(0); expect(s.getCell("G248").result).toBe(119000);
@@ -386,7 +400,7 @@ it("preserves styles and row heights outside the execution-entry formatting chan
       else expect(target.font, cell.address).toEqual(cell.font);
       expect(target.border, cell.address).toEqual(cell.border);
       expect(target.fill, cell.address).toEqual(cell.fill);
-      if (typeof raw(target) !== "number" && !(row.number > 130 && row.number < 237 && [2, 3, 6, 7].includes(Number(cell.col)))) expect(target.alignment, cell.address).toEqual(cell.alignment);
+      if (typeof raw(target) !== "number" && !(row.number > 130 && row.number < 237 && [2, 3, 4, 6, 7, 8].includes(Number(cell.col)))) expect(target.alignment, cell.address).toEqual(cell.alignment);
     });
   });
   for (let row = 253; row <= 255; row++) for (let col = 17; col <= 19; col++) {
@@ -519,7 +533,7 @@ it("keeps template SUMs, cash flow links, FX links and bottom totals as formulas
   expect(sheet.getCell("M19").value).toContain("최초 고시");
 }, artifactTestTimeout);
 
-it("writes integer, right-aligned amounts with visible zeroes and single-line descriptions", async () => {
+it("writes integer, right-aligned amounts, blank empty execution rows and single-line descriptions", async () => {
   const { books, input, file } = await setup();
   const original = books.report.getWorksheet(1)!;
   original.getCell("H9").value = "-";
@@ -531,12 +545,12 @@ it("writes integer, right-aligned amounts with visible zeroes and single-line de
   input.values.planEdits = JSON.stringify({ changes: [{ index: 1, amount: "2000.99", description: "설비 대금\n잔금 지급", party: "테스트\r\n상사" }] });
   const result = await confirm(input); if (result.status !== "completed") throw new Error(JSON.stringify(result));
   const sheet = (await (await SelectiveWorkbook.open(result.file.bytes)).loadSheet("261013")).getWorksheet("261013")!;
-  for (const address of ["D9", "D10", "E10", "H10", "D132", "H157", "G248"]) {
+  for (const address of ["D9", "D10", "E10", "H10", "H157", "G248"]) {
     expect(Number.isInteger(raw(sheet.getCell(address))), address).toBe(true);
     expect(sheet.getCell(address).alignment.horizontal, address).toBe("right");
     expect(sheet.getCell(address).numFmt, address).toBe("#,##0;-#,##0;0");
   }
-  expect(sheet.getCell("D132").value).toBe(0);
+  expect(sheet.getCell("D132").value).toBeNull();
   expect(sheet.getCell("H157").value).toBe(2001);
   expect(sheet.getCell("F157").value).toBe("설비 대금 잔금 지급 / 테스트 상사");
   for (const address of ["B131", "D131", "F157", "H157"]) {

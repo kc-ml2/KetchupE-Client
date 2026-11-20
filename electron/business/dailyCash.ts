@@ -200,12 +200,14 @@ export const dailyCashTool: BusinessTool = {
         "확정하려면 **확인하고 계속**을 누르세요. 표를 수정하면 새 확인 코드로 다시 확인합니다.",
       ].join("\n\n"), [{ key: "review", label: `최종 확인 코드 ${review}`, confirm: `확인 ${review}` }, actualField(), movementField("planEdits", `${workDate} 계획`, planNext), ...(planDeposits.length || deposits.length || newDeposits.length ? [depositField()] : [])], checkpoint);
       const built = buildReport(book, candidate, reportDate, workDate, previous.values, kc.accounts, bindings, actual, nextPlan, rates, changes, await rolloverFormulas(archive, candidate));
-      if (!sameWon(built.totalKrw, kc.total)) throw new Error(`총 원화 대사 불일치: 일보 ${built.totalKrw}, KC ${kc.total}, 차이 ${built.totalKrw.minus(kc.total)}. 결과를 발행하지 않습니다.`);
+      // 사업부문 P열은 소수 금액을 유지하므로 총 원화 대사 기준도 해당 계좌의 반올림 차이만큼 조정한다.
+      const expectedTotal = kc.total.plus(sum(kc.accounts.filter((a) => a.currency === "KRW" && bindings.get(a.key)?.startsWith("P")).map((a) => a.exactBalance.minus(a.balance))));
+      if (!sameWon(built.totalKrw, expectedTotal)) throw new Error(`총 원화 대사 불일치: 일보 ${built.totalKrw}, KC ${kc.total}, 차이 ${built.totalKrw.minus(kc.total)}. 결과를 발행하지 않습니다.`);
       signal.throwIfAborted();
       const prepared = await archive.appendSheet(book, built.sheet.name);
       const { bytes, image, sheet: calculated, engine, fallbackReason } = await renderSheet(prepared, built.sheet.name, built.rolloverChecks, signal);
       const calculatedLayout = layout(calculated);
-      if (!sameWon(money(calculated.getCell(`G${calculatedLayout.total}`)), kc.total) || !money(calculated.getCell(`D${calculatedLayout.closing}`)).eq(money(calculated.getCell("H17")))) throw new Error(`${engine} 재계산 후 총 원화 또는 주요 집행 마감잔액이 일치하지 않습니다.`);
+      if (!sameWon(money(calculated.getCell(`G${calculatedLayout.total}`)), expectedTotal) || !money(calculated.getCell(`D${calculatedLayout.closing}`)).eq(money(calculated.getCell("H17")))) throw new Error(`${engine} 재계산 후 총 원화 또는 주요 집행 마감잔액이 일치하지 않습니다.`);
       for (const account of kc.accounts) {
         const target = bindings.get(account.key)!;
         if (!sameWon(money(calculated.getCell(target)), account.balance)) throw new Error(`${account.key}: ${engine} 재계산 후 계좌 잔고가 일치하지 않습니다.`);
