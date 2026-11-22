@@ -91,6 +91,27 @@ it("allows opted-in request/file revisions but rejects changed bytes at a retain
   expect((getRunAction(db, runId) as BusinessAction).question).toContain("원천 파일 내용이 변경");
 });
 
+it("fills an editable tool's fields from chat replies and composer attachments instead of the input card", async () => {
+  tool.editable = true;
+  tool.fields = [{ key: "source", type: "file", label: "원천", required: true, multiple: true }, { key: "request", type: "text", label: "요청", required: true }, { key: "revision", type: "text", label: "수정", required: false }];
+  vi.mocked(tool.execute).mockResolvedValueOnce({ status: "needs_input", replaceFields: true, question: "형식을 골라 주세요.", fields: [{ key: "exportFormat", type: "select", label: "형식", required: true, options: [{ value: "pdf", label: "PDF" }, { value: "html", label: "HTML 대시보드" }] }] });
+  const { runId } = flow.workflows()[0].start({ threadId, workspaceId: "default", text: "테스트 업무" });
+  const action = () => getRunAction(db, runId) as BusinessAction;
+  expect(action()).toMatchObject({ conversational: true, input: { values: {} } });
+  await flow.workflows()[0].resume!(runId, "금액 합계를 내줘").done;
+  expect(tool.execute).not.toHaveBeenCalled();
+  expect(action().question).toContain("📎");
+  await flow.workflows()[0].resume!(runId, "", input.files.source).done;
+  expect(vi.mocked(tool.execute).mock.calls[0][0].values.request).toBe("금액 합계를 내줘");
+  expect(action().question).toBe("형식을 골라 주세요.");
+  await flow.workflows()[0].resume!(runId, "아무거나").done;
+  expect(action().question).toContain("PDF, HTML 대시보드");
+  await flow.workflows()[0].resume!(runId, "HTML 대시보드").done;
+  expect(vi.mocked(tool.execute).mock.calls[1][0].values.exportFormat).toBe("html");
+  expect(getRun(db, runId).status).toBe("completed");
+  expect(loadThread(db, threadId).messages.filter(message => message.role === "user").map(message => message.content)).toEqual(["테스트 업무", "금액 합계를 내줘", "첨부: source.xlsx", "아무거나", "HTML 대시보드"]);
+});
+
 it("validates every output before publishing any of a multi-file result", async () => {
   const good = success();
   if (good.status !== "completed") throw new Error("not completed");

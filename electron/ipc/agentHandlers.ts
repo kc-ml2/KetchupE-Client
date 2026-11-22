@@ -3,6 +3,7 @@ import { ipcMain, shell } from "electron";
 import type { InteractionKind, MemoryInput, StartRunInput } from "../../src/app-types/Agent.types.ts";
 import type { AnchorChoiceResumeContent, CanvasEditOp, StartCanvasInput } from "../../src/app-types/CanvasEdit.types.ts";
 import type { AgentRuntime } from "../agent/runtime.ts";
+import { businessInputSchema } from "../business/contracts.ts";
 import { addMemory, confirmMemory, deleteMemory, listMemories, setMemoryPinned, updateMemory } from "../agent/memory.ts";
 import { getRunAction, createThread, deleteThread, findOpenRun, getWorkspace, listThreads, loadThread, recordInteraction, renameThread, setMemoryEnabled, DEFAULT_WORKSPACE_ID } from "../agent/store.ts";
 
@@ -48,8 +49,8 @@ export function registerAgentHandlers(runtime: AgentRuntime, handle: typeof ipcM
   });
 
   handle("agent:startRun", (_event, input: StartRunInput) => runtime.startMessage(input));
-  handle("agent:resumeRun", (_event, runId: string, text: string) => {
-    runtime.resumeRun(runId, text);
+  handle("agent:resumeRun", (_event, runId: string, text: string, files: unknown) => {
+    runtime.resumeRun(runId, text, files === undefined ? undefined : businessInputSchema.shape.files.valueType.parse(files));
   });
   handle("agent:cancelRun", (_event, runId: string) => {
     return runtime.cancelRun(runId);

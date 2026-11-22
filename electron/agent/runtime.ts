@@ -35,6 +35,7 @@ import { ANSWER_PROMPT_VERSION, assignVariant, POLICY_VARIANTS } from "./policy.
 import { accountModelSettings, loadTelemetrySettings, type ModelSettings } from "./settings.ts";
 import { interactionScore, LangfuseExporter, loadInstallId } from "./telemetry.ts";
 import type { InteractionKind } from "../../src/app-types/Agent.types.ts";
+import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { excludedMaruStorages, ensureWorkspace, inactiveCollections, getRunAction } from "./store.ts";
 import { MaruClient } from "./maru.ts";
 import { MaruAccess } from "./maruAccess.ts";
@@ -53,7 +54,7 @@ export type AgentRuntime = {
   businessFlow: BusinessFlow;
   /** Routes new messages to registered workflows; replies resume their persisted owner. */
   startMessage: (input: StartRunInput) => Promise<StartRunResult>;
-  resumeRun: (runId: string, text: string) => void;
+  resumeRun: (runId: string, text: string, files?: WorkFile[]) => void;
   cancelRun: (runId: string) => Promise<void>;
   harness: Harness;
   collections: () => Collection[];
@@ -240,7 +241,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     })),
     ...businessFlow.workflows().map((workflow) => ({ ...workflow,
       // Preserve resumability for input requests created before the business-tool runner shipped.
-      resume: (id: string, text: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.resume(id, text) : workflow.resume!(id, text),
+      resume: (id: string, text: string, files?: WorkFile[]) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.resume(id, text) : workflow.resume!(id, text, files),
       cancel: (id: string) => getRunAction(db, id)?.type === "work_sources" ? workSourcesFlow.cancel(id) : workflow.cancel(id),
     })),
   ],
@@ -283,7 +284,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
     businessFlow,
     harness,
     startMessage: async (input) => harness.start(input),
-    resumeRun: (runId, text) => { harness.resume(runId, text); },
+    resumeRun: (runId, text, files) => { harness.resume(runId, text, files); },
     cancelRun: (runId) => harness.cancel(runId),
     collections: () => collections,
     refreshCollections,

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentStreamEvent, StartRunInput, StartRunResult } from "../../src/app-types/Agent.types.ts";
+import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { AgentError } from "./contracts.ts";
 import { selectRoutingContext } from "./context.ts";
 import { routeMessage, type RoutingContext, type WorkflowRoute } from "./router.ts";
@@ -76,15 +77,15 @@ export class Harness {
     return { runId, kind: "routing", status: "running" };
   }
 
-  resume(runId: string, text: string): void {
+  resume(runId: string, text: string, files?: WorkFile[]): void {
     this.assertAvailable(runId);
     const run = getRun(this.options.db, runId);
     if (run.status !== "waiting_user") throw new AgentError("INTERNAL", "사용자 응답을 기다리는 작업이 아닙니다.");
     const workflow = this.owner(run.kind);
     if (!workflow.resume) throw new AgentError("INTERNAL", "이 작업은 전용 화면에서 이어서 진행하세요.");
-    if (!text.trim()) throw new AgentError("INTERNAL", "응답 내용을 입력하세요.");
+    if (!text.trim() && !files?.length) throw new AgentError("INTERNAL", "응답 내용을 입력하세요.");
     const controller = new AbortController();
-    const handle = workflow.resume(runId, text);
+    const handle = files?.length ? workflow.resume(runId, text, files) : workflow.resume(runId, text);
     this.controls.set(runId, controller);
     this.track(runId, controller, async () => {
       try { await handle.done; }

@@ -9,8 +9,12 @@ import { FaStopCircle } from "react-icons/fa";
 import {
   LuBrain,
   LuCirclePause,
+  LuFile,
   LuFileText,
+  LuPaperclip,
+  LuX,
 } from "react-icons/lu";
+import type { WorkFile } from "@app-types/WorkSource.types";
 import Navigation from "@Features/Sidebar/components/Navigation";
 import WorkflowLauncher from "@Features/Agent/components/WorkflowLauncher";
 import type { AppTab } from "@app-types/Navigation.types";
@@ -66,6 +70,8 @@ const AgentPage = (): React.JSX.Element => {
   const memoriesState = useMemories(api, WORKSPACE_ID);
   const [tab, setTab] = useState<AppTab>("home");
   const [input, setInput] = useState("");
+  // Files attached in the composer for a conversational business tool (excel_work); sent with the next reply.
+  const [attachments, setAttachments] = useState<WorkFile[]>([]);
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   // Business results open in their own right-hand panel; closing it leaves a reopen button above the input.
   const [resultsHidden, setResultsHidden] = useState(false);
@@ -122,6 +128,9 @@ const AgentPage = (): React.JSX.Element => {
     canvas.phase,
   ]);
 
+  const conversational = view.action?.type === "business_tool" && view.action.conversational === true && view.waitingQuestion !== null;
+  useEffect(() => { if (!conversational) setAttachments([]); }, [conversational]);
+
   if (!api) {
     return (
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -135,6 +144,23 @@ const AgentPage = (): React.JSX.Element => {
 
   const canvasActive = Boolean(canvas.runId);
   const busy = starting || stopping || switching || view.isRunning || canvas.isBusy;
+  const attachFiles = async () => {
+    if (view.action?.type !== "business_tool") return;
+    try {
+      const picked = await api.pickWorkFiles(true, view.action.uploadOnly);
+      setAttachments((current) => [...current, ...picked].filter((file, index, list) => list.findIndex((item) => item.sourceId === file.sourceId && item.relativePath === file.relativePath) === index));
+      inputRef.current?.focus();
+    } catch (cause) {
+      setStartError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  /** Quick-reply chips on the business card answer exactly like typing the label in the composer. */
+  const reply = async (text: string) => {
+    if (busy || view.waitingQuestion === null) return;
+    const files = attachments;
+    setAttachments([]);
+    await resume(text, files);
+  };
   const agentPending = view.isRunning || view.waitingQuestion !== null;
   const canvasPending = canvas.isBusy || canvas.interrupt !== null;
   const activeRunId = agentPending
@@ -179,7 +205,7 @@ const AgentPage = (): React.JSX.Element => {
   const continueWorkflow = () => {
     if (view.action?.type === "work_sources") setDismissedActionId(null);
     else if (
-      view.action?.type === "business_tool" ||
+      (view.action?.type === "business_tool" && !conversational) ||
       canvas.interrupt?.type === "awaiting_anchor_choice"
     ) {
       promptRef.current?.scrollIntoView({
@@ -207,7 +233,7 @@ const AgentPage = (): React.JSX.Element => {
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     const text = input.trim();
-    if (!text || busy) return;
+    if ((!text && !(conversational && attachments.length)) || busy) return;
     if (canvasActive && canvas.interrupt?.type === "awaiting_edit") {
       setInput("");
       await canvasRun.sendFeedback(text);
@@ -217,7 +243,8 @@ const AgentPage = (): React.JSX.Element => {
       return;
     if (view.waitingQuestion !== null) {
       setInput("");
-      await resume(text);
+      if (conversational) await reply(text);
+      else await resume(text);
       return;
     }
     setInput("");
@@ -281,6 +308,10 @@ const AgentPage = (): React.JSX.Element => {
       return "선택한 블록 아래에 추가할 내용을 입력하세요";
     if (canvas.interrupt?.type === "awaiting_edit")
       return "문서 전체에 대한 수정 의견을 입력하세요 (재작성)";
+    if (conversational && view.action?.type === "business_tool" && !view.action.input.files.source?.length)
+      return "원하는 작업을 적고 📎로 엑셀 파일을 첨부하세요";
+    if (conversational)
+      return "답변이나 수정할 내용을 입력하세요";
     if (view.action?.type === "business_tool" && (view.action.revisionMode || view.action.fields.some((field) => field.key === "revisionAnswer")))
       return "수정할 내용이나 질문을 입력하세요 (위 카드에 입력해도 같습니다)";
     if (view.waitingQuestion !== null)
@@ -451,6 +482,8 @@ const AgentPage = (): React.JSX.Element => {
                       api={api}
                       runId={view.runId}
                       action={view.action}
+                      onReply={(text) => void reply(text)}
+                      replyDisabled={busy}
                     />
                   </div>
                 )}
@@ -580,15 +613,36 @@ const AgentPage = (): React.JSX.Element => {
                     <button type="button" onClick={() => setChangingWorkflow(false)} className="rounded px-3 py-2 text-sm text-[#71717A]">닫기</button>
                   </form>
                 )}
+                {conversational && attachments.length > 0 && (
+                  <ul aria-label="첨부한 파일" className="mb-2 flex min-w-0 flex-wrap gap-2">
+                    {attachments.map((file) => (
+                      <li key={`${file.sourceId}:${file.relativePath}`} className="flex max-w-full items-center gap-2 rounded-xl border border-[#E4E4E7] bg-white py-1 pl-3 pr-1 text-xs dark:border-[#3F3F46] dark:bg-[#27272A] dark:text-[#FAFAFA]">
+                        <LuFile aria-hidden className="h-4 w-4 shrink-0 text-[#71717A]" />
+                        <span title={file.relativePath || file.name} className="min-w-0 truncate">{file.relativePath || file.name}</span>
+                        <button type="button" aria-label={`${file.name} 첨부 빼기`} onClick={() => setAttachments((current) => current.filter((item) => item !== file))} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[#71717A] hover:bg-[#F4F4F5] dark:hover:bg-[#3F3F46]">
+                          <LuX aria-hidden className="h-3.5 w-3.5" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <form
                   onSubmit={submit}
                   className="flex items-end gap-2 p-2 rounded-xl border border-[#E4E4E7] dark:border-[#27272A]"
                 >
+                  {conversational && (
+                    <button type="button" onClick={() => void attachFiles()} disabled={busy} title="엑셀 파일 첨부" aria-label="엑셀 파일 첨부" className="p-2 text-[#52525B] hover:text-[#18181B] disabled:opacity-40 dark:text-[#A1A1AA] dark:hover:text-[#FAFAFA]">
+                      <LuPaperclip className="w-5 h-5" />
+                    </button>
+                  )}
                   <textarea
                     ref={inputRef}
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
                     onKeyDown={(event) => {
+                      // 한글 등 IME 조합 중 Enter는 조합 확정용이므로 전송하지 않는다.
+                      // 여기서 전송하면 입력창을 비운 뒤 조합 중이던 마지막 글자가 다시 들어간다.
+                      if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
                         void submit(event);
@@ -612,7 +666,7 @@ const AgentPage = (): React.JSX.Element => {
                   ) : (
                     <button
                       type="submit"
-                      disabled={!input.trim()}
+                      disabled={!input.trim() && !(conversational && attachments.length)}
                       className="p-2 text-[#0066FF] disabled:opacity-40"
                       title="보내기"
                     >

@@ -42,7 +42,32 @@ const withDefaults = (action: BusinessAction): BusinessInput => ({
  * Inline chat card for one `business_tool` question. The question itself is already an assistant message,
  * so the card shows only the fields still open for this step; confirmed inputs collapse into a summary.
  */
-export default function BusinessToolCard({ api, runId, action }: { api: KetchupEAgentAPI; runId: string; action: BusinessAction }) {
+/**
+ * Conversational tools take answers from the chat composer, so the card shrinks to context the chat bubble lacks:
+ * the files in use and one-click quick replies for any suggested options. A chip sends its label as the user's reply.
+ */
+function ConversationalPrompt({ action, onReply, disabled }: { action: BusinessAction; onReply?: (text: string) => void; disabled?: boolean }) {
+  const locked = new Set(action.lockedKeys ?? []);
+  const files = action.input.files.source ?? [];
+  const choices = action.fields.filter(field => !locked.has(field.key) && (field.type === "select" || field.type === "text") && field.options?.length && !["format"].includes(field.key)).flatMap(field => field.options ?? []);
+  if (!files.length && !choices.length) return null;
+  return <div className="flex items-start gap-3 w-full mt-3 mb-3">
+    <span aria-hidden className="w-7 shrink-0" />
+    <div className="flex-1 min-w-0 grid gap-3 text-sm">
+      {choices.length > 0 && <div role="group" aria-label={`${action.title} 빠른 답변`} className="flex flex-wrap gap-2">
+        {choices.map(option => <button key={option.value} type="button" disabled={disabled || !onReply} onClick={() => onReply?.(option.label)} className={fileButton}>{option.label}</button>)}
+      </div>}
+      {files.length > 0 && <p className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-[#71717A] dark:text-[#A1A1AA]"><LuFile aria-hidden className="h-3.5 w-3.5 shrink-0" />작업 파일: <span className="min-w-0 break-words">{files.map(file => file.relativePath || file.name).join(", ")}</span></p>}
+    </div>
+  </div>;
+}
+
+export default function BusinessToolCard(props: { api: KetchupEAgentAPI; runId: string; action: BusinessAction; onReply?: (text: string) => void; replyDisabled?: boolean }) {
+  if (props.action.conversational) return <ConversationalPrompt action={props.action} onReply={props.onReply} disabled={props.replyDisabled} />;
+  return <BusinessInputForm {...props} />;
+}
+
+function BusinessInputForm({ api, runId, action }: { api: KetchupEAgentAPI; runId: string; action: BusinessAction }) {
   const [input, setInput] = useState<BusinessInput>(() => withDefaults(action));
   const [files, setFiles] = useState<WorkFile[]>([]);
   const [busy, setBusy] = useState(false);
