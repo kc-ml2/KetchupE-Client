@@ -589,6 +589,9 @@ const AgentPage = (): React.JSX.Element => {
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
                     onKeyDown={(event) => {
+                      // 한글 등 IME 조합 중 Enter는 조합 확정용이므로 전송하지 않는다.
+                      // 여기서 전송하면 입력창을 비운 뒤 조합 중이던 마지막 글자가 다시 들어간다.
+                      if (event.nativeEvent.isComposing || event.keyCode === 229) return;
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
                         void submit(event);

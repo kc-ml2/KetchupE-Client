@@ -238,7 +238,7 @@ const BlockEditor = ({
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Escape") onCancel();
-        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
           event.preventDefault();
           handleSave();
         }
