@@ -1,6 +1,7 @@
 import { agentErrorMessage } from "@lib/agentErrorMessage";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RunStatus, RunAction, AgentStreamEvent, AppliedContext, CitationSummary, KetchupEAgentAPI } from "@app-types/Agent.types";
+import type { WorkFile } from "@app-types/WorkSource.types";
 
 export type RunView = {
   runId: string | null;
@@ -127,11 +128,11 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
   );
 
   const resume = useCallback(
-    async (text: string) => {
+    async (text: string, files?: WorkFile[]) => {
       if (!api || !view.runId || view.waitingQuestion === null) return false;
       bind(view.runId);
       setView({ ...initial, runId: view.runId, isRunning: true, phase: "deciding" });
-      try { await api.resumeRun(view.runId, text); }
+      try { await (files?.length ? api.resumeRun(view.runId, text, files) : api.resumeRun(view.runId, text)); }
       catch (cause) { setView({ ...view, error: String(cause) }); return false; }
       return true;
     },

@@ -1,5 +1,6 @@
 import type { StartRunInput } from "../../src/app-types/Agent.types.ts";
 import type { StartCanvasInput } from "../../src/app-types/CanvasEdit.types.ts";
+import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import type { WorkflowRoute } from "./router.ts";
 import type { RunHandle } from "./runLifecycle.ts";
 
@@ -10,7 +11,8 @@ export type WorkflowHandle = RunHandle;
 export type AgentWorkflow = WorkflowRoute & {
   kind: string;
   start: (input: WorkflowStartInput) => WorkflowHandle;
-  resume?: (runId: string, text: string) => WorkflowHandle;
+  /** `files` are chat attachments; executors that cannot use them ignore them. */
+  resume?: (runId: string, text: string, files?: WorkFile[]) => WorkflowHandle;
   cancel: (runId: string) => void | Promise<void>;
 };
 

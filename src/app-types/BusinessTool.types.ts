@@ -21,6 +21,8 @@ export type BusinessAction = {
   /** Files come only from the file picker and are not remembered as connected sources. */
   uploadOnly?: boolean;
   revisionMode?: boolean;
+  /** The tool takes its answers from the chat composer (text + attached files); the card only shows quick replies and the current files. */
+  conversational?: boolean;
 };
 export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string; revision?: number; preview?: boolean; baseArtifactId?: string; changes?: string[] };
 export interface BusinessToolAPI {

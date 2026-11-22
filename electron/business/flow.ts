@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentStreamEvent } from "../../src/app-types/Agent.types.ts";
 import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
+import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { REVISE_REQUEST_TEXT } from "../../src/app-types/BusinessTool.types.ts";
 import { appendMessage, getRun, getRunAction, setRunStatus } from "../agent/store.ts";
 import { TraceWriter } from "../agent/trace.ts";
@@ -17,6 +18,16 @@ type Job = { toolId: string; version: string; input: BusinessInput; fingerprints
 const emptyInput = (): BusinessInput => ({ values: {}, files: {} });
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fieldKey = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+const sameFile = (a: WorkFile, b: WorkFile) => a.sourceId === b.sourceId && a.relativePath === b.relativePath;
+/** The chat bubble for a conversational reply: what the user typed plus the names of files they attached. */
+const describeReply = (text: string, files: WorkFile[]) => [text.trim(), files.length ? `첨부: ${files.map(file => file.name).join(", ")}` : ""].filter(Boolean).join("\n");
+/** A quick-reply chip sends the option label; typed text may also name the value. */
+const matchOption = (field: BusinessField, text: string) => {
+  const wanted = text.trim().toLowerCase();
+  return field.options?.find(option => option.value.toLowerCase() === wanted || option.label.toLowerCase() === wanted)?.value;
+};
+export const ASK_FILES = "이 작업에 사용할 엑셀 파일을 입력창의 📎 버튼으로 첨부해 주세요. 여러 파일을 함께 붙여도 됩니다.";
+export const ASK_REQUEST = "어떤 작업을 할까요? 원하는 결과를 편하게 적어 주세요. 예: 실험일별 인장강도를 정리해 HTML로 만들어줘";
 
 export class BusinessFlow {
   private readonly tools = new Map<string, BusinessTool>();
@@ -36,7 +47,7 @@ export class BusinessFlow {
 
   workflows(): AgentWorkflow[] {
     return [...this.tools.values()].map((tool) => ({ ...tool, kind: tool.id,
-      start: (input) => this.start(tool, input), resume: (id, text) => this.resume(id, text), cancel: async (id) => { this.cancel(id); await this.drain(id); },
+      start: (input) => this.start(tool, input), resume: (id, text, files) => this.resume(id, text, files), cancel: async (id) => { this.cancel(id); await this.drain(id); },
     }));
   }
 
@@ -54,43 +65,72 @@ export class BusinessFlow {
         fingerprints = job.fingerprints; baseArtifactId = String(previous.id);
         initial = { files: job.input.files, values: { request: job.input.values.request, format: job.input.values.format ?? "", revision: input.text === REVISE_REQUEST_TEXT ? "" : input.text } };
         checkpoint = job.checkpoint ? { excelState: job.checkpoint.excelState, clarifications: job.checkpoint.clarifications } : undefined;
-      } else initial.values.request = input.text;
+      // A launcher button sends its own label ("엑셀 작업하기"); that is not a request, so the chat asks for one.
+      } else if (!tool.title.startsWith(input.text.trim())) initial.values.request = input.text;
     }
     if (tool.defaults) initial.values = { ...initial.values, ...tool.defaults(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) };
     this.save(runId, { toolId: tool.id, version: tool.version, input: initial, fingerprints, fields: tool.fields, checkpoint, baseArtifactId });
     if (tool.unavailableReason) { this.finish(runId, tool.unavailableReason, "abstained"); return { runId, done: Promise.resolve() }; }
-    this.ask(runId, baseArtifactId ? "선택한 결과의 기준을 유지합니다. 바꾸고 싶은 내용을 입력해 주세요." : tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
+    this.ask(runId, baseArtifactId ? "선택한 결과의 기준을 유지합니다. 바꾸고 싶은 내용을 입력해 주세요." : tool.editable && initial.values.request ? ASK_FILES : tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
     if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial, input.text) };
     return { runId, done: Promise.resolve() };
   }
 
-  private resume(runId: string, text: string) {
+  private resume(runId: string, text: string, files: WorkFile[] = []) {
     const job = this.job(runId);
     if (getRun(this.db, runId).status !== "waiting_user") throw new Error("입력 대기 중인 작업이 아닙니다.");
-    if (/^(취소|중단|그만|cancel|stop)[.!\s]*$/i.test(text.trim())) this.cancel(runId);
-    else if (this.tools.get(job.toolId)?.editable && job.input.files.source?.length) {
-      const input = structuredClone(job.input);
-      const pending = job.fields.find(field => job.pendingKeys?.includes(field.key) && field.type === "text");
-      if (pending) input.values[pending.key] = text;
-      else input.values.revision = [input.values.revision, text].filter(Boolean).join("\n");
-      return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, input, text) };
-    } else {
+    if (!files.length && /^(취소|중단|그만|cancel|stop)[.!\s]*$/i.test(text.trim())) this.cancel(runId);
+    else if (this.tools.get(job.toolId)?.editable) return { runId, done: this.converse(runId, job, text, files) };
+    else {
       appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: text });
       this.ask(runId, "입력 화면에서 확인 내용을 작성해 주세요. 확인되지 않은 대화 내용을 계산 입력으로 사용하지 않습니다.");
     }
     return { runId, done: Promise.resolve() };
   }
 
-  submit(runId: string, actionId: string, raw: unknown, userText?: string): Promise<void> {
+  /**
+   * Conversational input for editable tools: the chat reply (and any attached files) fills the same fields the input card used to,
+   * so the tool contract and validation stay unchanged. Attachments add to the source files; text fills, in order, the missing
+   * request, extra detail before the first run, the pending question, or a revision of the finished result.
+   */
+  private converse(runId: string, job: Job, text: string, files: WorkFile[]): Promise<void> {
+    const input = structuredClone(job.input);
+    const hadSource = Boolean(input.files.source?.length);
+    if (files.length) input.files.source = [...(input.files.source ?? []), ...files].filter((file, index, list) => list.findIndex(item => sameFile(item, file)) === index);
+    const reply = text.trim();
+    const pending = job.fields.find(field => job.pendingKeys?.includes(field.key) && (field.type === "text" || field.type === "select"));
+    const display = describeReply(text, files);
+    const wait = (question: string) => {
+      job.input = input; this.save(runId, job);
+      appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: display });
+      this.ask(runId, question);
+      return Promise.resolve();
+    };
+    if (reply) {
+      if (!input.values.request?.trim()) input.values.request = reply;
+      else if (!hadSource) input.values.request = `${input.values.request}\n${reply}`.slice(0, 4000);
+      else if (pending?.type === "select") {
+        const value = matchOption(pending, reply);
+        if (!value) return wait(`다음 중에서 골라 주세요: ${pending.options?.map(option => option.label).join(", ")}`);
+        input.values[pending.key] = value;
+      } else if (pending) input.values[pending.key] = reply;
+      else input.values.revision = [input.values.revision, reply].filter(Boolean).join("\n").slice(-4000);
+    }
+    if (!input.values.request?.trim()) return wait(ASK_REQUEST);
+    if (!input.files.source?.length) return wait(ASK_FILES);
+    return this.submit(runId, getRunAction(this.db, runId)!.id, input, reply || undefined, display);
+  }
+
+  submit(runId: string, actionId: string, raw: unknown, userText?: string, display?: string): Promise<void> {
     if (this.submissions.has(runId)) return Promise.reject(new Error("이미 처리 중인 입력 요청입니다."));
-    const task = this.executeSubmission(runId, actionId, raw, userText);
+    const task = this.executeSubmission(runId, actionId, raw, userText, display);
     this.pending.add(task);
     this.submissions.set(runId, task);
     void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
     return task;
   }
 
-  private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string): Promise<void> {
+  private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string, display?: string): Promise<void> {
     const job = this.job(runId);
     const tool = this.tools.get(job.toolId);
     if (!tool || tool.version !== job.version) throw new Error("업무 버전이 변경되었습니다. 현재 작업을 중단하고 새로 요청해 주세요.");
@@ -116,7 +156,7 @@ export class BusinessFlow {
     const controller = new AbortController();
     this.active.set(runId, controller);
     const timeout = setTimeout(() => controller.abort(new Error("업무 실행 시간이 초과되었습니다.")), tool.executionTimeoutMs ?? this.timeoutMs);
-    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: this.describeInput(job, input) });
+    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: display ?? this.describeInput(job, input) });
     setRunStatus(this.db, runId, "running");
     if (tool.editable) this.db.prepare("DELETE FROM run_actions WHERE run_id=?").run(runId);
     this.event(runId, "status", { phase: "원천 자료 확인 및 업무 실행 중", messagesChanged: true });
@@ -294,7 +334,7 @@ export class BusinessFlow {
   }
   private ask(runId: string, question: string) {
     const job = this.job(runId);
-    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly, revisionMode: Boolean(job.baseArtifactId) };
+    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly, revisionMode: Boolean(job.baseArtifactId), conversational: this.tools.get(job.toolId)?.editable };
     this.db.prepare("INSERT INTO run_actions (run_id, action) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET action = excluded.action").run(runId, JSON.stringify(action));
     setRunStatus(this.db, runId, "waiting_user");
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: question });
@@ -311,7 +351,7 @@ export class BusinessFlow {
       this.ask(runId, `처리 중 내부 오류가 발생했습니다 (${code}). 입력한 답변은 보관되어 있습니다. 같은 요청으로 다시 시도하거나 추가 지시를 보낼 수 있습니다.`);
       return;
     }
-    this.ask(runId, `${message}\n\n${this.tools.get(this.job(runId).toolId)?.editable ? "요청이나 파일 선택을 수정하거나 채팅으로 추가 지시를 보내 이어갈 수 있습니다." : "입력을 고친 뒤 다시 실행할 수 있습니다. 원천 파일이나 작업일을 바꿔야 하면 작업을 중단하고 새로 시작하세요."}`);
+    this.ask(runId, `${message}\n\n${this.tools.get(this.job(runId).toolId)?.editable ? "채팅으로 추가 지시를 보내거나 📎로 파일을 더 첨부해 이어갈 수 있습니다." : "입력을 고친 뒤 다시 실행할 수 있습니다. 원천 파일이나 작업일을 바꿔야 하면 작업을 중단하고 새로 시작하세요."}`);
   }
   private event(runId: string, type: AgentStreamEvent["type"], payload: unknown) {
     const traceType = type === "ask_user" ? "run.waiting_user" : type === "completed" ? "run.completed" : type === "failed" ? "run.failed" : "tool.started";

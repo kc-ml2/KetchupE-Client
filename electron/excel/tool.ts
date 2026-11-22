@@ -766,7 +766,7 @@ export function createExcelTool(deps: ExcelDependencies): BusinessTool {
       },
     ],
     initialQuestion:
-      "엑셀 파일을 하나 이상 선택하고 원하는 작업을 알려주세요. 여러 파일·시트를 함께 비교하거나 합칠 수 있습니다. 결과는 PDF·HTML·엑셀·PNG·PPTX로 만들 수 있습니다. 원본은 변경하지 않습니다.",
+      "어떤 엑셀로 무슨 작업을 할까요? 입력창의 📎 버튼으로 파일을 첨부하고 원하는 작업을 적어 주세요. 여러 파일·시트를 함께 비교하거나 합칠 수 있고, 결과는 PDF·HTML·엑셀·PNG·PPTX로 만들 수 있습니다. 원본은 변경하지 않습니다.",
     validateOutput: async (file) => {
       const bytes = Buffer.from(file.bytes);
       if (

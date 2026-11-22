@@ -367,3 +367,15 @@ it("shows one place to type while a follow-up question is pending and says the c
   expect(screen.getAllByRole("textbox")).toHaveLength(1);
   expect(screen.getByText(/아래 메시지 입력창에 입력해도/)).toBeInTheDocument();
 });
+
+it("shows a conversational tool's options as quick replies and its files, without a form", () => {
+  const onReply = vi.fn();
+  render(<BusinessToolCard api={apiFixture()} runId="run" onReply={onReply} action={{ ...action, title: "엑셀 작업하기", conversational: true,
+    fields: [{ key: "source", label: "엑셀", type: "file", required: true, multiple: true }, { key: "answer1", label: "확인 내용", type: "text", required: true, options: [{ value: "sum", label: "합계 기준" }, { value: "avg", label: "평균 기준" }] }],
+    input: { values: { request: "정리해줘" }, files: { source: [file] } } }} />);
+  expect(screen.queryByRole("form")).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+  expect(screen.getByText(/작업 파일/)).toHaveTextContent("source.xlsx");
+  fireEvent.click(screen.getByRole("button", { name: "평균 기준" }));
+  expect(onReply).toHaveBeenCalledWith("평균 기준");
+});

@@ -31,7 +31,7 @@ function agentAPI(sessionId) {
   openRun: (threadId) => invoke('agent:openRun', threadId),
 
   startRun: (input) => invoke('agent:startRun', input),
-  resumeRun: (runId, text) => invoke('agent:resumeRun', runId, text),
+  resumeRun: (runId, text, files) => invoke('agent:resumeRun', runId, text, files),
   cancelRun: (runId) => invoke('agent:cancelRun', runId),
   switchWorkflow: (runId, text, mode) => invoke('agent:switchWorkflow', runId, text, mode),
   onAgentEvent: (listener) => {

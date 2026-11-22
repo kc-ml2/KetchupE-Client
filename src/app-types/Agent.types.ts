@@ -1,7 +1,7 @@
 import type { BusinessAction, BusinessToolAPI } from "./BusinessTool.types";
 // Renderer-facing IPC contract. Type-only; shared with electron/ via `import type`.
 import type { ContractCanvas } from "./Canvas.types";
-import type { WorkSourceAPI } from "./WorkSource.types";
+import type { WorkFile, WorkSourceAPI } from "./WorkSource.types";
 import type { AnchorChoiceResumeContent, CanvasEditOp, CanvasInterrupt, StartCanvasInput } from "./CanvasEdit.types";
 
 export type ThreadSummary = {
@@ -121,7 +121,8 @@ export interface KetchupEAgentAPI extends WorkSourceAPI, BusinessToolAPI {
   openRun(threadId: string): Promise<{ runId: string; status: RunStatus; kind: RunKind; action?: RunAction } | null>;
 
   startRun(input: StartRunInput): Promise<StartRunResult>;
-  resumeRun(runId: string, text: string): Promise<void>;
+  /** `files` are composer attachments; only conversational business tools (excel_work) accept them. */
+  resumeRun(runId: string, text: string, files?: WorkFile[]): Promise<void>;
   cancelRun(runId: string): Promise<void>;
   switchWorkflow(runId: string, text: string, mode?: string): Promise<void>;
   onAgentEvent(listener: (event: AgentStreamEvent) => void): () => void;
