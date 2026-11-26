@@ -47,6 +47,9 @@ const bins = z.union([z.number().int().min(2).max(100), z.object({ width: z.numb
  */
 export const chartRequest = analysisPlan.omit({ kind: true, code: true, inputs: true }).extend({
   kind: z.literal("chart"), input: sheetPlan,
+  // Several sheets (plotkit sheets + combine): "overlay" draws one series per sheet in one chart, "separate" one chart per sheet.
+  // resolveInputs expands sheet names (or "all") into full sheet plans from the input template.
+  sheets: z.array(sheetPlan).min(2).max(10).optional(), combine: z.enum(["overlay", "separate"]).optional(),
   x: axisColumn.extend({ period: z.enum(["day", "week", "month", "quarter", "year"]).optional(), bins: bins.optional() }).strict(),
   series: z.array(axisColumn.extend({ axis: z.enum(["left", "right"]), transform: z.enum(["identity", "loss100", "lossInitial"]).optional() }).strict()).max(4),
   chartType: z.enum(["line", "area", "scatter", "bar", "hbar", "pie", "histogram", "boxplot", "heatmap"]).optional(), smooth: z.boolean().optional(), stack: z.boolean().optional(),

@@ -14,7 +14,9 @@ const squash = (text: string) => text.normalize("NFKC").toLowerCase().replace(/[
  */
 export function resolveInputs(raw: unknown, profiles: Profiles): unknown {
   if (!raw || typeof raw !== "object") return raw;
-  const plan = structuredClone(raw) as Record<string, unknown> & { kind?: string; input?: Input; inputs?: Input[] };
+  const plan = structuredClone(raw) as Record<string, unknown> & { kind?: string; input?: Input; inputs?: Input[]; options?: { plan?: unknown }[] };
+  // A question's ready-made options are plans too; they are executed without another model call.
+  if (plan.kind === "ask" && Array.isArray(plan.options)) for (const option of plan.options) if (option && typeof option === "object" && option.plan) option.plan = resolveInputs(option.plan, profiles);
   const tableFor = (input: Input) => {
     const file = profiles.find(p => p.fileId === input.fileId) ?? (profiles.length === 1 ? profiles[0] : undefined);
     if (file && !input.fileId) input.fileId = file.fileId;
@@ -56,7 +58,35 @@ export function resolveInputs(raw: unknown, profiles: Profiles): unknown {
       axis.unit ??= unit ?? "";
       axis.label ??= name.replace(/\s*[（(][^()（）]*[）)]\s*$/, "") || name;
     }
+    // A single-axis chart often omits the side; it is the left axis.
+    for (const series of ((plan.series as unknown[]) ?? []) as Record<string, unknown>[]) if (series && typeof series === "object") series.axis ??= "left";
   }
+  if (plan.kind === "chart" && plan.input && plan.sheets !== undefined) expandSheets(plan as Record<string, unknown> & { input: Input }, profiles, fill);
   for (const input of plan.inputs ?? []) fill(input);
   return plan;
+}
+
+/**
+ * sheets: ["A", "B"] or "all" (every sheet with a detected table) → one full sheet plan per sheet, cloned from the input
+ * template. Columns are found again by header name in each sheet (row bounds too); the template's index is the fallback.
+ * One sheet is just the input; combine true/false is accepted for overlay/separate.
+ */
+function expandSheets(plan: Record<string, unknown> & { input: Input }, profiles: Profiles, fill: (input: Input) => void) {
+  const file = profiles.find(p => p.fileId === plan.input.fileId) ?? (profiles.length === 1 ? profiles[0] : undefined);
+  const raw = plan.sheets === "all" ? file?.sheets.filter(sheet => sheet.table).map(sheet => sheet.name) ?? [] : Array.isArray(plan.sheets) ? plan.sheets : [];
+  if (plan.combine === true) plan.combine = "overlay"; else if (plan.combine === false) plan.combine = "separate";
+  const sheets = raw.map(entry => {
+    const given: Input = typeof entry === "string" ? { sheet: entry } : entry && typeof entry === "object" ? entry as Input : {};
+    if (given.columns && given.headerRow !== undefined && given.fileId) return given;
+    const copy: Input = { ...structuredClone(plan.input), ...given };
+    if (copy.sheet !== plan.input.sheet && file?.sheets.find(sheet => sheet.name === copy.sheet)?.table) {
+      for (const key of ["headerRow", "headerStartRow", "firstDataRow", "lastDataRow"] as const) if (given[key] === undefined) delete copy[key];
+      copy.columns = (copy.columns ?? []).map(column => column.name ? { name: column.name, key: column.key ?? column.name } : column);
+      fill(copy);
+      copy.columns.forEach((column, i) => { column.index ??= plan.input.columns?.[i]?.index; });
+    }
+    return copy;
+  });
+  if (sheets.length === 1) { plan.input = sheets[0]; delete plan.sheets; delete plan.combine; }
+  else plan.sheets = sheets;
 }

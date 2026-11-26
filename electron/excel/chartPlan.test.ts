@@ -118,3 +118,76 @@ describe("tgaAnnotations", () => {
     expect(tgaAnnotations({ ...request(), x: { key: "r", label: "반응기", unit: "" } } as ChartRequest, chart, table(810))).toBeUndefined();
   });
 });
+
+describe("charts across several sheets", () => {
+  // Two TGA runs: temperature, weight, DTG; sheet B ends earlier and has one blank weight.
+  const tga: InputRow[] = [
+    ...[[100, 99, -0.1], [300, 80, -0.6], [500, 60, -0.2]].map(([t, w, d], i) => ({ id: i + 1, fileId: "file1", sheet: "A", row: i + 3, values: { t, w, d } })),
+    ...[[100, 98, -0.1], [300, null, -0.9]].map(([t, w, d], i) => ({ id: i + 4, fileId: "file1", sheet: "B", row: i + 3, values: { t, w, d } })),
+  ];
+  const cols = [{ index: 1, name: "Temp (C)", key: "t" }, { index: 2, name: "Weight (%)", key: "w" }, { index: 3, name: "DTG (%/C)", key: "d" }];
+  const sheet = (name: string) => ({ fileId: "file1", sheet: name, headerRow: 1, firstDataRow: 3, columns: cols });
+  const request = (extra: Partial<ChartRequest>) => ({
+    kind: "chart", title: "TGA", format: "html", steps: ["s"], assumptions: [], input: sheet("A"), sheets: [sheet("A"), sheet("B")],
+    x: { key: "t", label: "Temp", unit: "C" }, series: [{ key: "w", label: "Weight", unit: "%", axis: "left" }, { key: "d", label: "DTG", unit: "%/C", axis: "right" }], ...extra,
+  } as ChartRequest);
+  const go = async (extra: Partial<ChartRequest>, rows = tga) => {
+    const plan = compileChart(request(extra));
+    const analysis = await runAnalysis(plan.code, rows);
+    reportCharts({ result: analysis } as Report).forEach(chart => chartOption({ result: analysis, plan, rowSources: {}, sources: [], summary: "", createdAt: "" } as unknown as Report, chart));
+    return { plan, analysis };
+  };
+
+  it("overlays one series per (column, sheet) with sheet-local provenance", async () => {
+    const { plan, analysis } = await go({ combine: "overlay" });
+    expect(plan.inputs.map(i => i.sheet)).toEqual(["A", "B"]);
+    const data = analysis.datasets![0];
+    expect(data.columns).toEqual(["Temp (C)", "A · Weight (%)", "B · Weight (%)", "A · DTG (%/C)", "B · DTG (%/C)"]);
+    expect(data.rows.map(r => r.cells)).toEqual([[100, 99, null, -0.1, null], [300, 80, null, -0.6, null], [500, 60, null, -0.2, null], [100, null, 98, null, -0.1], [300, null, null, null, -0.9]]);
+    expect(data.rows.map(r => r.sourceRows)).toEqual([[1], [2], [3], [4], [5]]);
+    expect(analysis.charts![0].series!.map(s => s.axis)).toEqual(["left", "left", "right", "right"]);
+  });
+
+  it("draws one chart per sheet with combine separate", async () => {
+    const { analysis } = await go({ combine: "separate" });
+    expect(analysis.charts!.map(c => [c.title, c.table, c.dataset])).toEqual([["TGA — A", 0, true], ["TGA — B", 1, true]]);
+    expect(analysis.datasets!.map(d => d.rows.length)).toEqual([3, 2]);
+    expect(analysis.excluded).toEqual([]);
+  });
+
+  it("overlays an aggregate per sheet and rejects combinations it cannot draw", async () => {
+    const { analysis } = await go({ combine: "overlay", chartType: "bar", agg: "mean", series: [{ key: "w", label: "Weight", unit: "%", axis: "left" }] });
+    expect(analysis.tables[0].columns).toEqual(["Temp (C)", "A", "B"]);
+    expect(analysis.tables[0].rows.map(r => r.cells)).toEqual([[100, 99, 98], [300, 80, null], [500, 60, null]]);
+    expect(() => compileChart(request({ combine: "overlay", by: { key: "t" }, series: [request({}).series[0]] }))).toThrow(/by와 함께/);
+    const many = Array.from({ length: 7 }, (_, i) => sheet(`S${i}`));
+    expect(() => compileChart(request({ combine: "overlay", sheets: many }))).toThrow(/12개까지/);
+  });
+
+  it("expands sheet names or \"all\" from the detected tables, finding moved columns by header", () => {
+    const a = guessTable(3, 2, (r, c) => [["온도", "중량"], [100, 99], [200, 90]][r - 1][c - 1])!;
+    const b = guessTable(4, 3, (r, c) => [["메모", "", ""], ["비고", "중량", "온도"], ["x", 98, 100], ["y", 91, 200]][r - 1][c - 1])!;
+    const profiles = [{ fileId: "file1", sheets: [{ name: "A", table: a }, { name: "B", table: b }, { name: "빈 시트" }] }];
+    const resolved = resolveInputs({ kind: "chart", input: { sheet: "A", columns: [] }, sheets: "all", combine: true, x: { key: "온도" }, series: [{ key: "중량", axis: "left" }] }, profiles) as ChartRequest;
+    expect(resolved.combine).toBe("overlay");
+    expect(resolved.sheets!.map(s => [s.sheet, s.headerRow, s.columns.map(c => c.index)])).toEqual([["A", 1, [1, 2]], ["B", b.headerRow, [3, 2]]]);
+    const one = resolveInputs({ kind: "chart", input: { sheet: "A", columns: [] }, sheets: ["B"], x: { key: "온도" }, series: [{ key: "중량", axis: "left" }] }, profiles) as ChartRequest;
+    expect([one.input.sheet, one.sheets]).toEqual(["B", undefined]);
+    const ask = resolveInputs({ kind: "ask", reason: "sheets", question: "q", options: [{ value: "o", label: "겹쳐서", plan: { kind: "chart", input: { sheet: "A", columns: [] }, sheets: ["A", "B"], combine: "overlay", x: { key: "온도" }, series: [{ key: "중량", axis: "left" }] } }] }, profiles) as { options: { plan: ChartRequest }[] };
+    expect(ask.options[0].plan.sheets).toHaveLength(2);
+    expect(ask.options[0].plan.x).toMatchObject({ label: "온도", unit: "" });
+    const noAxis = resolveInputs({ kind: "chart", input: { sheet: "A", columns: [] }, x: { key: "온도" }, series: [{ key: "중량" }] }, profiles) as ChartRequest;
+    expect(noAxis.series[0].axis).toBe("left");
+  });
+});
+
+describe("annotation label templates", () => {
+  it("moves a template written as the label into format", async () => {
+    const { reportView } = await import("./viewContracts.ts");
+    const view = reportView.parse({ charts: { "0": { annotations: [{ series: 0, kind: "valueAt", x: 800, label: "Residue {y:.1f}%" }, { series: 1, kind: "max", label: "Tmax" }] } } });
+    expect(view.charts["0"].annotations).toEqual([
+      expect.objectContaining({ format: "Residue {y:.1f}%", label: "값" }),
+      expect.objectContaining({ label: "Tmax" }),
+    ]);
+  });
+});

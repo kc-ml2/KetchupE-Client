@@ -28,7 +28,9 @@ export function mergeChartRequest(current: ChartRequest, patch: PlanPatch): Reco
 export function compileChart(raw: ChartRequest): AnalysisPlan {
   const plan = chartRequest.parse(raw);
   const type = plan.chartType ?? "line";
-  const legacy = ["line", "area", "scatter"].includes(type) && !plan.agg && !plan.by && !plan.filter && !plan.sort && !plan.top && !plan.movingAverage && !plan.x.period && !plan.x.bins;
+  const inputs = plan.sheets ?? [plan.input];
+  const overlay = Boolean(plan.sheets) && plan.combine === "overlay", separate = Boolean(plan.sheets) && !overlay;
+  const legacy = !plan.sheets && ["line", "area", "scatter"].includes(type) && !plan.agg && !plan.by && !plan.filter && !plan.sort && !plan.top && !plan.movingAverage && !plan.x.period && !plan.x.bins;
   const columnOf = (key: string) => plan.input.columns.find(column => (column.key ?? column.name) === key);
   for (const axis of [plan.x, ...plan.series]) {
     const column = columnOf(axis.key);
@@ -36,6 +38,8 @@ export function compileChart(raw: ChartRequest): AnalysisPlan {
     const unit = column.name.match(/[（(]([^()（）]+)[）)]\s*$/)?.[1].replace(/\s/g, "");
     if (unit && unit !== axis.unit.replace(/\s/g, "")) throw new ExcelError("CONTRACT", `열 ${column.index}의 원본 단위는 ${unit}입니다. 단위나 변환 기준을 확인해 주세요.`);
   }
+  for (const input of plan.sheets ?? []) for (const axis of [plan.x, ...plan.series])
+    if (!input.columns.some(column => (column.key ?? column.name) === axis.key)) throw new ExcelError("CONTRACT", `시트 ${input.sheet}에서 ${axis.key} 열을 찾지 못했습니다. 시트마다 같은 이름의 열이 있어야 합니다.`);
   for (const side of ["left", "right"] as const) {
     if (new Set(plan.series.filter(series => series.axis === side).map(series => series.unit)).size > 1)
       throw new ExcelError("CONTRACT", "서로 다른 단위의 시리즈는 별도 Y축을 사용해 주세요.");
@@ -74,6 +78,10 @@ return {tables:[],datasets:[{title:p.title,columns:[label(p.x),...p.series.map(l
   if (type === "boxplot" && !plan.series.length) throw new ExcelError("CONTRACT", "박스플롯은 series[0]에 숫자 열이 필요합니다.");
   if (type === "pie" && (plan.by || plan.series.length > 1)) throw new ExcelError("CONTRACT", "원형 차트는 값 열 하나(또는 건수)만 그립니다. 범주별로 나누려면 막대(by)를 쓰세요.");
   if (type === "heatmap" && !plan.by) throw new ExcelError("CONTRACT", "히트맵은 x(열 범주)와 by(행 범주)가 필요합니다.");
+  if (overlay && plan.by) throw new ExcelError("CONTRACT", "시트 겹쳐 그리기(combine:\"overlay\")는 시트별로 시리즈를 나누므로 by와 함께 쓸 수 없습니다. by로 나누려면 combine:\"separate\"로 시트마다 따로 그리세요.");
+  if (overlay && ["pie", "heatmap", "histogram", "boxplot"].includes(type)) throw new ExcelError("CONTRACT", "원형·히트맵·히스토그램·박스플롯은 시트를 겹쳐 그릴 수 없습니다. combine:\"separate\"로 시트마다 따로 그리세요.");
+  if (overlay && Math.max(1, plan.series.length) * inputs.length > 12) throw new ExcelError("CONTRACT", `겹쳐 그릴 시리즈는 12개까지입니다(시트 ${inputs.length}개 × Y열 ${plan.series.length}개). Y열을 줄이거나(예: 오른쪽 축 열 제외) combine:"separate"로 시트마다 따로 그리세요.`);
+  if (overlay && grouped && plan.series.length > 1) throw new ExcelError("CONTRACT", "집계한 값을 시트별로 겹칠 때 값 열(series)은 하나만 지정하세요.");
   if (plan.by && plan.series.length > 1) throw new ExcelError("CONTRACT", "by로 나눌 때 값 열(series)은 하나만 지정하세요.");
   if (plan.by && !columnOf(plan.by.key)) throw new ExcelError("CONTRACT", `선택한 열에 by 열 ${plan.by.key}가 없습니다. input.columns에 추가하세요.`);
   if (plan.stack && !["bar", "hbar", "area"].includes(type) || plan.smooth && !["line", "area"].includes(type)) throw new ExcelError("CONTRACT", "stack은 막대·영역, smooth는 선·영역 그래프에서 지원합니다.");
@@ -89,21 +97,34 @@ return {tables:[],datasets:[{title:p.title,columns:[label(p.x),...p.series.map(l
     if (part.op === "between" && (value as unknown[]).length !== 2) throw new ExcelError("CONTRACT", `between 필터는 "열 between A and B" 형태로 두 값을 쓰세요: ${text}`);
     return { key: column.key ?? column.name, op: part.op, value, text };
   });
-  const native = grouped && plan.series.length <= 1 && !plan.by && ["bar", "hbar", "line", "area", "pie"].includes(type);
+  const native = grouped && plan.series.length <= 1 && !plan.by && !overlay && ["bar", "hbar", "line", "area", "pie"].includes(type);
   if (formats.includes("xlsx") && !native) {
     formats = formats.filter(f => f !== "xlsx");
     if (!formats.length) formats = ["html"];
     notApplied.push("XLSX 편집형 차트는 이 차트 구성(원자료·복수 시리즈·범주 분할·히트맵 등)을 지원하지 않아 HTML로 만들었습니다.");
   }
   const config = JSON.stringify({
-    title: plan.title, type, grouped, agg: agg ?? null, x: plan.x, series: plan.series, by: plan.by ?? null, filters,
+    title: plan.title, type, grouped, agg: agg ?? null, x: plan.x, series: plan.series, by: overlay ? { key: "__sheet__", label: "시트" } : plan.by ?? null, filters,
+    bySheet: overlay, sheets: inputs.map(input => ({ fileId: input.fileId, sheet: input.sheet, label: inputs.filter(other => other.sheet === input.sheet).length > 1 ? `${input.fileId}:${input.sheet}` : input.sheet })),
     sort: plan.sort ?? null, top: plan.top ?? null, ma: plan.movingAverage ?? null, smooth: Boolean(plan.smooth), stack: Boolean(plan.stack),
     categoricalLimit: L.categoricalChartRows,
   });
-  const code = `const p = ${config};
+  // Separate: the same program once per sheet; tables/datasets are appended and each chart points at its own one.
+  const code = separate ? `const p = ${config};
+const draw = (input, p) => {
+${PROGRAM}
+};
+const out = { tables: [], datasets: [], excluded: [], notes: [], charts: [] };
+for (const s of p.sheets) {
+  const r = draw({ rows: input.rows.filter(row => row.fileId === s.fileId && row.sheet === s.sheet) }, Object.assign({}, p, { title: (p.title + ' — ' + s.label).slice(0, 120) }));
+  for (const c of r.charts) out.charts.push(Object.assign({}, c, { table: (c.dataset ? out.datasets : out.tables).length + c.table }));
+  out.tables.push(...r.tables); out.datasets.push(...r.datasets); out.excluded.push(...r.excluded);
+  for (const n of r.notes) if (!out.notes.includes(n)) out.notes.push(n);
+}
+return out;` : `const p = ${config};
 ${PROGRAM}`;
   if (code.length > L.codeChars) throw new ExcelError("LIMIT", "차트 설정이 너무 큽니다. 필터·정렬 목록을 줄여 주세요.");
-  return analysisPlan.parse({ kind: "execute", title: plan.title, format: formats[0], formats: formats.length > 1 ? formats : undefined, view: plan.view, layout: plan.layout, steps: plan.steps, assumptions: plan.assumptions, sections: plan.sections, notApplied: notApplied.length ? notApplied.slice(0, 10) : undefined, inputs: [plan.input], code, summary: plan.summary ?? "요청한 기준으로 선택한 열을 집계해 그래프로 나타냈습니다. 적용 기준은 표 위 메모에 있습니다." });
+  return analysisPlan.parse({ kind: "execute", title: plan.title, format: formats[0], formats: formats.length > 1 ? formats : undefined, view: plan.view, layout: plan.layout, steps: plan.steps, assumptions: plan.assumptions, sections: plan.sections, notApplied: notApplied.length ? notApplied.slice(0, 10) : undefined, inputs, code, summary: plan.summary ?? "요청한 기준으로 선택한 열을 집계해 그래프로 나타냈습니다. 적용 기준은 표 위 메모에 있습니다." });
 }
 
 /** The fixed program for grouped and filtered charts. Runs in the QuickJS sandbox with `p` (JSON) and `input`. */
@@ -127,8 +148,14 @@ for (const r of input.rows) {
   const bad = p.filters.find(f => !pass(r.values[f.key], f));
   if (bad) excluded.push({ row: r.id, reason: ('필터 제외: ' + bad.text).slice(0, 200) }); else kept.push(r);
 }
-const initial = p.series.map(s => { const r = kept.find(r => isNum(r.values[s.key])); return r ? r.values[s.key] : null; });
-const yval = (r, i) => { const v = r.values[p.series[i].key], t = p.series[i].transform; if (!isNum(v)) return null; return t === 'loss100' ? 100 - v : t === 'lossInitial' ? initial[i] - v : v; };
+// Overlay (combine across sheets) splits by the row's sheet like a by column; sheets keep the order they were given in.
+const sheetOf = r => { const s = p.sheets.find(s => s.fileId === r.fileId && s.sheet === r.sheet); return s ? s.label : null; };
+const byOf = r => p.bySheet ? sheetOf(r) : r.values[p.by.key];
+const firstOf = (s, rows) => { const r = rows.find(r => isNum(r.values[s.key])); return r ? r.values[s.key] : null; };
+const initial = p.series.map(s => firstOf(s, kept));
+const initialBy = new Map(p.bySheet ? p.sheets.map(sh => [sh.label, p.series.map(s => firstOf(s, kept.filter(r => sheetOf(r) === sh.label)))]) : []);
+const yval = (r, i) => { const v = r.values[p.series[i].key], t = p.series[i].transform; if (!isNum(v)) return null; return t === 'loss100' ? 100 - v : t === 'lossInitial' ? (p.bySheet ? initialBy.get(sheetOf(r))[i] : initial[i]) - v : v; };
+const orderBy = values => p.bySheet ? values.sort((a, b) => p.sheets.findIndex(s => s.label === a) - p.sheets.findIndex(s => s.label === b)) : values.sort(natural);
 let edges = null;
 if (p.x.bins) {
   const xs = kept.map(r => r.values[p.x.key]).filter(isNum);
@@ -188,7 +215,7 @@ if (p.grouped) {
     const x = xcat(r);
     if (!x) { excluded.push({ row: r.id, reason: 'X 범주 값 없음 또는 구간 밖' }); continue; }
     let b = null;
-    if (p.by) { b = r.values[p.by.key]; if (b === null || b === undefined || b === '') { excluded.push({ row: r.id, reason: '분할 열 값 없음' }); continue; } }
+    if (p.by) { b = byOf(r); if (b === null || b === undefined || b === '') { excluded.push({ row: r.id, reason: '분할 열 값 없음' }); continue; } }
     const ys = p.series.map((_, i) => yval(r, i));
     if (p.agg !== 'count' && ys.every(v => v === null)) { excluded.push({ row: r.id, reason: '값 열의 숫자 데이터 없음' }); continue; }
     const key = JSON.stringify([x.label, b]);
@@ -196,7 +223,7 @@ if (p.grouped) {
     const g = groups.get(key); g.ids.push(r.id); ys.forEach((v, i) => g.vals[i].push(v));
     if (p.by && !byValues.some(w => same(w, b))) byValues.push(b);
   }
-  byValues.sort(natural);
+  orderBy(byValues);
   const xOrder = new Map();
   for (const g of groups.values()) if (!xOrder.has(JSON.stringify(g.x))) xOrder.set(JSON.stringify(g.x), g.order);
   let xs = [...xOrder.keys()].map(k => JSON.parse(k)).sort((a, b) => natural(xOrder.get(JSON.stringify(a)), xOrder.get(JSON.stringify(b))));
@@ -267,16 +294,19 @@ if (p.type === 'histogram' || p.type === 'boxplot') {
   return { tables: [], datasets: [{ title: p.title, columns, rows }], excluded, notes: notes.concat(['원본 측정값을 행마다 하나씩 사용했습니다.']), charts: [chart] };
 }
 const byValues = [];
-for (const r of kept) { if (!p.by) break; const b = r.values[p.by.key]; if (b !== null && b !== undefined && b !== '' && !byValues.some(w => same(w, b))) byValues.push(b); }
-byValues.sort(natural);
+for (const r of kept) { if (!p.by) break; const b = byOf(r); if (b !== null && b !== undefined && b !== '' && !byValues.some(w => same(w, b))) byValues.push(b); }
+orderBy(byValues);
+const multi = p.bySheet && p.series.length > 1;
 for (const r of kept) {
   const x = r.values[p.x.key];
   const ys = p.series.map((_, i) => yval(r, i));
-  const b = p.by ? r.values[p.by.key] : null;
+  const b = p.by ? byOf(r) : null;
   if (x === null || x === undefined || x === '' || ys.every(v => v === null) || (p.by && (b === null || b === undefined || b === ''))) { excluded.push({ row: r.id, reason: '선택 열의 데이터 없음' }); continue; }
-  rows.push({ cells: [x, ...(p.by ? byValues.map(w => same(w, b) ? ys[0] : null) : ys)], sourceRows: [r.id] });
+  rows.push({ cells: [x, ...(multi ? p.series.flatMap((_, i) => byValues.map(w => same(w, b) ? ys[i] : null)) : p.by ? byValues.map(w => same(w, b) ? ys[0] : null) : ys)], sourceRows: [r.id] });
 }
-const valueColumns = p.by ? byValues.map(String) : columnsOf();
+// Overlay of several Y columns: one series per (column, sheet), column-major, each on its column's axis.
+const valueColumns = multi ? p.series.flatMap(s => byValues.map(w => w + ' · ' + label(s))) : p.by ? byValues.map(String) : columnsOf();
+const axisOf = i => multi ? (p.series[Math.floor(i / byValues.length)] || p.series[0]).axis : null;
 if (p.ma) {
   const w = p.ma.window, n = valueColumns.length;
   const extra = rows.map((_, i) => valueColumns.map((__, c) => { if (i + 1 < w) return null; const xs = rows.slice(i + 1 - w, i + 1).map(r => r.cells[c + 1]); return xs.every(isNum) ? xs.reduce((a, b) => a + b, 0) / w : null; }));
@@ -287,7 +317,7 @@ if (p.ma) {
 }
 const numericX = rows.every(r => isNum(r.cells[0]));
 const chartType = p.type === 'hbar' ? 'bar' : p.type;
-chart = { type: chartType, table: 0, dataset: true, x: 0, y: 1, title: p.title, series: valueColumns.map((_, i) => ({ y: i + 1, axis: p.by ? 'left' : (p.series[i] ? p.series[i].axis : p.series[i - p.series.length] ? p.series[i - p.series.length].axis : 'left') })) };
+chart = { type: chartType, table: 0, dataset: true, x: 0, y: 1, title: p.title, series: valueColumns.map((_, i) => ({ y: i + 1, axis: multi ? axisOf(i % (p.series.length * byValues.length)) : p.by ? 'left' : (p.series[i] ? p.series[i].axis : p.series[i - p.series.length] ? p.series[i - p.series.length].axis : 'left') })) };
 if (numericX && chartType !== 'scatter') chart.xScale = 'linear';
 if (p.smooth) chart.smooth = true;
 if (p.stack) chart.stack = true;

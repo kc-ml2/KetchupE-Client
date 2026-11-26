@@ -37,8 +37,14 @@ const annotationShape = (item: { kind: string; x?: number; count?: number; xMin?
   if (item.kind !== "peak" && (item.count !== undefined || item.xMin !== undefined || item.xMax !== undefined)) ctx.addIssue({ code: "custom", message: "count·xMin·xMax는 peak 주석에만 씁니다." });
   if (item.method && item.kind !== "valueAt") ctx.addIssue({ code: "custom", message: "method는 valueAt 주석에만 씁니다." });
 };
+/** A label template written as the label ("Residue {y:.1f}%") is the format; the label falls back to the kind's name. */
+const templateLabel = (value: unknown) => {
+  const item = value as { label?: unknown; format?: unknown; kind?: keyof typeof annotationLabels } | null;
+  return item && typeof item === "object" && typeof item.label === "string" && item.label.includes("{") && item.format === undefined
+    ? { ...item, format: item.label, label: undefined } : value;
+};
 const referenceLine = z.object({ axis: z.enum(["x", "left", "right"]), value: z.number().finite(), label: title.optional() }).strict();
-const annotation = z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape).transform(item => ({ ...item, label: item.label ?? annotationLabels[item.kind] }));
+const annotation = z.preprocess(templateLabel, z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape).transform(item => ({ ...item, label: item.label ?? annotationLabels[item.kind] })));
 const samplePoints = z.number().int().min(2).max(EXCEL_LIMITS.chartRows);
 const lineType = z.enum(["solid", "dashed", "dotted"]);
 export const legendPositions = ["upper right", "upper left", "lower right", "lower left", "upper center", "lower center", "center left", "center right", "outside right", "outside bottom"] as const;
@@ -67,7 +73,7 @@ const axisPatch = z.object(Object.fromEntries(Object.entries(axisFields).map(([k
 const chartPatch = z.object({
   title: title.nullable().optional(), description: z.string().max(2000).nullable().optional(),
   axes: z.object({ x: axisPatch.nullable().optional(), left: axisPatch.nullable().optional(), right: axisPatch.nullable().optional() }).strict().optional(),
-  annotations: z.array(z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape)).max(12).optional(),
+  annotations: z.array(z.preprocess(templateLabel, z.object({ ...annotationFields, label: title.optional() }).strict().superRefine(annotationShape))).max(12).optional(),
   labels: z.boolean().nullable().optional(), colors: z.array(color).min(1).max(12).nullable().optional(),
   samplePoints: samplePoints.nullable().optional(),
   grid: z.enum(["none", "solid", "dashed"]).nullable().optional(), referenceLines: z.array(referenceLine).max(12).nullable().optional(),
