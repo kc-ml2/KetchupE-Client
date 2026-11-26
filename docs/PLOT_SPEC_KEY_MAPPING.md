@@ -158,3 +158,4 @@ plotkit 키로 바꾸는 과정에서 빠뜨리면 안 되는 항목이다.
 - **3단계 (명세 축소, 별칭과 hint):** 1절 `read.*`·`file`·`sheets`와 2절 `x/y.col`의 resolver, 모든 표의 별칭 열, 알 수 없는 키·값에 대한 "이 키를 말한 건가요?" 응답, `asks`.
 - **4단계 (키 확장):** 2·3절의 신규 항목. 계산 신규는 `chartRequest` 확장 + `chartRequest` patch 수정 경로, 표시 신규는 `view` 확장.
 - **측정:** 각 단계 전후로 같은 요청 세트(tga 24개, CNT dev, 케찹이 요청)를 같은 모델로 실행한다.
+- **5단계 (여러 시트):** `sheets`·`combine`·`names`. `chartRequest.sheets`(시트 이름 목록 또는 `"all"`)와 `combine`(`"overlay"`: (Y열, 시트)마다 시리즈 하나, 12개 이하 / `"separate"`: 시트마다 차트 하나, 최대 10개). resolver가 `input`을 본떠 시트마다 sheetPlan을 만들고 열은 헤더 이름으로 다시 찾는다. 근거·제외 행은 시트별로 유지된다. `names`는 `view.series[].name`으로 대신하고, overlay 범례 기본값은 시트 이름이다.

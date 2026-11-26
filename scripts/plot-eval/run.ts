@@ -27,7 +27,7 @@ import { checkCnt, checkTga, type CheckResult } from "./check.ts";
 
 type Turn = { text: string; format?: string; answer?: string; score: (report: Report, png?: { width: number; height: number }) => CheckResult[] };
 type Case = { id: string; set: "tga" | "cnt" | "ketchupe"; files: string[]; turns: Turn[] };
-type Call = { purpose: "planner" | "revision"; latencyMs: number; promptTokens: number; completionTokens: number; finishReason?: string; error?: string; kind?: string; askReason?: string };
+type Call = { purpose: "planner" | "revision"; latencyMs: number; promptTokens: number; completionTokens: number; finishReason?: string; error?: string; kind?: string; askReason?: string; response?: string };
 
 const AUTO_ANSWER = "요청한 내용대로 진행해 주세요. 정해지지 않은 부분은 일반적인 기본값으로 해 주세요.";
 const arg = (name: string) => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : undefined; };
@@ -152,7 +152,7 @@ async function main() {
           const info: ModelCallInfo | undefined = client?.lastCallFor?.(signal) ?? client?.lastCall;
           let parsed: { kind?: string; reason?: string } = {};
           try { parsed = JSON.parse(response.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")); } catch { /* malformed replies are counted by the tool's repair loop */ }
-          calls.push({ purpose, latencyMs: Date.now() - started, promptTokens: info?.promptTokens ?? 0, completionTokens: info?.completionTokens ?? 0, finishReason: info?.finishReason, kind: parsed.kind, ...(parsed.kind === "ask" ? { askReason: parsed.reason } : {}) });
+          calls.push({ purpose, latencyMs: Date.now() - started, promptTokens: info?.promptTokens ?? 0, completionTokens: info?.completionTokens ?? 0, finishReason: info?.finishReason, kind: parsed.kind, ...(parsed.kind === "ask" ? { askReason: parsed.reason } : {}), response: response.slice(0, 4000) });
           return response;
         } catch (error) {
           calls.push({ purpose, latencyMs: Date.now() - started, promptTokens: 0, completionTokens: 0, error: String(error) });
@@ -197,6 +197,7 @@ async function main() {
           try { checks = turn.score(report, meta?.width ? { width: meta.width, height: meta.height! } : undefined); }
           catch (error) { checks = [{ check: "score", pass: false, detail: `채점 오류: ${String(error)}` }]; }
           turnRecord.checks = checks;
+          turnRecord.view = report.view;
           turnRecord.pass = checks.filter(c => c.pass !== null).every(c => c.pass);
           turnRecord.chartTypes = (report.result.charts ?? (report.result.chart ? [report.result.chart] : [])).map(c => c.type);
           turnRecord.planKind = /^const p = /m.test(report.plan.code) ? "chart" : "execute";

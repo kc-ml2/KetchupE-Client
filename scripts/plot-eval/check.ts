@@ -74,11 +74,15 @@ export function checkTga(c: Record<string, any>, report: Report, png?: { width: 
   if ("shade" in c) return all(d => d.option.series.some(s => ((s.markArea as any)?.data ?? []).some((area: any) => near(area[0]?.xAxis, c.shade[0], 1) && near(area[1]?.xAxis, c.shade[1], 1))) || "음영 없음");
   if ("annotation_type" in c) return all(d => d.option.series.some(s => ((s.markLine as any)?.data ?? []).some((line: any) => near(line.xAxis, c.x, 1) && String(line.label?.formatter ?? "").includes(c.text_contains))) || "보조선 없음");
   if ("annotation" in c) {
-    const side = c.annotation === "residue" ? "left" : "right", kind = c.annotation === "residue" ? "valueAt" : "max";
+    // Like plotkit's score.py: present = shown in any plot; other properties are checked on the plots that show it.
+    const side = c.annotation === "residue" ? "left" : "right", kinds = c.annotation === "residue" ? ["valueAt"] : ["max", "peak"];
+    const marksOf = (d: Drawn) => kinds.flatMap(kind => marks(d, side, kind));
+    const shown = charts.filter(d => marksOf(d).length);
+    if (c.present === false) return { check: name, pass: !shown.length, ...(shown.length ? { detail: `${shown.length}개 차트에 표시됨` } : {}) };
+    if (!shown.length) return { check: name, pass: false, detail: "표시 없음" };
     return all(d => {
-      const found = marks(d, side, kind);
-      if (c.present === false) return found.length === 0 || `${found.length}개 표시됨`;
-      if (!found.length) return "표시 없음";
+      const found = marksOf(d);
+      if (!found.length) return true;
       if (c.count !== undefined && found.length !== c.count) return `${found.length}개`;
       if (c.x_used !== undefined && !found.some((m: any) => near(m.coord?.[0], c.x_used, 1))) return `x=${found.map((m: any) => m.coord?.[0]).join(",")}`;
       if (c.text_regex && !found.some((m: any) => new RegExp(c.text_regex).test(markText(m)))) return `글자 "${found.map(markText).join(" | ")}"`;
