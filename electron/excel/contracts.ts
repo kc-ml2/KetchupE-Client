@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EXCEL_LIMITS as L, ExcelError } from "./limits.ts";
 import type { RowSources } from "./sources.ts";
+import type { TableGuess } from "./tableGuess.ts";
 import { reportView, type ReportView } from "./viewContracts.ts";
 
 export const outputFormat = z.enum(["pdf", "html", "xlsx", "png", "pptx"]);
@@ -34,18 +35,35 @@ export const analysisPlan = z.object({
   // Simple requests may finish right after a successful run instead of spending a review turn.
   summary: z.string().min(1).max(12000).optional(),
   sections: z.array(z.object({ title: z.string().max(120), text: z.string().max(6000) }).strict()).max(20).optional(),
+  /** Requests the plan could not apply (unsupported display options); shown to the user instead of asking. */
+  notApplied: z.array(z.string().min(1).max(300)).max(10).optional(),
 }).strict();
 const axisColumn = z.object({ key: z.string().min(1).max(100), label: z.string().min(1).max(100), unit: z.string().max(30) }).strict();
+export const chartAggs = ["mean", "sum", "count", "median", "min", "max", "std", "first", "last", "nunique"] as const;
+const bins = z.union([z.number().int().min(2).max(100), z.object({ width: z.number().positive(), min: z.number().finite().optional(), max: z.number().finite().optional() }).strict(), z.object({ edges: z.array(z.number().finite()).min(2).max(101) }).strict()]);
+/**
+ * A chart the tool computes with a fixed program (plotkit-style keys; the model writes no code).
+ * Raw mode draws every measured row; grouping keys (agg, by on bar/pie/heatmap, period, bins on x) aggregate per category.
+ */
 export const chartRequest = analysisPlan.omit({ kind: true, code: true, inputs: true }).extend({
   kind: z.literal("chart"), input: sheetPlan,
-  x: axisColumn,
-  series: z.array(axisColumn.extend({ axis: z.enum(["left", "right"]), transform: z.enum(["identity", "loss100", "lossInitial"]).optional() }).strict()).min(1).max(4),
-  chartType: z.enum(["line", "area", "scatter"]).optional(), smooth: z.boolean().optional(), stack: z.boolean().optional(),
+  // Several sheets (plotkit sheets + combine): "overlay" draws one series per sheet in one chart, "separate" one chart per sheet.
+  // resolveInputs expands sheet names (or "all") into full sheet plans from the input template.
+  sheets: z.array(sheetPlan).min(2).max(10).optional(), combine: z.enum(["overlay", "separate"]).optional(),
+  x: axisColumn.extend({ period: z.enum(["day", "week", "month", "quarter", "year"]).optional(), bins: bins.optional() }).strict(),
+  series: z.array(axisColumn.extend({ axis: z.enum(["left", "right"]), transform: z.enum(["identity", "loss100", "lossInitial"]).optional() }).strict()).max(4),
+  chartType: z.enum(["line", "area", "scatter", "bar", "hbar", "pie", "histogram", "boxplot", "heatmap"]).optional(), smooth: z.boolean().optional(), stack: z.boolean().optional(),
+  agg: z.enum(chartAggs).optional(),
+  by: z.object({ key: z.string().min(1).max(100), label: z.string().min(1).max(100).optional() }).strict().optional(),
+  filter: z.array(z.string().min(3).max(300)).max(10).optional(),
+  sort: z.union([z.enum(["asc", "desc", "x"]), z.array(z.union([z.string().max(100), z.number().finite()])).min(1).max(200)]).optional(),
+  top: z.number().int().min(1).max(500).optional(),
+  movingAverage: z.object({ window: z.number().int().min(2).max(1000), keepRaw: z.boolean().optional() }).strict().optional(),
 }).strict();
 export type ChartRequest = z.infer<typeof chartRequest>;
 const questionOption = z.object({ value: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/), label: z.string().min(1).max(500), plan: chartRequest.optional() }).strict();
-/** Why the model wants user input; the tool rejects confirmation and re-checks location questions. */
-export const askReason = z.enum(["criteria", "candidates", "format", "location", "confirmation"]);
+/** Why the model wants user input. The tool rejects format and confirmation (they have defaults) and re-checks location questions. */
+export const askReason = z.enum(["criteria", "candidates", "sheets", "aggregation", "dataLoss", "location", "format", "confirmation"]);
 export const profileInspection = z.object({
   sheet: z.string().min(1).max(100),
   startRow: rowId.optional(),
@@ -67,17 +85,17 @@ export type SourceFile = { id: string; name: string; fingerprint: string };
 export type WorkbookInput = SourceFile & { bytes: Uint8Array };
 export type CellMetadata = { display: string; numFmt: string; formula?: string; error?: string; dateTime?: string; dateSerial?: number; fill?: unknown; fontColor?: unknown };
 export type InputRow = SourceRef & { id: number; values: Record<string, Cell>; sourceCells?: Record<string, string>; metadata?: Record<string, CellMetadata> };
-export type WorkbookProfile = { sheets: { name: string; state: string; rows: number; columns: number; firstColumn: number; metadata: Record<string, CellMetadata>; conditionalFormatting: unknown[]; outline: { entries: { row: number; text: string }[]; nextRow: number | null }; search: { matchedRowCount: number; shownMatchRows: number[]; truncated: boolean; requestedCells: { address: string; row: number; column: number; inBounds: boolean }[]; omittedCellCount: number }; preview: { row: number; cells: Cell[] }[]; mergedCells: Record<string, string>; formulaCells: string[]; issues: { address: string; message: string }[] }[] };
+export type WorkbookProfile = { sheets: { name: string; state: string; rows: number; columns: number; firstColumn: number; metadata: Record<string, CellMetadata>; conditionalFormatting: unknown[]; outline: { entries: { row: number; text: string }[]; nextRow: number | null }; search: { matchedRowCount: number; shownMatchRows: number[]; truncated: boolean; requestedCells: { address: string; row: number; column: number; inBounds: boolean }[]; omittedCellCount: number }; preview: { row: number; cells: Cell[] }[]; mergedCells: Record<string, string>; formulaCells: string[]; issues: { address: string; message: string }[]; table?: TableGuess }[] };
 
 export const chartTypes = ["bar", "line", "scatter", "pie", "area", "histogram", "boxplot", "heatmap"] as const;
 export const chartSpec = z.object({
   type: z.enum(chartTypes), table: z.number().int().min(0).max(19),
   dataset: z.boolean().optional(), x: z.number().int().min(0).max(19), y: z.number().int().min(0).max(19),
   title: z.string().max(120), trendline: z.boolean().optional(), xScale: z.enum(["linear", "category"]).optional(),
-  series: z.array(z.object({ y: z.number().int().min(0).max(19), axis: z.enum(["left", "right"]) }).strict()).min(1).max(4).optional(),
+  series: z.array(z.object({ y: z.number().int().min(0).max(19), axis: z.enum(["left", "right"]) }).strict()).min(1).max(12).optional(),
   // Shape options are part of the computed chart; display edits (axes, annotations, colors) live in the view.
   stack: z.boolean().optional(), horizontal: z.boolean().optional(), smooth: z.boolean().optional(), donut: z.boolean().optional(),
-  bins: z.number().int().min(2).max(100).optional(), value: z.number().int().min(0).max(19).optional(),
+  bins: z.number().int().min(2).max(100).optional(), edges: z.array(z.number().finite()).min(2).max(101).optional(), value: z.number().int().min(0).max(19).optional(),
 }).strict();
 export type ChartSpec = z.infer<typeof chartSpec>;
 const resultTable = z.object({
@@ -106,7 +124,14 @@ export function assertChartFormat(charts: ChartSpec[], format: OutputFormat) {
 
 export function parseModelJson(value: string): unknown {
   if (value.length > L.responseChars) throw new Error("모델 응답이 너무 큽니다.");
-  return JSON.parse(value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  const text = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try { return JSON.parse(text); }
+  catch (error) {
+    // Some replies put a sentence before or after the JSON object; the object itself is still the answer.
+    const start = text.indexOf("{"), end = text.lastIndexOf("}");
+    if (start > 0 || (start === 0 && end < text.length - 1)) { try { return JSON.parse(text.slice(start, end + 1)); } catch { /* report the original error */ } }
+    throw error;
+  }
 }
 
 export function validateResult(raw: unknown, rows: InputRow[]): AnalysisResult {
@@ -144,14 +169,16 @@ export function validateResult(raw: unknown, rows: InputRow[]): AnalysisResult {
     const table = (chart.dataset ? result.datasets : result.tables)?.[index];
     const series = chartSeries(chart), limit = type === "bar" || type === "pie" ? L.categoricalChartRows : L.chartRows;
     const numeric = (column: number) => table!.rows.every(row => typeof row.cells[column] === "number");
+    // Series columns may leave a category blank (null) when data is split by a category; at least one value must exist.
+    const measured = (column: number) => table!.rows.every(row => typeof row.cells[column] === "number" || row.cells[column] === null) && table!.rows.some(row => typeof row.cells[column] === "number");
     const distinct = (column: number) => new Set(table!.rows.map(row => String(row.cells[column]))).size;
-    if (!table || x >= table.columns.length || !table.rows.length || table.rows.length > limit || series.some(item => item.y === x && type !== "histogram" || item.y >= table.columns.length || type !== "heatmap" && !numeric(item.y))) throw new ExcelError("CONTRACT", `차트는 숫자 값이 있는 1~${limit}개 행과 서로 다른 유효한 열이 필요합니다.`);
+    if (!table || x >= table.columns.length || !table.rows.length || table.rows.length > limit || series.some(item => item.y === x && type !== "histogram" || item.y >= table.columns.length || type !== "heatmap" && !measured(item.y))) throw new ExcelError("CONTRACT", `차트는 숫자 값이 있는 1~${limit}개 행과 서로 다른 유효한 열이 필요합니다.`);
     if (chart.series && (!["line", "area", "bar", "scatter"].includes(type) || new Set(series.map(item => item.y)).size !== series.length)) throw new Error("복수 시리즈는 서로 다른 Y열의 선·영역·막대·산점도에서 지원합니다.");
     if ((type === "scatter" || chart.xScale === "linear") && !numeric(x)) throw new Error("산점도의 x값은 숫자여야 합니다.");
     if (chart.xScale === "linear" && !["line", "area", "scatter"].includes(type)) throw new Error("xScale:\"linear\"는 선·영역·산점도에서 지원합니다.");
     if (type === "pie" && (table.rows.some(row => Number(row.cells[y]) < 0) || !table.rows.some(row => Number(row.cells[y]) > 0))) throw new Error("원형 차트에는 음수 없이 양수 값이 필요합니다.");
     if (chart.trendline && type !== "scatter") throw new Error("회귀선은 산점도에서만 지원합니다.");
-    if (chart.stack && type !== "bar" && type !== "area" || chart.horizontal && type !== "bar" || chart.smooth && type !== "line" && type !== "area" || chart.donut && type !== "pie" || chart.bins && type !== "histogram") throw new Error("stack은 막대·영역, horizontal은 막대, smooth는 선·영역, donut은 원형, bins는 히스토그램에서만 지원합니다.");
+    if (chart.stack && type !== "bar" && type !== "area" || chart.horizontal && type !== "bar" || chart.smooth && type !== "line" && type !== "area" || chart.donut && type !== "pie" || (chart.bins || chart.edges) && type !== "histogram") throw new Error("stack은 막대·영역, horizontal은 막대, smooth는 선·영역, donut은 원형, bins·edges는 히스토그램에서만 지원합니다.");
     if (chart.horizontal && series.some(item => item.axis === "right")) throw new Error("가로 막대는 보조축을 지원하지 않습니다.");
     if ((type === "heatmap") !== (chart.value !== undefined)) throw new Error("value 열은 히트맵에만, 히트맵에는 반드시 지정합니다.");
     if (type === "heatmap" && (chart.value! >= table.columns.length || new Set([x, y, chart.value]).size !== 3 || !numeric(chart.value!) || distinct(x) > 100 || distinct(y) > 100)) throw new Error("히트맵은 서로 다른 x·y 범주 열(각 100종 이하)과 숫자 value 열이 필요합니다.");

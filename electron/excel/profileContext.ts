@@ -4,7 +4,8 @@ type Sheet = WorkbookProfile["sheets"][number];
 export type ContextSheet = Pick<Sheet, "name" | "state" | "rows" | "columns" | "firstColumn"> & Partial<Sheet> & { detailsTruncated?: boolean };
 type Profile = { fileId: string; name: string; sheets: ContextSheet[] };
 const size = (value: unknown) => JSON.stringify(value).length;
-const inventory = (sheet: ContextSheet): ContextSheet => ({ name: sheet.name, state: sheet.state, rows: sheet.rows, columns: sheet.columns, firstColumn: sheet.firstColumn, detailsTruncated: true });
+// The detected table stays with the inventory: it is small and lets the planner skip inspection.
+const inventory = (sheet: ContextSheet): ContextSheet => ({ name: sheet.name, state: sheet.state, rows: sheet.rows, columns: sheet.columns, firstColumn: sheet.firstColumn, ...(sheet.table ? { table: sheet.table } : {}), detailsTruncated: true });
 
 /** Only the model preview is shortened; inspect and analysis still read the original workbook. */
 export function fitSheetContext(sheet: ContextSheet, budget: number): ContextSheet {

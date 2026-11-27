@@ -8,6 +8,7 @@ import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { loadWorkbook } from "../work/mapping.ts";
 import { profileInspection } from "./contracts.ts";
+import { guessTable } from "./tableGuess.ts";
 import type { AnalysisPlan, Cell, CellMetadata, InputRow, ProfileInspection, SheetPlan, WorkbookInput, WorkbookProfile } from "./contracts.ts";
 
 // ponytail: last 3 parsed workbooks per worker process; inspect/analyze turns reuse them instead of re-parsing.
@@ -202,7 +203,8 @@ export async function profileWorkbook(bytes: Uint8Array, query = "", inspection?
         catch (error) { issues.push({ address: cell.address, message: error instanceof Error ? error.message : String(error) }); return null; }
       }),
     }));
-    return { name: sheet.name, state: sheet.state, firstColumn, metadata, conditionalFormatting: (sheet as ExcelJS.Worksheet & { conditionalFormattings?: unknown[] }).conditionalFormattings ?? [], rows: sheet.rowCount, columns: sheet.columnCount, outline, search, preview, mergedCells, formulaCells, issues };
+    return { name: sheet.name, state: sheet.state, firstColumn, metadata, conditionalFormatting: (sheet as ExcelJS.Worksheet & { conditionalFormattings?: unknown[] }).conditionalFormattings ?? [], rows: sheet.rowCount, columns: sheet.columnCount, outline, search, preview, mergedCells, formulaCells, issues,
+      ...(inspection ? {} : { table: guessTable(sheet.rowCount, sheet.columnCount, (r, c) => value(sheet.getRow(r).getCell(c))) }) };
   }) };
 }
 
