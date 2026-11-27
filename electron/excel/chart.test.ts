@@ -195,3 +195,40 @@ it("accepts the revision a model returns for 'show the Weight at 800℃' and tel
   expect(parsed).toMatchObject({ kind: "view" });
   for (const phrase of ["valueAt", "referenceLines", "가장 가까운 측정점", "unsupported로 거절하지 않는다"]) expect(REVISION_SYSTEM).toContain(phrase);
 });
+
+it("draws plotkit display keys: series lines, legend, fonts, ticks, bands, notes, size, peaks and label templates", () => {
+  // A TGA-like curve: weight falls, DTG has two peaks (near 300 and 600).
+  const rows = Array.from({ length: 81 }, (_, i) => { const t = i * 10; return [t, 100 - t / 10, Math.exp(-(((t - 300) / 40) ** 2)) * 0.5 + Math.exp(-(((t - 600) / 40) ** 2))]; });
+  const view = mergeView(undefined, { charts: { "0": {
+    titleStyle: { size: 16, color: "남색" }, legend: { position: "upper right", size: 9 }, text: { color: "gray" }, tickDirection: "in", size: { width: 8, height: 5 },
+    axes: { x: { tickSize: 9, invert: true }, left: { labelColor: "green", minor: true } },
+    series: [{ series: 0, color: "black", width: 2.5 }, { series: 1, lineType: "dotted" }],
+    bands: [{ from: 300, to: 450, color: "lightgray", opacity: 0.5, label: "산화" }], notes: [{ text: "Air, 10 °C/min", position: "upper left" }],
+    annotations: [{ series: 1, kind: "peak", count: 2, format: "{x:.0f} °C" }, { series: 0, kind: "valueAt", x: 795, method: "interp", format: "Residue {y:.2f}%" }],
+  } } }).charts["0"];
+  const value = report(["Temperature", "Weight (%)", "DTG"], rows, { type: "line", xScale: "linear", series: [{ y: 1, axis: "left" }, { y: 2, axis: "right" }] }, view);
+  expect(() => validateResult(value.result, inputs(value))).not.toThrow();
+  const render = chartOption(value, value.result.charts![0]), o = render.option as Record<string, any>;
+  expect([render.width, render.height - render.notes.length * 18 - 12]).toEqual([768, 480]);
+  expect(o.title.textStyle).toMatchObject({ fontSize: 16, color: "#000080" });
+  expect(o.legend).toMatchObject({ top: 60, textStyle: { fontSize: 9 } });
+  expect(o.legend.right).toBeGreaterThan(0);
+  expect(o.xAxis).toMatchObject({ inverse: true, axisLabel: { fontSize: 9, color: "#808080" }, axisTick: { inside: true } });
+  expect(o.yAxis[0]).toMatchObject({ nameTextStyle: { color: "#008000" }, minorTick: { show: true } });
+  expect(o.series[0].lineStyle).toMatchObject({ color: "#000000", width: 2.5 });
+  expect(o.series[1].lineStyle).toMatchObject({ type: "dotted" });
+  expect(o.series[0].markArea.data[0][0]).toMatchObject({ xAxis: 300, name: "산화", itemStyle: { color: "#d3d3d3", opacity: 0.5 } });
+  expect(o.graphic.some((g: any) => g.style.text === "Air, 10 °C/min")).toBe(true);
+  expect(o.series[1].markPoint.data.map((m: any) => m.label.formatter)).toEqual(["300 °C", "600 °C"]);
+  expect(o.series[0].markPoint.data[0].label.formatter).toBe("Residue 20.50%");
+  expect(() => chartSvg(value)).not.toThrow();
+});
+
+it("hides the legend on request and keeps earlier style fields when a later patch changes one", () => {
+  const first = mergeView(undefined, { charts: { "0": { legend: { position: "upper left" }, series: [{ series: 0, color: "red" }] } } });
+  const next = mergeView(first, { charts: { "0": { legend: { size: 10 }, series: [{ series: 0, width: 3 }] } } });
+  expect(next.charts["0"]).toMatchObject({ legend: { position: "upper left", size: 10 }, series: [{ series: 0, color: "#ff0000", width: 3 }] });
+  expect(viewSummary(first, next).join(" ")).toContain("범례");
+  const hidden = report(columns, sales, { type: "bar", series: [{ y: 1, axis: "left" }, { y: 2, axis: "left" }] }, { legend: { show: false } });
+  expect(option(hidden).option.legend).toBeUndefined();
+});

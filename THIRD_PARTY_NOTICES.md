@@ -21,3 +21,14 @@ The Apache Software Foundation (https://www.apache.org/).
 - License: BSD 3-Clause (`third-party-licenses/zrender/LICENSE`)
 - Source: https://github.com/ecomfe/zrender
 - Copyright (c) 2017, Baidu Inc. All rights reserved.
+
+## plotkit-ts (peak detection)
+
+- License: MIT, Copyright (c) 2026 the plotkit authors (`third-party-licenses/plotkit-ts/LICENSE`)
+- Source: https://github.com/HoseungChoi51/tga_plot, branch `lib/plotkit-ts`, commit `18bfc289`, `src/peaks.ts`
+- Copied unchanged into `electron/excel/peaks.ts`.
+
+That file ports `savgol_filter`, `find_peaks` and `peak_prominences` from SciPy 1.18 (`scipy.signal`):
+
+- License: BSD 3-Clause
+- Copyright (c) 2001-2002 Enthought, Inc. 2003-2024, SciPy Developers. All rights reserved. (`third-party-licenses/scipy/LICENSE`)

@@ -108,12 +108,25 @@ it.each(["html", "xlsx", "pdf"] as const)("creates the requested %s format from 
   expect(deps.pdf).toHaveBeenCalledTimes(format === "pdf" ? 1 : 0);
 });
 
-it("asks about an unspecified format without executing analysis", async () => {
+it("does not ask about an unspecified format; the planner proceeds with a default", async () => {
   const { deps, tool, input } = await setup();
   input.values.format = "" as OutputFormat;
-  vi.mocked(deps.complete).mockReset().mockResolvedValue('{"kind":"ask","reason":"format","question":"PDF, HTML, 엑셀 중 어떤 형식으로 만들까요?"}');
-  expect(await tool.execute(input)).toMatchObject({ status: "needs_input", fields: [{ key: "answer1" }] });
-  expect(deps.analyze).not.toHaveBeenCalled();
+  vi.mocked(deps.complete).mockReset()
+    .mockResolvedValueOnce('{"kind":"ask","reason":"format","question":"PDF, HTML, 엑셀 중 어떤 형식으로 만들까요?"}')
+    .mockResolvedValueOnce(JSON.stringify(fixturePlan))
+    .mockResolvedValue(JSON.stringify({ kind: "finish", summary: "완료" }));
+  expect(await tool.execute(input)).toMatchObject({ status: "completed" });
+  expect(JSON.parse(vi.mocked(deps.complete).mock.calls[1][1]).failure).toContain("출력 형식을 묻지 마세요");
+});
+
+it("lists requests the plan could not apply instead of asking", async () => {
+  const { deps, tool, input } = await setup();
+  vi.mocked(deps.complete).mockReset()
+    .mockResolvedValueOnce(JSON.stringify({ ...fixturePlan, notApplied: ["틱 방향 바깥쪽"] }))
+    .mockResolvedValue(JSON.stringify({ kind: "finish", summary: "완료" }));
+  const result = await tool.execute(input);
+  expect(result).toMatchObject({ status: "completed" });
+  expect(result.status === "completed" && result.summary).toContain("미반영 항목:\n- 틱 방향 바깥쪽");
 });
 
 it("redirects permission-only questions into execution without asking the user again", async () => {
@@ -415,4 +428,27 @@ it("classifies questions by the model's reason, not by wording", async () => {
   const result = await tool.execute(input);
   expect(deps.complete).toHaveBeenCalledTimes(2);
   expect(result).toMatchObject({ status: "needs_input", question: expect.stringContaining("행 번호나 셀 주소는 필요하지 않습니다") });
+});
+
+it("draws a grouped chart from column names only and applies a calculation edit without the planner", async () => {
+  const { deps, input } = await setup();
+  // The model names columns by header only; the detected table fills rows, indices, label and unit.
+  vi.mocked(deps.complete).mockReset().mockResolvedValueOnce(JSON.stringify({
+    kind: "chart", title: "일별 평균 인장강도", format: "html", steps: ["실험일별 평균"], assumptions: [],
+    input: { fileId: "file1", sheet: "실험", columns: [] }, chartType: "bar", x: { key: "실험일" }, series: [{ key: "인장강도", axis: "left" }], agg: "mean",
+  }));
+  const revise = vi.fn().mockResolvedValue(JSON.stringify({ kind: "plan", patch: { agg: "max", filter: ["인장강도 >= 50"] } }));
+  const withRevise = createExcelTool({ ...deps, revise });
+  const first = await withRevise.execute(input);
+  expect(first.status).toBe("completed");
+  const analyzed = vi.mocked(deps.analyze).mock.results.at(-1)!.value as Promise<{ result: { tables: { rows: { cells: unknown[] }[] }[] } }>;
+  expect((await analyzed).result.tables[0].rows.map(row => row.cells)).toEqual([["2026-10-19", 54.5], ["2026-10-20", 84.5]]);
+  const planner = vi.mocked(deps.complete).mock.calls.length;
+  const second = await withRevise.execute({ ...input, checkpoint: first.status === "completed" ? first.checkpoint! : {}, userText: "50 이상만, 최대값으로", values: { ...input.values, revision: "50 이상만, 최대값으로" } });
+  expect(second.status).toBe("completed");
+  expect(vi.mocked(deps.complete).mock.calls.length).toBe(planner);
+  const revised = await (vi.mocked(deps.analyze).mock.results.at(-1)!.value as Promise<{ result: { tables: { rows: { cells: unknown[] }[] }[]; excluded: unknown[] } }>);
+  expect(revised.result.tables[0].rows.map(row => row.cells)).toEqual([["2026-10-19", 69], ["2026-10-20", 99]]);
+  expect(revised.result.excluded).toHaveLength(10);
+  expect(second.status === "completed" && second.summary).toContain("계산 변경: agg \"max\"");
 });

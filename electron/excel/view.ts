@@ -17,6 +17,19 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
     if (patch.samplePoints === null) delete chart.samplePoints; else if (patch.samplePoints !== undefined) chart.samplePoints = patch.samplePoints;
     if (patch.colors === null) delete chart.colors; else if (patch.colors !== undefined) chart.colors = patch.colors;
     if (patch.grid === null) delete chart.grid; else if (patch.grid !== undefined) chart.grid = patch.grid;
+    if (patch.tickDirection === null) delete chart.tickDirection; else if (patch.tickDirection !== undefined) chart.tickDirection = patch.tickDirection;
+    if (patch.size === null) delete chart.size; else if (patch.size !== undefined) chart.size = patch.size;
+    // Style groups merge field by field, so "범례 글자 9" keeps an earlier "범례 오른쪽 위".
+    for (const key of ["titleStyle", "legend", "text"] as const) {
+      if (patch[key] === null) delete chart[key];
+      else if (patch[key] !== undefined) chart[key] = { ...chart[key], ...patch[key] } as never;
+    }
+    // Series styles merge per series index; bands and notes, like reference lines, are stated as a whole list.
+    if (patch.series === null || patch.series?.length === 0) delete chart.series;
+    else if (patch.series) { const styles = chart.series ?? []; for (const item of patch.series) { const i = styles.findIndex(old => old.series === item.series); if (i < 0) styles.push(item); else styles[i] = { ...styles[i], ...item }; } chart.series = styles; }
+    for (const key of ["bands", "notes"] as const) {
+      if (patch[key] === null || patch[key]?.length === 0) delete chart[key]; else if (patch[key]) chart[key] = patch[key] as never;
+    }
     // Reference lines have no identity to merge on, so a patch states the whole list; [] or null removes them.
     if (patch.referenceLines === null || patch.referenceLines?.length === 0) delete chart.referenceLines; else if (patch.referenceLines) chart.referenceLines = patch.referenceLines;
     for (const side of ["x", "left", "right"] as const) {
@@ -34,7 +47,7 @@ export function mergeView(current: ReportView | undefined, raw: ViewPatch): Repo
       else {
         const annotations = chart.annotations ?? [];
         for (const item of patch.annotations) {
-          const index = annotations.findIndex(old => old.series === item.series && old.scope === item.scope && old.kind === item.kind && old.x === item.x);
+          const index = annotations.findIndex(old => old.series === item.series && (old.scope ?? "selectedData") === (item.scope ?? "selectedData") && old.kind === item.kind && old.x === item.x);
           const annotation = { ...item, label: item.label ?? annotations[index]?.label ?? annotationLabels[item.kind] };
           if (index < 0) annotations.push(annotation); else annotations[index] = annotation;
         }
@@ -68,6 +81,9 @@ export function validateView(report: Report) {
     }
     if (settings.annotations?.some(item => item.kind === "valueAt") && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "특정 X의 값 표시는 숫자형 X축에서 지원합니다.");
     for (const item of settings.annotations ?? []) if (!chartSeries(chart)[item.series]) throw new ExcelError("UNSUPPORTED", "값을 표시할 시리즈가 없습니다.");
+    if (settings.bands?.length && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "구간 음영은 숫자형 X축에서 지원합니다.");
+    for (const item of settings.series ?? []) if (!chartSeries(chart)[item.series]) throw new ExcelError("UNSUPPORTED", `스타일을 바꿀 시리즈 ${item.series + 1}이 없습니다.`);
+    if (settings.annotations?.some(item => item.kind === "peak") && !numericX(chart)) throw new ExcelError("UNSUPPORTED", "피크 표시는 숫자형 X축의 선·산점도에서 지원합니다.");
   }
 }
 
@@ -88,6 +104,12 @@ export function viewSummary(before: ReportView | undefined, after: ReportView): 
     if (chart.labels !== old.labels) changes.push(`${prefix} 값 라벨: ${chart.labels ? "표시" : "숨김"}`);
     if (chart.samplePoints !== old.samplePoints) changes.push(`${prefix} 표시 샘플링: ${chart.samplePoints ? `약 ${chart.samplePoints}점 (강조점·구간 경계 추가 유지)` : "전체 측정점"}`);
     if (JSON.stringify(chart.colors) !== JSON.stringify(old.colors)) changes.push(`${prefix} 색상: ${chart.colors?.join(", ") ?? "기본값"}`);
+    const styled = { titleStyle: "제목 글자", legend: "범례", text: "전체 글자", tickDirection: "틱 방향", size: "그림 크기(인치)", series: "선 스타일", bands: "구간 음영", notes: "메모" } as const;
+    for (const [key, name] of Object.entries(styled) as [keyof typeof styled, string][]) if (JSON.stringify(chart[key]) !== JSON.stringify(old[key])) changes.push(`${prefix} ${name}: ${chart[key] === undefined ? "기본값" : JSON.stringify(chart[key])}`);
+    for (const side of ["x", "left", "right"] as const) for (const [key, name] of [["tickSize", "눈금 글자 크기"], ["tickColor", "눈금 색"], ["labelSize", "축 이름 크기"], ["labelColor", "축 이름 색"], ["invert", "뒤집기"], ["minor", "보조 눈금"]] as const) {
+      const value = chart.axes?.[side]?.[key];
+      if (value !== old.axes?.[side]?.[key]) changes.push(`${prefix} ${side === "x" ? "X" : side === "left" ? "왼쪽 Y" : "오른쪽 Y"} ${name}: ${value ?? "기본값"}`);
+    }
   }
   return changes;
 }
