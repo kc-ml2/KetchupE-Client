@@ -379,3 +379,37 @@ it("shows a conversational tool's options as quick replies and its files, withou
   fireEvent.click(screen.getByRole("button", { name: "평균 기준" }));
   expect(onReply).toHaveBeenCalledWith("평균 기준");
 });
+
+it("shows what the folder search found for each source and offers the other candidates", async () => {
+  const api = apiFixture(); const older = { ...file, relativePath: "source-old.xlsx", name: "source-old.xlsx" };
+  const searched: BusinessAction = { ...action, input: { values: { date: "2026-10-14" }, files: { source: [file] } }, fileSearch: { connected: true, problems: [], fields: { source: { status: "suggested", candidates: [older, file], reason: "이름의 날짜가 기준일과 같음" } } } };
+  render(<BusinessToolCard api={{ ...api, pickWorkSources: vi.fn(), findBusinessSources: vi.fn().mockResolvedValue(undefined) } as unknown as KetchupEAgentAPI} runId="run" action={searched} />);
+  const panel = screen.getByRole("region", { name: "연결된 폴더에서 찾은 자료" });
+  expect(within(panel).getByRole("button", { name: "다시 찾기" })).toBeInTheDocument();
+  expect(screen.getByText("· 제안")).toHaveAttribute("title", "이름의 날짜가 기준일과 같음");
+  fireEvent.click(within(screen.getByRole("group", { name: "입출금 내역 후보" })).getByRole("button", { name: "source-old.xlsx" }));
+  expect(within(screen.getByRole("list", { name: "입출금 내역 선택된 파일" })).getByText("source-old.xlsx")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "파일 선택…" }));
+  await waitFor(() => expect(api.pickWorkFiles).toHaveBeenCalledWith(false, true));
+  fireEvent.click(screen.getByRole("button", { name: "이 자료로 실행" }));
+  await waitFor(() => expect(api.submitBusinessInput).toHaveBeenCalledWith("run", "action", { values: { date: "2026-10-14" }, files: { source: [older] } }));
+});
+
+it("connects a folder from the card and looks again with what the person already entered", async () => {
+  const api = apiFixture();
+  const pickWorkSources = vi.fn().mockResolvedValueOnce([{ id: "local" }]).mockResolvedValue([{ id: "local" }, { id: "folder" }]);
+  const findBusinessSources = vi.fn().mockResolvedValue(undefined);
+  const empty: BusinessAction = { ...action, fileSearch: { connected: false, problems: ["자금: 폴더가 너무 큽니다."], fields: { source: { status: "none", candidates: [] } } } };
+  render(<BusinessToolCard api={{ ...api, pickWorkSources, findBusinessSources } as unknown as KetchupEAgentAPI} runId="run" action={empty} />);
+  expect(screen.getByText(/연결된 업무 폴더가 없습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("폴더가 너무 큽니다");
+  expect(screen.queryByRole("button", { name: "다시 찾기" })).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("기준일 *"), { target: { value: "2026-10-14" } });
+  // Closing the folder dialog without choosing changes nothing and does not look again.
+  fireEvent.click(screen.getByRole("button", { name: "업무 폴더 연결" }));
+  await waitFor(() => expect(pickWorkSources).toHaveBeenCalledTimes(1));
+  expect(findBusinessSources).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "업무 폴더 연결" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "업무 폴더 연결" }));
+  await waitFor(() => expect(findBusinessSources).toHaveBeenCalledWith("run", "action", { values: { date: "2026-10-14" }, files: {} }));
+});

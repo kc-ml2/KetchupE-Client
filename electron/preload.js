@@ -5,6 +5,7 @@ function agentAPI(sessionId) {
   const invoke = (channel, ...args) => ipcRenderer.invoke(channel, sessionId, ...args);
   return {
   submitBusinessInput: (runId, actionId, input) => invoke('business:submit', runId, actionId, input),
+  findBusinessSources: (runId, actionId, input) => invoke('business:findSources', runId, actionId, input),
   listBusinessArtifacts: (threadId) => invoke('business:artifacts', threadId),
   openBusinessArtifact: (id) => invoke('business:openArtifact', id),
   saveBusinessArtifact: (id) => invoke('business:saveArtifact', id),

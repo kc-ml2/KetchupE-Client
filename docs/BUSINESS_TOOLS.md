@@ -4,7 +4,7 @@ Current implementation, 2026-11-05. `BusinessFlow` is the shared executor; `dail
 
 ## Shared contract
 
-[BusinessTool](../electron/business/contracts.ts) declares an ID, version, routing description, input fields, optional `defaults(today)` and `uploadOnly`, and `execute`. Register it once in [registry.ts](../electron/business/registry.ts); runtime and the worker use the same registry. Do not also register a duplicate workflow.
+[BusinessTool](../electron/business/contracts.ts) declares an ID, version, routing description, input fields, optional `defaults(today)`, `uploadOnly` or `suggestFiles`, and `execute`. Register it once in [registry.ts](../electron/business/registry.ts); runtime and the worker use the same registry. Do not also register a duplicate workflow.
 
 `execute` receives:
 
@@ -37,6 +37,8 @@ Fields support `file`, `date`, `text`, `number`, and `movements`. `multiple: tru
 
 Daily Cash's account-binding text field carries `accountRows` to display the unresolved account codes, names, currencies, balances, and maturities. Users select the report area (H: main-table closing amount, P: business-unit balance) and enter a row number; the card serializes the existing account-to-cell mapping internally. Currency, deposit/maturity, allowed-cell and duplicate-cell checks still run in the business tool. A report balance with no matching KC account requires corrected source files, not a guessed mapping.
 
+A new message routed to a fixed-input tool whose result this thread already completed is first checked by the model: a question about that result is answered from its summary, checks and audit record (the run ends without a card or execution); a new-run request, any doubt, or a model failure opens the input card as usual.
+
 ## Execution and storage
 
 - Inputs use registered native file references; tools receive bytes, not arbitrary paths or shell commands. Duplicate files within a field are rejected. Windows network-drive `realpath` failures with `EISDIR` retry Node's non-native resolver, including in the private-account-data guard before upload or registration, preserving canonical-path and symlink checks. Source files are modified only by tools declaring `updateSource`, after validation.
@@ -64,7 +66,7 @@ Entry point: [dailyCash.ts](../electron/business/dailyCash.ts). The tool prepare
 
 Report date = the previous business day (skip weekends and the maintained Korean holiday calendar). For work date 2026-10-15, use the 2026-10-14 KC closing balances and the latest report sheet before 2026-10-14. Reject a prior sheet more than seven days old; ask before carrying across an unexpected date gap. Never overwrite an existing report-date sheet.
 
-Daily Cash is `uploadOnly`: files come only from the picker, are never prefilled from connected folders, and are kept for the current app session only (not registered as sources; a restart requires a new task). Only the work date defaults to today. The KC date must match the report date; use the report date automatically if absent and reject an explicitly different filename date. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
+Daily Cash looks for its sources before the first card opens. `suggestFiles` names candidates among the connected folders by file name only: the KC workbook by the report date prefix (`YYMMDD_`), weekly plans and the report workbook by the words they are usually named with (these name rules are unverified against real folders). A field is prefilled only when exactly one file fits, or when the model can name which candidate fits from the names alone (for example the week in a weekly plan's name); otherwise the candidates are listed for the person. File contents are never read for this and never sent to the model. Prefilled files are a proposal: nothing runs until the person submits the card, and the tool still validates every file. The card shows what was found per source, can connect a folder and look again; a file picked by hand from the card is kept for the current app session only. If the very first run rejects the sources, the card reopens for correction instead of requiring a new task. Only the work date defaults to today. The KC date must match the report date; use the report date automatically if absent and reject an explicitly different filename date. Weekly plan dates come from cells, not filenames. After execution starts, replacing sources requires a new task.
 
 ### Business rules
 

@@ -1,4 +1,4 @@
-// Live-model check of the Daily Cash chat turn: `npm run eval:daily-cash-chat [-- result.json]` with LITELLM_API_KEY in .env.
+// Live-model check of the Daily Cash chat turn and source search: `npm run eval:daily-cash-chat [-- result.json]` with LITELLM_API_KEY in .env.
 // Stops come from the real calculator on the synthetic fixture workbooks, so only fixture data reaches the model.
 // Each utterance is sent once; the model's decision goes through the same parseDecision/applyPatch as the app and is
 // compared with what a person would expect. A wrong patch is then run through the calculator to see whether its
@@ -12,6 +12,7 @@ import { createLiteLLMClient, type ModelCallInfo } from "../electron/agent/model
 import { DEFAULT_POLICY_PROFILE } from "../electron/agent/policy.ts";
 import { applyPatch, parseDecision, PatchError, TURN_SYSTEM, turnPrompt } from "../electron/business/agentTurn.ts";
 import { dailyCashTool } from "../electron/business/dailyCash.ts";
+import { searchSources } from "../electron/business/sourceSearch.ts";
 import { fixtureBooks } from "../electron/business/dailyCash/fixtures.ts";
 
 type State = { name: string; step?: string; code?: string; question: string; fields: BusinessField[]; pending: string[]; values: Record<string, string>; lastError?: string; real: boolean };
@@ -122,9 +123,31 @@ for (const item of cases) {
   console.log(`${pass ? "PASS" : "FAIL"} [${item.state.name}]${item.fresh ? " (new)" : ""} "${item.text}" → ${outcome.kind}${outcome.rejected ? ` (거절: ${outcome.rejected})` : ""} ${outcome.changed.length ? JSON.stringify(rows.at(-1)!.changed) : ""}${stopsAt ? ` · 계산기는 ${stopsAt}에서 멈춤` : ""} ${ms}ms`);
   if (outcome.message) console.log(`      ↳ (${outcome.message.length}자) ${outcome.message.replace(/\s+/g, " ").slice(0, 200)}`);
 }
+
+// Source search: the name rule narrows the folder, the model only chooses among weekly plans whose names carry a week or date.
+const complete = (system: string, prompt: string, signal: AbortSignal) => client.complete({ system, prompt, purpose: "business", maxOutputTokens: 1000 }, { ...DEFAULT_POLICY_PROFILE, modelAlias: alias }, signal);
+const folders: { name: string; workDate: string; names: string[]; want: Record<string, string[]> }[] = [
+  { name: "주차와 기간이 이름에 있음", workDate: "2026-10-14", want: { cashStatus: ["261013_자금현황표[KC].xlsx"], previousReport: ["2026 일일자금일보.xlsx"], weeklyPlans: ["10월 3주차 주간자금계획(10.12~10.16).xlsx"] },
+    names: ["261012_자금현황표[KC].xlsx", "261013_자금현황표[KC].xlsx", "2026 일일자금일보.xlsx", "10월 2주차 주간자금계획(10.05~10.09).xlsx", "10월 3주차 주간자금계획(10.12~10.16).xlsx", "10월 4주차 주간자금계획(10.19~10.23).xlsx", "회의록.xlsx"] },
+  { name: "주 경계 (월요일 작업, 금요일 기준)", workDate: "2026-10-19", want: { cashStatus: ["261016_자금현황표[KC].xlsx"], previousReport: ["2026 일일자금일보.xlsx"], weeklyPlans: ["10월 3주차 주간자금계획(10.12~10.16).xlsx", "10월 4주차 주간자금계획(10.19~10.23).xlsx"] },
+    names: ["261016_자금현황표[KC].xlsx", "2026 일일자금일보.xlsx", "10월 2주차 주간자금계획(10.05~10.09).xlsx", "10월 3주차 주간자금계획(10.12~10.16).xlsx", "10월 4주차 주간자금계획(10.19~10.23).xlsx"] },
+  { name: "이름에 날짜 단서가 없음 (고르지 않아야 함)", workDate: "2026-10-14", want: { cashStatus: ["261013_자금현황표[KC].xlsx"], previousReport: [], weeklyPlans: [] },
+    names: ["261013_자금현황표[KC].xlsx", "일일자금일보_최종.xlsx", "일일자금일보_사본.xlsx", "주간자금계획_최종.xlsx", "주간자금계획_수정본.xlsx"] },
+];
+let searchPassed = 0;
+for (const folder of folders) {
+  const listed = { connected: true, problems: [], files: folder.names.map((name) => ({ sourceId: "eval", relativePath: name, name })) };
+  const found = await searchSources(dailyCashTool, { workDate: folder.workDate }, listed, complete, new AbortController().signal);
+  const got = Object.fromEntries(Object.keys(folder.want).map((key) => [key, (found.files[key] ?? []).map((entry) => entry.name).sort()]));
+  const pass = JSON.stringify(got) === JSON.stringify(Object.fromEntries(Object.entries(folder.want).map(([key, names]) => [key, [...names].sort()])));
+  searchPassed += Number(pass);
+  rows.push({ state: "SOURCE_SEARCH", text: folder.name, pass, changed: got, message: Object.entries(found.search.fields).map(([key, field]) => `${key}: ${field.status}${field.reason ? ` (${field.reason})` : ""}`).join(" · ") });
+  console.log(`${pass ? "PASS" : "FAIL"} [SOURCE_SEARCH] ${folder.name} (작업일 ${folder.workDate})\n      ↳ ${rows.at(-1)!.message}${pass ? "" : `\n      ↳ got ${JSON.stringify(got)}`}`);
+}
+const turns = rows.filter((row) => row.state !== "SOURCE_SEARCH");
 const passed = (list: typeof rows) => `${list.filter((row) => row.pass).length}/${list.length}`;
-const times = rows.map((row) => Number(row.ms)).sort((a, b) => a - b);
-const replies = rows.filter((row) => row.kind === "reply").map((row) => String(row.message).length).sort((a, b) => a - b);
-const slipped = rows.filter((row) => row.stopsAt === "REVIEW" || row.stopsAt === "completed");
-console.log(`\n${passed(rows)} pass (tuned ${passed(rows.filter((row) => !row.fresh))}, new ${passed(rows.filter((row) => row.fresh))}) · model ${alias} · median ${times[Math.floor(times.length / 2)]}ms, max ${times.at(-1)}ms · reply length median ${replies[Math.floor(replies.length / 2)]}, max ${replies.at(-1)} chars · wrong patches reaching review: ${slipped.length}`);
+const times = turns.map((row) => Number(row.ms)).sort((a, b) => a - b);
+const replies = turns.filter((row) => row.kind === "reply").map((row) => String(row.message).length).sort((a, b) => a - b);
+const slipped = turns.filter((row) => row.stopsAt === "REVIEW" || row.stopsAt === "completed");
+console.log(`\nsource search ${searchPassed}/${folders.length} · chat ${passed(turns)} pass (tuned ${passed(turns.filter((row) => !row.fresh))}, new ${passed(turns.filter((row) => row.fresh))}) · model ${alias} · median ${times[Math.floor(times.length / 2)]}ms, max ${times.at(-1)}ms · reply length median ${replies[Math.floor(replies.length / 2)]}, max ${replies.at(-1)} chars · wrong patches reaching review: ${slipped.length}`);
 if (process.argv[2]) writeFileSync(process.argv[2], JSON.stringify({ alias, rows }, null, 2));

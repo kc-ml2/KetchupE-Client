@@ -67,7 +67,18 @@ export const dailyCashTool: BusinessTool = {
     { key: "cashStatus", label: "기준일 자금현황표(KC) (작업일 직전 영업일 파일)", type: "file", required: true },
   ],
   defaults: (today) => ({ workDate: today }),
-  uploadOnly: true,
+  // File names are the only clue before a file is opened. The KC name carries the balance date (YYMMDD_); the other two
+  // are matched by the words these documents are usually named with. A wrong guess is caught when the file is read.
+  suggestFiles(files, values) {
+    let reportDate: string | undefined;
+    try { reportDate = previousBusinessDay(date(values.workDate)); } catch { /* no usable work date yet */ }
+    const named = (pattern: RegExp) => files.flatMap((file, index) => pattern.test(file.name.normalize("NFC")) ? [index] : []);
+    const dated = reportDate ? named(new RegExp(`^${sheetDate(reportDate)}_`)) : [];
+    const status = dated.length ? dated : named(/자금현황|\[KC\]/i);
+    const weekly = named(/주간|자금계획|weekly/i).filter((index) => !status.includes(index));
+    const report = named(/일보|일일자금|daily/i).filter((index) => !status.includes(index) && !weekly.includes(index));
+    return { candidates: { cashStatus: status, weeklyPlans: weekly, previousReport: report }, context: { workDate: values.workDate ?? "", reportDate: reportDate ?? "", cashStatusNamePrefix: reportDate ? `${sheetDate(reportDate)}_` : "" } };
+  },
   async execute(input) {
     const { values, files, signal } = input; const checkpoint = { ...input.checkpoint };
     // Steps only name where the fixed sequence is; the order itself never changes.

@@ -43,6 +43,12 @@ export type BusinessTool = WorkflowRoute & {
   defaults?: (today: string) => Record<string, string>;
   /** Files come only from the picker for each run, never from connected folders, and are not remembered as sources. */
   uploadOnly?: boolean;
+  /**
+   * Names which connected files could fill each file field, by file name and path only (indices into `files`).
+   * `context` is what the tool derived from the values (e.g. the report date) for choosing between several candidates.
+   * The executor prefills a field only when one candidate is clearly it; the tool still validates every file it is given.
+   */
+  suggestFiles?: (files: { name: string; relativePath: string }[], values: Record<string, string>) => { candidates: Record<string, number[]>; context?: Record<string, string> };
   execute: (input: {
     values: Record<string, string>;
     /** Files in the order the user chose them; single-file fields hold one entry. */

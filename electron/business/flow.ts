@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentStreamEvent } from "../../src/app-types/Agent.types.ts";
-import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput } from "../../src/app-types/BusinessTool.types.ts";
+import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput, FileSearch } from "../../src/app-types/BusinessTool.types.ts";
 import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { REVISE_REQUEST_TEXT } from "../../src/app-types/BusinessTool.types.ts";
 import { appendMessage, getRun, getRunAction, setRunStatus } from "../agent/store.ts";
@@ -12,12 +12,15 @@ import { startWorkflowRun } from "../agent/runLifecycle.ts";
 import type { AgentWorkflow, WorkflowStartInput } from "../agent/workflows.ts";
 import { WorkSources } from "../work/sources.ts";
 import { businessInputSchema, businessTraceSchema, type BusinessTool, type Recovery } from "./contracts.ts";
-import { applyPatch, parseDecision, PatchError, TURN_SYSTEM, turnPrompt } from "./agentTurn.ts";
+import { applyPatch, parseDecision, PatchError, TURN_SYSTEM, RESULT_SYSTEM, turnPrompt } from "./agentTurn.ts";
+import { searchSources, type Listed } from "./sourceSearch.ts";
 
 /** `confirmed` flips on the first accepted submission; until then every prefilled value (suggested files, today's date) stays editable. */
 type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean; baseArtifactId?: string; revision?: number;
   /** Where and why the tool last stopped, and the last failure: the state a chat turn explains and the trace records. */
-  stop?: { step?: string; code?: string }; lastError?: { message: string; recovery?: Recovery; step?: string } };
+  stop?: { step?: string; code?: string }; lastError?: { message: string; recovery?: Recovery; step?: string };
+  /** What the last look through the connected folders found; shown only while the source files are still open. */
+  search?: FileSearch };
 /** A chat-driven submission: the user's message is already in the thread, `echo` states what was applied. */
 type ChatSubmission = { echo: string };
 const RECOVERY_GUIDE: Record<Recovery, string> = {
@@ -85,6 +88,13 @@ export class BusinessFlow {
     if (tool.defaults) initial.values = { ...initial.values, ...tool.defaults(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Seoul" })) };
     this.save(runId, { toolId: tool.id, version: tool.version, input: initial, fingerprints, fields: tool.fields, checkpoint, baseArtifactId });
     if (tool.unavailableReason) { this.finish(runId, tool.unavailableReason, "abstained"); return { runId, done: Promise.resolve() }; }
+    // A tool that can name its files starts by looking for them; the card then opens with what was found for the person to confirm.
+    const open = () => this.lookFor(runId).then(() => { if (getRun(this.db, runId).status === "running") this.ask(runId, tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요."); });
+    // A question about the result this thread already finished is answered from that result's record; it does not open a new run's card.
+    const earlier = !tool.editable && this.converse && !tool.title.startsWith(input.text.trim())
+      ? this.db.prepare("SELECT a.audit, (SELECT content FROM messages WHERE run_id=r.id AND role='assistant' ORDER BY rowid DESC LIMIT 1) AS message FROM runs r JOIN business_artifacts a ON a.run_id=r.id WHERE r.thread_id=? AND r.kind=? AND r.status='completed' ORDER BY r.created_at DESC, r.rowid DESC, a.rowid LIMIT 1").get(input.threadId, tool.id) : undefined;
+    if (earlier) return { runId, done: this.track(runId, this.answerFromResult(runId, tool, earlier, input.text).then((answered) => answered ? undefined : tool.suggestFiles ? open() : this.ask(runId, tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요."))) };
+    if (tool.suggestFiles && !tool.editable) return { runId, done: this.track(runId, open()) };
     this.ask(runId, baseArtifactId ? "선택한 결과의 기준을 유지합니다. 바꾸고 싶은 내용을 입력해 주세요." : tool.editable && initial.values.request ? ASK_FILES : tool.initialQuestion ?? "기준 정보와 원천 파일을 지정해 주세요.");
     if (tool.editable && initial.files.source?.length && input.text !== REVISE_REQUEST_TEXT) return { runId, done: this.submit(runId, getRunAction(this.db, runId)!.id, initial, input.text) };
     return { runId, done: Promise.resolve() };
@@ -143,6 +153,75 @@ export class BusinessFlow {
     this.submissions.set(runId, task);
     void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
     return task;
+  }
+
+  /** Registers work that holds the run so a second request is refused and `drain`/`stop` wait for it. */
+  private track(runId: string, task: Promise<void>): Promise<void> {
+    this.pending.add(task);
+    this.submissions.set(runId, task);
+    void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
+    return task;
+  }
+
+  private async listConnected(): Promise<Listed> {
+    const sources = new WorkSources(this.db), list = sources.list(), files: WorkFile[] = [], problems: string[] = [];
+    // A folder that cannot be listed (too large, moved) is reported instead of hiding the rest.
+    for (const source of list) try { files.push(...await sources.files(source.id)); } catch (error) { problems.push(`${source.name}: ${(error as NodeJS.ErrnoException)?.code === "ENOENT" ? "연결했던 위치에서 찾을 수 없습니다 (이동·삭제됨)." : error instanceof Error ? error.message : String(error)}`); }
+    return { files: files.slice(0, 2000), connected: list.length > 0, problems };
+  }
+
+  /** True when the message was a question about the finished result and has been answered; any doubt or failure starts the tool as usual. */
+  private async answerFromResult(runId: string, tool: BusinessTool, earlier: Record<string, unknown>, text: string): Promise<boolean> {
+    const controller = new AbortController();
+    this.turns.set(runId, controller);
+    const started = Date.now();
+    let decision = "error";
+    try {
+      const audit = JSON.parse(String(earlier.audit)) as { checks?: unknown; externalData?: unknown };
+      // ponytail: the record is cut at 12,000 characters; pick fields per tool if a result outgrows it.
+      const parsed = parseDecision(await this.abortable(this.converse!(RESULT_SYSTEM, JSON.stringify({ title: tool.title, result: String(earlier.message ?? ""), checks: audit.checks, record: JSON.stringify(audit.externalData ?? {}).slice(0, 12_000), userText: text }), controller.signal), controller.signal));
+      decision = parsed.kind === "reply" ? "reply" : "start";
+      if (parsed.kind !== "reply" || getRun(this.db, runId).status !== "running") return false;
+      this.finish(runId, parsed.message, "abstained");
+      return true;
+    } catch { return false; }
+    finally {
+      this.turns.delete(runId);
+      new TraceWriter(this.db, runId).record("model.completed", "runtime", { localOnly: true, phase: "model", operation: "result_question", decision }, { startedAt: started });
+    }
+  }
+
+  /** Looks through the connected folders and prefills the file fields the person has not filled. Failing to look is not an error: the card opens empty. */
+  private async lookFor(runId: string): Promise<void> {
+    const job = this.job(runId), tool = this.tools.get(job.toolId)!;
+    const controller = new AbortController();
+    this.turns.set(runId, controller);
+    const started = Date.now();
+    this.event(runId, "status", { phase: "연결된 폴더에서 자료 찾는 중" });
+    try {
+      const found = await this.abortable(this.listConnected().then((listed) => searchSources(tool, job.input.values, listed, this.converse, controller.signal)), controller.signal);
+      for (const [key, files] of Object.entries(found.files)) if (!job.input.files[key]?.length) job.input.files[key] = files;
+      job.search = found.search;
+      this.save(runId, job);
+      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "discover", connected: found.search.connected, problems: found.search.problems.length,
+        fields: Object.fromEntries(Object.entries(found.search.fields).map(([key, field]) => [key, { status: field.status, candidates: field.candidates.length }])) }, { startedAt: started });
+    } catch { /* cancelled or unreadable sources: the person can still pick files */ }
+    finally { this.turns.delete(runId); }
+  }
+
+  /** The card's "connect a folder / look again": keeps what the person typed and picked, replaces only what an earlier look had filled in. */
+  findSources(runId: string, actionId: string, raw: unknown): Promise<void> {
+    const job = this.job(runId), tool = this.tools.get(job.toolId), action = getRunAction(this.db, runId);
+    if (!tool?.suggestFiles || job.confirmed) return Promise.reject(new Error("확정된 원천 자료는 다시 찾을 수 없습니다. 새 작업으로 요청해 주세요."));
+    if (getRun(this.db, runId).status !== "waiting_user" || action?.id !== actionId || this.submissions.has(runId)) return Promise.reject(new Error("이미 처리되었거나 변경된 입력 요청입니다."));
+    const input = businessInputSchema.parse(raw);
+    const fromSearch = (key: string) => (input.files[key] ?? []).every((file) => job.search?.fields[key]?.candidates.some((candidate) => sameFile(candidate, file)));
+    job.input = { values: Object.fromEntries(tool.fields.filter((field) => field.type !== "file" && input.values[field.key]).map((field) => [field.key, input.values[field.key]])),
+      files: Object.fromEntries(tool.fields.filter((field) => field.type === "file" && input.files[field.key]?.length && !fromSearch(field.key)).map((field) => [field.key, input.files[field.key]])) };
+    this.validateInput(tool.fields.map((field) => ({ ...field, required: false })), job.input);
+    this.save(runId, job);
+    setRunStatus(this.db, runId, "running");
+    return this.track(runId, this.lookFor(runId).then(() => { if (getRun(this.db, runId).status === "running") this.ask(runId, action.question); }));
   }
 
   /**
@@ -266,6 +345,7 @@ export class BusinessFlow {
         } else if (job.fingerprints[key] && (JSON.stringify(job.fingerprints[key]) !== JSON.stringify(fingerprints) || JSON.stringify(job.input.files[key]) !== JSON.stringify(list))) throw new Error("원천 파일이 변경되었습니다. 새 작업으로 다시 실행해 주세요.");
       }
       controller.signal.throwIfAborted();
+      const firstRun = !job.confirmed;
       job.input = input; job.confirmed = true;
       job.fingerprints = Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((value) => value.fingerprint)]));
       this.save(runId, job);
@@ -299,7 +379,12 @@ export class BusinessFlow {
         job.checkpoint = result.checkpoint ?? job.checkpoint;
         if (JSON.stringify(job.checkpoint ?? {}).length > 1000000) throw new Error("업무 중간 상태가 너무 큽니다.");
         this.save(runId, job); this.ask(runId, result.question);
-      } else if (result.status === "failed") { this.save(runId, job); this.retry(runId, result.message, result.code, result.recovery); }
+      } else if (result.status === "failed") {
+        // Wrong sources on the very first run cost nothing yet: no answer depends on them, so the card reopens for a correction instead of forcing a new task.
+        const reopen = firstRun && result.recovery === "new_run";
+        if (reopen) { job.confirmed = false; job.fingerprints = {}; }
+        this.save(runId, job); this.retry(runId, result.message, result.code, reopen ? "fix_input" : result.recovery);
+      }
       else if (result.status === "completed") {
         if (!result.checks.length || result.checks.some((check) => check.passed !== true)) throw new Error("업무 검증을 통과하지 못했습니다.");
         const outputs = [result.file, ...(result.additionalFiles ?? [])];
@@ -434,7 +519,7 @@ export class BusinessFlow {
   }
   private ask(runId: string, question: string) {
     const job = this.job(runId);
-    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly, revisionMode: Boolean(job.baseArtifactId), conversational: this.tools.get(job.toolId)?.editable };
+    const action: BusinessAction = { id: randomUUID(), type: "business_tool", title: this.tools.get(job.toolId)?.title ?? job.toolId, question, fields: job.fields, input: job.input, lockedKeys: this.lockedKeys(job), uploadOnly: this.tools.get(job.toolId)?.uploadOnly, fileSearch: job.confirmed ? undefined : job.search, revisionMode: Boolean(job.baseArtifactId), conversational: this.tools.get(job.toolId)?.editable };
     this.db.prepare("INSERT INTO run_actions (run_id, action) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET action = excluded.action").run(runId, JSON.stringify(action));
     setRunStatus(this.db, runId, "waiting_user");
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: question });

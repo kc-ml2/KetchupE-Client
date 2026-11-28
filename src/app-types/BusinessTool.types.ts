@@ -17,11 +17,19 @@ export type BusinessField = { key: string; label: string; type: "file" | "date" 
   manualOnly?: boolean;
 };
 export type BusinessInput = { values: Record<string, string>; files: Record<string, WorkFile[]> };
+/**
+ * What looking through the connected folders found for each file field, shown on the first input card.
+ * `found`: exactly one file fits and is prefilled. `suggested`: one of several candidates is prefilled with a reason.
+ * `choose`: several candidates, none prefilled. `none`: nothing fits. Prefilled files are still only a proposal.
+ */
+export type FileSearch = { connected: boolean; problems: string[]; fields: Record<string, { status: "found" | "suggested" | "choose" | "none"; candidates: WorkFile[]; reason?: string }> };
 export type BusinessAction = {
   id: string; type: "business_tool"; title: string; question: string;
   fields: BusinessField[]; input: BusinessInput; lockedKeys?: string[];
   /** Files come only from the file picker and are not remembered as connected sources. */
   uploadOnly?: boolean;
+  /** Present while the source files are still open and the tool can look for them in connected folders. */
+  fileSearch?: FileSearch;
   revisionMode?: boolean;
   /** The tool takes its answers from the chat composer (text + attached files); the card only shows quick replies and the current files. */
   conversational?: boolean;
@@ -29,6 +37,8 @@ export type BusinessAction = {
 export type BusinessArtifact = { id: string; runId: string; name: string; toolId: string; version: string; revision?: number; preview?: boolean; baseArtifactId?: string; changes?: string[] };
 export interface BusinessToolAPI {
   submitBusinessInput(runId: string, actionId: string, input: BusinessInput): Promise<void>;
+  /** Looks through the connected folders again (after connecting one or changing a date) and reopens the card with the result. */
+  findBusinessSources(runId: string, actionId: string, input: BusinessInput): Promise<void>;
   listBusinessArtifacts(threadId: string): Promise<BusinessArtifact[]>;
   openBusinessArtifact(id: string): Promise<void>;
   saveBusinessArtifact(id: string): Promise<boolean>;

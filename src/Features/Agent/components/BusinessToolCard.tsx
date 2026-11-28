@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LuArrowUp, LuCheck, LuChevronDown, LuDownload, LuFile, LuMaximize2, LuPanelRight, LuPaperclip, LuX, LuZoomIn, LuZoomOut } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronDown, LuDownload, LuFile, LuFolderPlus, LuMaximize2, LuPanelRight, LuPaperclip, LuRefreshCw, LuX, LuZoomIn, LuZoomOut } from "react-icons/lu";
 import type { KetchupEAgentAPI } from "@app-types/Agent.types";
 import type { BusinessAction, BusinessArtifact, BusinessField, BusinessInput } from "@app-types/BusinessTool.types";
 import type { WorkFile, WorkSource } from "@app-types/WorkSource.types";
@@ -93,6 +93,14 @@ function BusinessInputForm({ api, runId, action }: { api: KetchupEAgentAPI; runI
     try { await fn(); } catch (cause) { setError(String(cause)); } finally { setBusy(false); }
   };
   const setValue = (key: string, value: string) => setInput((current) => ({ ...current, values: { ...current.values, [key]: value } }));
+  const search = action.fileSearch;
+  // Connecting a folder is done once, inside the task: the card comes back with what was found for each source.
+  const connectFolder = () => perform(async () => {
+    const before = (await api.listWorkSources()).length;
+    if ((await api.pickWorkSources("folder")).length === before) return;
+    await api.findBusinessSources(runId, action.id, input);
+  });
+  const linkButton = "inline-flex items-center gap-1 rounded text-xs text-[#52525B] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#71717A] disabled:opacity-50 dark:text-[#A1A1AA]";
   return <div className="flex items-start gap-3 w-full mt-6 mb-3">
     <img src={KetchupE} alt="" className="w-7 h-7 shrink-0 object-cover" />
     <form aria-label={`${action.title} 입력`} onSubmit={(event) => { event.preventDefault(); void perform(async () => { await api.submitBusinessInput(runId, action.id, input); }); }}
@@ -103,7 +111,17 @@ function BusinessInputForm({ api, runId, action }: { api: KetchupEAgentAPI; runI
       </details>}
       {error && <p role="alert" className="mb-4 rounded-lg bg-[#FEF2F2] px-3 py-2 text-xs leading-relaxed text-[#B91C1C] dark:bg-[#450A0A] dark:text-[#FCA5A5]">{error}</p>}
       {criteria.length > 0 && <div className="mb-4 text-xs text-[#52525B] dark:text-[#A1A1AA]"><p className="whitespace-pre-wrap break-words">현재 기준: {criteria.map(field => confirmedValue(field, input)).filter(Boolean).join(" · ")}</p><button type="button" className={`${control} mt-2`} aria-expanded={editingCriteria} onClick={() => setEditingCriteria(value => !value)}>{editingCriteria ? "기준 접기" : "기준 변경"}</button></div>}
-      <fieldset disabled={busy} className="grid min-w-0 gap-5">
+      {search && needsFiles && <section aria-label="연결된 폴더에서 찾은 자료" className="mb-3 grid gap-1 text-xs leading-5 text-[#52525B] dark:text-[#A1A1AA]">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+          <p>{search.connected ? "연결 폴더에서 찾은 자료입니다. 확인 후 실행하세요." : "연결된 업무 폴더가 없습니다. 연결하면 다음부터 자동으로 찾습니다."}</p>
+          <span className="flex gap-3">
+            {search.connected && <button type="button" disabled={busy} className={linkButton} onClick={() => void perform(() => api.findBusinessSources(runId, action.id, input))}><LuRefreshCw aria-hidden className="h-3 w-3" />다시 찾기</button>}
+            <button type="button" disabled={busy} className={search.connected ? linkButton : fileButton} onClick={() => void connectFolder()}><LuFolderPlus aria-hidden className="h-3.5 w-3.5" />{search.connected ? "다른 폴더 연결" : "업무 폴더 연결"}</button>
+          </span>
+        </div>
+        {search.problems.length > 0 && <details><summary className="cursor-pointer text-[#B91C1C] dark:text-[#FCA5A5]">읽지 못한 연결 {search.problems.length}개</summary>{search.problems.map((problem) => <p key={problem} role="alert" className="break-words">{problem}</p>)}</details>}
+      </section>}
+      <fieldset disabled={busy} className="grid min-w-0 gap-4">
         {open.map((field) => {
           const label = `${field.label}${field.required ? " *" : ""}`;
           if (field.confirm) return <p key={field.key} className="flex items-center gap-2 text-[#52525B] dark:text-[#A1A1AA]"><LuCheck aria-hidden className="shrink-0" />{field.label}</p>;
@@ -132,19 +150,31 @@ function BusinessInputForm({ api, runId, action }: { api: KetchupEAgentAPI; runI
           const chosen = input.files[field.key] ?? [];
           // Single-file fields replace the selection; multi-file fields append without duplicates.
           const choose = (picked: WorkFile[]) => setInput((current) => {
+            // A cancelled file dialog picks nothing and must not clear a file that is already there.
+            if (!picked.length) return current;
             const merged = field.multiple ? [...(current.files[field.key] ?? []), ...picked] : picked.slice(0, 1);
             const unique = merged.filter((file, index) => merged.findIndex((item) => sameFile(item, file)) === index);
             return { ...current, files: { ...current.files, [field.key]: unique } };
           });
           const remove = (file: WorkFile) => setInput((current) => ({ ...current, files: { ...current.files, [field.key]: (current.files[field.key] ?? []).filter((item) => !sameFile(item, file)) } }));
-          return <fieldset key={field.key} className="grid min-w-0 gap-3">
-            <legend className={`${fieldLabel} mb-2`}>{label}{field.multiple && <span className="ml-2 font-normal">여러 파일 가능</span>}</legend>
-            <ul aria-label={`${field.label} 선택된 파일`} className="flex min-w-0 flex-wrap gap-2 empty:hidden">
-              {chosen.map((file) => <li key={`${file.sourceId}:${file.relativePath}`} className="flex max-w-full items-center gap-2 rounded-xl border border-[#E4E4E7] bg-white py-1 pl-3 pr-1 dark:border-[#3F3F46] dark:bg-[#27272A]"><LuFile aria-hidden className="h-4 w-4 shrink-0 text-[#71717A] dark:text-[#A1A1AA]" /><span title={file.relativePath || file.name} className="min-w-0 truncate text-xs">{file.relativePath || file.name}</span><button type="button" onClick={() => remove(file)} aria-label={`${file.name} 빼기`} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#71717A] hover:bg-[#F4F4F5] hover:text-[#18181B] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#71717A] dark:text-[#A1A1AA] dark:hover:bg-[#3F3F46] dark:hover:text-white"><LuX aria-hidden className="h-3.5 w-3.5" /></button></li>)}
-            </ul>
-            <div className="flex flex-wrap gap-2">
-              <button className={fileButton} type="button" onClick={() => void perform(async () => choose(await api.pickWorkFiles(Boolean(field.multiple), action.uploadOnly)))}><LuPaperclip aria-hidden className="h-3.5 w-3.5" />{field.multiple ? "파일 추가…" : "파일 선택…"}</button>
-              {files.length > 0 && <span className="relative min-w-0 max-w-full"><select aria-label={`${field.label} 연결된 자료에서 고르기`} className={`${fileButton} w-full appearance-none pr-9 dark:[color-scheme:dark]`} value="" onChange={(event) => { const file = files.find((item) => JSON.stringify(item) === event.target.value); if (file) choose([file]); }}>
+          const found = search?.fields[field.key];
+          const candidates = (found?.candidates ?? []).filter((file) => !chosen.some((item) => sameFile(item, file)));
+          // One short word per source: how the file got here, or what the person still has to do.
+          const status = !found ? "" : chosen.length ? (found.status === "found" ? "자동 선택" : found.status === "suggested" ? "제안" : "") : candidates.length ? "후보에서 선택" : "찾지 못함";
+          return <fieldset key={field.key} className="grid min-w-0 gap-1.5">
+            <legend className={`${fieldLabel} mb-1.5`}><strong className="font-bold text-[#18181B] dark:text-[#FAFAFA]">{label.split(" (")[0]}</strong>{label.slice(label.split(" (")[0].length)}{field.multiple && <span className="ml-2 font-normal">여러 파일 가능</span>}{status && <span title={found?.reason} className={`ml-2 font-normal ${chosen.length ? "text-[#71717A] dark:text-[#A1A1AA]" : "text-[#B45309] dark:text-[#FBBF24]"}`}>· {status}</span>}</legend>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <ul aria-label={`${field.label} 선택된 파일`} className="contents">
+                {chosen.map((file) => <li key={`${file.sourceId}:${file.relativePath}`} className="flex max-w-full items-center gap-1.5 rounded-full border border-[#A1A1AA] bg-white py-0.5 pl-3 pr-0.5 dark:border-[#71717A] dark:bg-[#27272A]"><LuCheck aria-hidden className="h-3.5 w-3.5 shrink-0 text-[#15803D] dark:text-[#4ADE80]" /><span title={file.relativePath || file.name} className="min-w-0 truncate text-xs">{file.relativePath || file.name}</span><button type="button" onClick={() => remove(file)} aria-label={`${file.name} 빼기`} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[#71717A] hover:bg-[#F4F4F5] hover:text-[#18181B] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#71717A] dark:text-[#A1A1AA] dark:hover:bg-[#3F3F46] dark:hover:text-white"><LuX aria-hidden className="h-3.5 w-3.5" /></button></li>)}
+              </ul>
+              {/* Candidates are dashed: not selected yet, one click selects. */}
+              {candidates.length > 0 && <span role="group" aria-label={`${field.label} 후보`} className="contents">
+                {candidates.map((file) => <button key={`${file.sourceId}:${file.relativePath}`} type="button" title={file.relativePath || file.name} className={`${fileButton} max-w-full border-dashed`} onClick={() => choose([file])}><span className="min-w-0 truncate">{file.relativePath || file.name}</span></button>)}
+              </span>}
+              {/* A single pick is for this session only; the lasting connection is the folder. */}
+              <button className={linkButton} type="button" onClick={() => void perform(async () => choose(await api.pickWorkFiles(Boolean(field.multiple), action.uploadOnly || (search ? true : undefined))))}><LuPaperclip aria-hidden className="h-3.5 w-3.5" />{field.multiple ? "파일 추가…" : "파일 선택…"}</button>
+              {/* With a folder search the candidates already are the connected files that fit; the full list is the fallback when none did. */}
+              {files.length > 0 && !(found && found.candidates.length) && <span className="relative min-w-0 max-w-full"><select aria-label={`${field.label} 연결된 자료에서 고르기`} className={`${fileButton} w-full appearance-none pr-9 dark:[color-scheme:dark]`} value="" onChange={(event) => { const file = files.find((item) => JSON.stringify(item) === event.target.value); if (file) choose([file]); }}>
                 <option value="">연결된 자료에서 고르기</option>
                 {files.filter((file) => !chosen.some((item) => sameFile(item, file))).map((file) => <option key={`${file.sourceId}:${file.relativePath}`} value={JSON.stringify(file)}>{file.relativePath || file.name}</option>)}
               </select><LuChevronDown aria-hidden className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#71717A] dark:text-[#A1A1AA]" /></span>}

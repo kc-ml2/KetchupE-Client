@@ -15,6 +15,7 @@ const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
 export function registerWorkSourceHandlers(runtime: AgentRuntime, workerPath: string, handle: typeof ipcMain.handle = ipcMain.handle.bind(ipcMain), assertActive: () => void = () => undefined): void {
   handle("business:submit", (_event, runId: unknown, actionId: unknown, input: unknown) => { const id = z.string().min(1).parse(runId); runtime.harness.assertAvailable(id); return runtime.businessFlow.submit(id, z.string().min(1).parse(actionId), input); });
+  handle("business:findSources", (_event, runId: unknown, actionId: unknown, input: unknown) => { const id = z.string().min(1).parse(runId); runtime.harness.assertAvailable(id); return runtime.businessFlow.findSources(id, z.string().min(1).parse(actionId), input); });
   handle("business:artifacts", (_event, threadId: unknown) => runtime.businessFlow.artifacts(z.string().min(1).parse(threadId)));
   handle("business:previewArtifact", async (_event, id: unknown) => {
     const path = await runtime.businessFlow.artifactPath(z.string().uuid().parse(id));

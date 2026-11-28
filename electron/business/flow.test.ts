@@ -440,18 +440,122 @@ it("keeps the card and answers when the model fails, and drops a reply that arri
 
 it("keeps the original reason, the inputs and the stop location when a failure cannot be recovered here", async () => {
   tool.execute = vi.fn(async (): Promise<ToolResult> => ({ status: "failed", message: "기준일 자료가 아닙니다.", recovery: "new_run", step: "evidence", trace: [{ step: "evidence", ms: 3 }] }));
+  vi.mocked(tool.execute).mockResolvedValueOnce(followUp());
   const model = scripted({ kind: "reply", message: "기준일 자료가 아니어서 멈췄습니다." });
   flow = chatFlow([tool], model.converse); const runId = start();
   await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const answered = { ...input, values: { ...input.values, memo: "확인", approve: "승인" } };
+  await flow.submit(runId, getRunAction(db, runId)!.id, answered);
   const action = getRunAction(db, runId) as BusinessAction;
   expect(getRun(db, runId).status).toBe("waiting_user");
   expect(action.question).toContain("기준일 자료가 아닙니다.");
   expect(action.question).toContain("새 작업으로 시작해 주세요");
-  expect(action.input).toEqual(input);
-  expect(readTrace(db, runId).find((event) => event.payload.phase === "execute")?.payload).toMatchObject({ outcome: "failed", step: "evidence", recovery: "new_run", steps: [{ step: "evidence", ms: 3 }] });
+  expect(action.input).toEqual(answered);
+  expect(action.lockedKeys).toEqual(expect.arrayContaining(["businessDate", "source"]));
+  expect(readTrace(db, runId).filter((event) => event.payload.phase === "execute").at(-1)?.payload).toMatchObject({ outcome: "failed", step: "evidence", recovery: "new_run", steps: [{ step: "evidence", ms: 3 }] });
   await flow.workflows()[0].resume!(runId, "왜 멈췄어?").done;
   expect(model.prompts[0]).toMatchObject({ step: "evidence", lastError: "기준일 자료가 아닙니다." });
+  expect(tool.execute).toHaveBeenCalledTimes(2);
+});
+
+it("reopens the sources for correction when the very first run rejects them, instead of forcing a new task", async () => {
+  vi.mocked(tool.execute).mockResolvedValueOnce({ status: "failed", message: "기준일 자료가 아닙니다.", recovery: "new_run", step: "evidence" });
+  const runId = start(); await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const action = getRunAction(db, runId) as BusinessAction;
+  expect(action.question).toContain("기준일 자료가 아닙니다.");
+  expect(action.question).toContain("고친 뒤 다시 실행");
+  expect(action.lockedKeys).toEqual([]);
+  await flow.submit(runId, action.id, { ...input, values: { businessDate: "2026-10-16" } });
+  expect(tool.execute).toHaveBeenLastCalledWith(expect.objectContaining({ values: { businessDate: "2026-10-16" } }));
+  expect(getRun(db, runId).status).toBe("completed");
+});
+
+/** Registers extra workbooks next to source.xlsx and returns all connected files by name. */
+const connect = async (...names: string[]) => {
+  const sources = new WorkSources(db);
+  for (const name of names) { await writeFile(join(folder, name), output); await sources.register([join(folder, name)], "file"); }
+  const files = (await Promise.all(sources.list().map((source) => sources.files(source.id)))).flat();
+  return (name: string) => files.find((file) => file.name === name)!;
+};
+const begin = async () => { const { runId, done } = flow.workflows()[0].start({ threadId, workspaceId: "default", text: "테스트" }); await done; return runId; };
+const byName = (pattern: RegExp): BusinessTool["suggestFiles"] => (files) => ({ candidates: { source: files.flatMap((file, index) => pattern.test(file.name) ? [index] : []) }, context: { rule: String(pattern) } });
+
+it("starts by looking through connected sources and prefills only a file that is clearly the one", async () => {
+  const file = await connect("other.xlsx"); tool.suggestFiles = byName(/^source/);
+  const runId = await begin(); const action = getRunAction(db, runId) as BusinessAction;
+  expect(getRun(db, runId).status).toBe("waiting_user");
+  expect(action.input.files).toEqual({ source: [file("source.xlsx")] });
+  expect(action.fileSearch).toEqual({ connected: true, problems: [], fields: { source: { status: "found", candidates: [file("source.xlsx")] } } });
+  expect(tool.execute).not.toHaveBeenCalled();
+  expect(readTrace(db, runId).find((event) => event.payload.phase === "discover")?.payload).toMatchObject({ connected: true, fields: { source: { status: "found", candidates: 1 } } });
+  await flow.submit(runId, action.id, { ...action.input, values: input.values });
+  expect(getRun(db, runId).status).toBe("completed");
+  expect((getRunAction(db, runId) as BusinessAction | undefined)?.fileSearch).toBeUndefined();
+});
+
+it("answers a question about the finished result from its record instead of opening a new run's card", async () => {
+  const { converse, prompts } = scripted({ kind: "reply", message: "총 원화는 100원입니다." }, { kind: "retry" }, new Error("down"));
+  flow = chatFlow([tool], converse);
+  const first = await begin(); await flow.submit(first, (getRunAction(db, first) as BusinessAction).id, input);
+  expect(getRun(db, first).status).toBe("completed"); expect(converse).not.toHaveBeenCalled();
+  const start = async (text: string) => { const { runId, done } = flow.workflows()[0].start({ threadId, workspaceId: "default", text }); await done; return runId; };
+  const asked = await start("총 원화 합계는 얼마야?");
+  expect(getRun(db, asked).status).toBe("abstained"); expect(getRunAction(db, asked)).toBeUndefined();
+  expect(prompts[0]).toMatchObject({ userText: "총 원화 합계는 얼마야?", checks: expect.any(Array) }); expect(String(prompts[0].result)).toContain("완성 파일");
   expect(tool.execute).toHaveBeenCalledTimes(1);
+  // A new-run request, and a model failure, both open the card as before.
+  for (const text of ["내일 날짜로 다시 만들어줘", "합계 알려줘"]) { const runId = await start(text); expect(getRun(db, runId).status).toBe("waiting_user"); flow.cancel(runId); }
+});
+
+it("leaves several candidates for the person unless the model can name one from the file names", async () => {
+  const file = await connect("source-old.xlsx"); tool.suggestFiles = byName(/^source/);
+  let runId = await begin(); let action = getRunAction(db, runId) as BusinessAction;
+  expect(action.input.files).toEqual({});
+  expect(action.fileSearch!.fields.source).toEqual({ status: "choose", candidates: [file("source-old.xlsx"), file("source.xlsx")] });
+  flow.cancel(runId);
+  const model = scripted({ picks: { source: ["c1"] }, reasons: { source: "이름에 old가 없는 최신 파일" } }, { picks: { source: ["c9"] } }, { picks: { source: ["c0", "c1"] } });
+  flow = chatFlow([tool], model.converse);
+  runId = await begin(); action = getRunAction(db, runId) as BusinessAction;
+  expect(action.input.files).toEqual({ source: [file("source.xlsx")] });
+  expect(action.fileSearch!.fields.source).toMatchObject({ status: "suggested", reason: "이름에 old가 없는 최신 파일" });
+  expect(model.prompts[0]).toMatchObject({ context: { rule: "/^source/" }, fields: [{ key: "source", multiple: false, candidates: [{ id: "c0", path: "source-old.xlsx" }, { id: "c1", path: "source.xlsx" }] }] });
+  // A pick outside the candidates, or two files for a single-file field, is not accepted.
+  for (let attempt = 0; attempt < 2; attempt++) { flow.cancel(runId); runId = await begin(); expect((getRunAction(db, runId) as BusinessAction).input.files).toEqual({}); }
+});
+
+it("looks again from the card, keeping a manual pick and replacing only what an earlier look filled in", async () => {
+  let file = await connect(); tool.suggestFiles = byName(/^source/); tool.defaults = () => ({ businessDate: "2026-10-15" });
+  const runId = await begin(); let action = getRunAction(db, runId) as BusinessAction;
+  expect(action.input.files).toEqual({ source: [file("source.xlsx")] });
+  file = await connect("source-new.xlsx", "manual.xlsx");
+  await flow.findSources(runId, action.id, { values: { businessDate: "2026-10-20" }, files: action.input.files });
+  action = getRunAction(db, runId) as BusinessAction;
+  expect(action.input).toEqual({ values: { businessDate: "2026-10-20" }, files: {} });
+  expect(action.fileSearch!.fields.source.status).toBe("choose");
+  await flow.findSources(runId, action.id, { values: action.input.values, files: { source: [file("manual.xlsx")] } });
+  action = getRunAction(db, runId) as BusinessAction;
+  expect(action.input.files).toEqual({ source: [file("manual.xlsx")] });
+  await flow.submit(runId, action.id, action.input);
+  await expect(flow.findSources(runId, action.id, action.input)).rejects.toThrow();
+});
+
+it("reports no connected folder and an unreadable one without failing the start", async () => {
+  const sources = new WorkSources(db); for (const source of sources.list()) sources.remove(source.id);
+  tool.suggestFiles = byName(/^source/);
+  let runId = await begin();
+  expect((getRunAction(db, runId) as BusinessAction).fileSearch).toEqual({ connected: false, problems: [], fields: { source: { status: "none", candidates: [] } } });
+  flow.cancel(runId);
+  await sources.register([folder], "folder"); await rm(join(folder, "source.xlsx"));
+  db.prepare("UPDATE work_sources SET path = ? WHERE kind = 'folder'").run(join(folder, "missing"));
+  runId = await begin();
+  expect((getRunAction(db, runId) as BusinessAction).fileSearch).toMatchObject({ connected: true, problems: [expect.stringContaining("business-tool-")], fields: { source: { status: "none" } } });
+});
+
+it("names daily cash candidates from the work date and the usual document names", () => {
+  const files = ["261013_자금현황표[KC].xlsx", "261012_자금현황표[KC].xlsx", "10월 3주 주간자금계획.xlsx", "2026 일일자금일보.xlsx", "기타.xlsx"].map((name) => ({ name, relativePath: name }));
+  expect(dailyCashTool.suggestFiles!(files, { workDate: "2026-10-14" })).toEqual({ candidates: { cashStatus: [0], weeklyPlans: [2], previousReport: [3] }, context: { workDate: "2026-10-14", reportDate: "2026-10-13", cashStatusNamePrefix: "261013_" } });
+  expect(dailyCashTool.suggestFiles!(files, { workDate: "2026-10-20" }).candidates.cashStatus).toEqual([0, 1]);
+  expect(dailyCashTool.suggestFiles!(files, {}).candidates).toEqual({ cashStatus: [0, 1], weeklyPlans: [2], previousReport: [3] });
 });
 
 it("drives daily cash by chat through partial answers, an explanation and a refused approval to the same verified report", async () => {
