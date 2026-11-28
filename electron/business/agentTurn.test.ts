@@ -18,6 +18,8 @@ it("merges a partial movement edit into earlier edits instead of replacing them"
   expect(JSON.parse(next.actualEdits)).toEqual({ changes: [{ index: 1, amount: "50" }, { index: 2, amount: "0" }], add: [{ direction: "in", description: "환급", party: "", amount: "7" }] });
   expect(JSON.parse(applyPatch(fields, next, { actualEdits: { changes: [{ index: 1, amount: "1,000" }], clearAdded: true } }, all).actualEdits)).toEqual({ changes: [{ index: 1, amount: "1000" }, { index: 2, amount: "0" }], add: [] });
   expect(JSON.parse(applyPatch(fields, { actualEdits: "확인" }, { actualEdits: {} }, all).actualEdits)).toEqual({ changes: [], add: [] });
+  // A model restating the planned amount must not turn an untouched row into a manual edit.
+  expect(JSON.parse(applyPatch(fields, {}, { actualEdits: { changes: [{ index: 1, amount: "100" }, { index: 2, amount: "0" }] } }, all).actualEdits)).toEqual({ changes: [{ index: 2, amount: "0" }], add: [] });
 });
 
 it("fills each field kind in the serialized form the tool already reads", () => {
@@ -34,6 +36,9 @@ it("rejects what the person did not clearly say or may not change", () => {
 
 it("reads one decision out of surrounding model text and refuses unknown shapes", () => {
   expect(parseDecision('```json\n{"kind":"reply","message":"네"}\n```')).toEqual({ kind: "reply", message: "네" });
+  // Seen from the live model: an extra note, a stray key outside the patch, and one closing brace too many.
+  expect(parseDecision('{"kind":"set_inputs","patch":{"a":{"changes":[]}},"note":"반영함","cashChanges":{"x":1}}}')).toEqual({ kind: "set_inputs", patch: { a: { changes: [] } } });
+  expect(parseDecision('{"kind":"set_inputs","patch":{"a":{"changes":[{"index":2,"amount":"0"}]}}')).toEqual({ kind: "set_inputs", patch: { a: { changes: [{ index: 2, amount: "0" }] } } });
   expect(() => parseDecision('{"kind":"approve"}')).toThrow();
   expect(() => parseDecision("모르겠습니다")).toThrow();
 });

@@ -486,6 +486,7 @@ it("drives daily cash by chat through partial answers, an explanation and a refu
   expect(model.prompts[1]).toMatchObject({ step: "ledger", code: "CASH_RECONCILE" });
   await say("그 계좌는 입금 10,000 출금 2,000이고 2번 거래는 2000원만 나갔어");
   expect(action().question).toContain("최종 확인");
+  expect(loadThread(db, threadId).messages.map((message) => message.content).filter((content) => content.startsWith("다음 내용")).at(-1)).toBe("다음 내용을 반영해 다시 확인합니다.\n2026-10-13 실적:\n- 2번 소모품 지급: 1000 → 2000\n계좌별 실제 입금·출금: 신한_입출금_지주_원화 (140013557434:KRW) 입금 10000, 출금 2000");
   expect(JSON.parse(action().input.values.planEdits).add).toHaveLength(2);
   const firstReview = action().fields.find((field) => field.key === "review")!.confirm!;
   const reviewing = action().id;

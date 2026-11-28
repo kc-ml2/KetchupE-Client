@@ -421,6 +421,13 @@ export class BusinessFlow {
         catch { return `${field.label}: 연결 위치 확인 필요`; }
       }
       if (field.type !== "movements") return `${field.label}: ${value}`;
+      // A chat patch is read back item by item, so a misread transaction number or amount is visible before the next step.
+      if (only) try {
+        const edits = JSON.parse(value) as { changes?: { index: number; amount: string }[]; add?: { direction: string; description: string; party?: string; amount: string }[] };
+        const lines = [...(edits.changes ?? []).map((change) => { const row = field.rows?.find((item) => item.index === change.index); return `- ${change.index}번 ${row?.description ?? ""}: ${row?.amount ?? "?"} → ${change.amount}${Number(change.amount) === 0 ? " (미집행)" : ""}`; }),
+          ...(edits.add ?? []).map((entry) => `- 추가 ${entry.direction === "in" ? "입금" : "지급"} ${entry.description}${entry.party ? ` / ${entry.party}` : ""}: ${entry.amount}`)];
+        return `${field.label}:${lines.length ? `\n${lines.slice(0, 30).join("\n")}` : " 표 그대로 확인"}`;
+      } catch { return `${field.label}: ${value}`; }
       try { const edits = JSON.parse(value) as { changes?: unknown[]; add?: unknown[] }; return `${field.label}: 금액 수정 ${edits.changes?.length ?? 0}건, 추가 거래 ${edits.add?.length ?? 0}건`; }
       catch { return `${field.label}: ${value}`; }
     }).filter(Boolean).join("\n") || "확인";
