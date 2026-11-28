@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readdir, rename, unlink } from "node:fs/promises";
+import { copyFile, lstat, open, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { WorkFile, WorkSource } from "../../src/app-types/WorkSource.types.ts";
@@ -110,7 +110,8 @@ export class WorkSources {
     } finally { await handle.close(); }
   }
 
-  async replace(file: WorkFile, expectedFingerprint: string, bytes: Uint8Array): Promise<void> {
+  /** Replaces a connected workbook and returns the name of the copy of the previous version left next to it. */
+  async replace(file: WorkFile, expectedFingerprint: string, bytes: Uint8Array): Promise<string> {
     const source = this.source(file.sourceId);
     if (typeof file.relativePath !== "string" || isAbsolute(file.relativePath)) throw new Error("잘못된 파일 경로입니다.");
     const target = source.kind === "file" ? source.displayPath : resolve(source.displayPath, file.relativePath);
@@ -127,7 +128,12 @@ export class WorkSources {
       const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, info.mode & 0o777);
       try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
       if (await realpath(target) !== target || (await lstat(target)).ino !== info.ino) throw new Error("원본 파일이 교체되었습니다. 최신 파일로 새 작업을 시작해 주세요.");
+      // The only undo for a replaced workbook. No copy, no replacement. Not ".xlsx", so the copy is never listed as a source.
+      // ponytail: one copy per workbook, overwritten on the next replacement; add dated copies if one undo level is not enough.
+      const backup = `${target}.bak`;
+      try { await copyFile(target, backup); } catch (error) { throw new Error(`교체 전 사본을 만들지 못해 원본을 바꾸지 않았습니다: ${error instanceof Error ? error.message : String(error)}`); }
       await rename(temporary, target);
+      return basename(backup);
     } finally { await unlink(temporary).catch(() => undefined); }
   }
 }

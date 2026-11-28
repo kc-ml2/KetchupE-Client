@@ -53,11 +53,14 @@ it("replaces a selected workbook only when its original fingerprint still matche
   const path = join(folder, "report.xlsx"); await writeFile(path, "original");
   const [source] = await sources.register([path], "file"); const [file] = await sources.files(source.id);
   const original = await sources.read(file);
-  await sources.replace(file, original.fingerprint, Buffer.from("updated"));
+  expect(await sources.replace(file, original.fingerprint, Buffer.from("updated"))).toBe("report.xlsx.bak");
   expect(await readFile(path, "utf8")).toBe("updated");
+  // The previous version stays next to it, and is not offered as a source.
+  expect(await readFile(`${path}.bak`, "utf8")).toBe("original");
   await writeFile(path, "changed elsewhere");
   await expect(sources.replace(file, original.fingerprint, Buffer.from("stale"))).rejects.toThrow("원본 파일이 변경");
   expect(await readFile(path, "utf8")).toBe("changed elsewhere");
+  expect(await readFile(`${path}.bak`, "utf8")).toBe("original");
 });
 
 it("rejects traversal, absolute paths, symlink escapes and sibling files outside a selected file", async () => {

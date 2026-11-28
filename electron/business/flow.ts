@@ -408,14 +408,15 @@ export class BusinessFlow {
           if (metadata.format !== "png" || !metadata.width || !metadata.height) throw new Error("PNG 이미지를 읽을 수 없습니다.");
           outputs.push(result.image);
         }
+        let backup = "";
         if (tool.updateSource) {
           const selected = input.files[tool.updateSource]; const original = files[tool.updateSource];
           if (selected?.length !== 1 || original?.length !== 1) throw new Error("갱신할 원본 XLSX를 하나 선택해야 합니다.");
           this.mark(runId, "workflow.effect_started", { toolId: tool.id });
-          await sources.replace(selected[0], original[0].fingerprint, result.file.bytes);
+          backup = await sources.replace(selected[0], original[0].fingerprint, result.file.bytes);
         }
         const artifacts = outputs.map((file) => ({ ...file, id: randomUUID() }));
-        const message = `${result.summary}\n\n완성 파일: ${artifacts.map((file) => file.name).join(", ")}`;
+        const message = `${result.summary}\n\n완성 파일: ${artifacts.map((file) => file.name).join(", ")}${backup ? `\n교체 전 사본: ${backup} (같은 폴더. 되돌리려면 이름에서 .bak을 지우세요)` : ""}`;
         let transaction = false;
         try {
           await mkdir(this.outputDir, { recursive: true });
