@@ -6,6 +6,7 @@ import ExcelJS from "exceljs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction, loadThread } from "../agent/store.ts";
+import { readTrace } from "../agent/trace.ts";
 import { WorkSources } from "../work/sources.ts";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
 import { loadWorkbook } from "../work/mapping.ts";
@@ -374,3 +375,133 @@ it("keeps the original submission drainable when a duplicate submission is rejec
   finish(success()); await first; await drain;
   expect(drained).toBe(true); expect(getRun(db, runId).status).toBe("completed");
 });
+
+/** A scripted model: each chat turn takes the next decision and records the context it was given. */
+const scripted = (...decisions: (object | Error)[]) => {
+  const prompts: Record<string, unknown>[] = [];
+  const converse = vi.fn(async (_system: string, prompt: string) => {
+    prompts.push(JSON.parse(prompt)); const next = decisions.shift();
+    if (!next || next instanceof Error) throw next ?? new Error("no scripted decision");
+    return JSON.stringify(next);
+  });
+  return { converse, prompts };
+};
+const chatFlow = (tools: BusinessTool[], converse: ReturnType<typeof scripted>["converse"], timeout = 1000) => new BusinessFlow(db, tools, join(folder, "output"), emit, async (bytes, sheet) => { if (sheet) await (await SelectiveWorkbook.open(bytes)).loadSheet(sheet); else await loadWorkbook(bytes); }, timeout, converse);
+const followUp = (): ToolResult => ({ status: "needs_input", code: "MEMO_NEEDED", step: "check", question: "메모와 승인이 필요합니다.", fields: [{ key: "memo", label: "메모", type: "text", required: true }, { key: "approve", label: "최종 승인", type: "text", required: true, confirm: "승인", manualOnly: true }] });
+
+it("answers a chat question without replacing the pending action or running the tool", async () => {
+  tool.execute = vi.fn(async () => followUp()); const model = scripted({ kind: "reply", message: "메모는 결과에 기록됩니다." });
+  flow = chatFlow([tool], model.converse); const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const action = getRunAction(db, runId)!; emit.mockReset();
+  await flow.workflows()[0].resume!(runId, "메모는 왜 필요해?").done;
+  expect(getRunAction(db, runId)!.id).toBe(action.id);
+  expect(getRun(db, runId).status).toBe("waiting_user");
+  expect(tool.execute).toHaveBeenCalledTimes(1);
+  expect(model.prompts[0]).toMatchObject({ step: "check", code: "MEMO_NEEDED", userText: "메모는 왜 필요해?", fields: [{ key: "memo", kind: "text", askedNow: true }] });
+  expect(JSON.stringify(model.prompts[0].fields)).not.toContain("approve");
+  expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "ask_user", payload: { question: "메모는 결과에 기록됩니다.", action: expect.objectContaining({ id: action.id }) } }));
+  expect(loadThread(db, threadId).messages.slice(-2).map((message) => [message.role, message.content])).toEqual([["user", "메모는 왜 필요해?"], ["assistant", "메모는 결과에 기록됩니다."]]);
+});
+
+it("applies a chat answer through the tool, but never a person-only approval or a fixed base input", async () => {
+  tool.execute = vi.fn(async () => followUp());
+  const model = scripted({ kind: "set_inputs", patch: { approve: true } }, { kind: "set_inputs", patch: { businessDate: "2026-10-16" } }, { kind: "set_inputs", patch: { memo: "확인함" } });
+  flow = chatFlow([tool], model.converse); const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const action = getRunAction(db, runId)!;
+  await flow.workflows()[0].resume!(runId, "좋아 승인해").done;
+  await flow.workflows()[0].resume!(runId, "기준일을 16일로 바꿔").done;
+  expect(tool.execute).toHaveBeenCalledTimes(1);
+  expect(getRunAction(db, runId)!.id).toBe(action.id);
+  expect(loadThread(db, threadId).messages.at(-1)!.content).toContain("대화로 바꿀 수 없는 항목");
+  await flow.workflows()[0].resume!(runId, "메모는 확인함으로").done;
+  expect(tool.execute).toHaveBeenCalledTimes(2);
+  expect(tool.execute).toHaveBeenLastCalledWith(expect.objectContaining({ values: { businessDate: "2026-10-15", memo: "확인함" } }));
+  expect(loadThread(db, threadId).messages.map((message) => message.content)).toContain("다음 내용을 반영해 다시 확인합니다.\n메모: 확인함");
+});
+
+it("keeps the card and answers when the model fails, and drops a reply that arrives after cancellation", async () => {
+  tool.execute = vi.fn(async () => followUp()); const model = scripted(new Error("gateway down"));
+  flow = chatFlow([tool], model.converse); const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const action = getRunAction(db, runId)!;
+  await flow.workflows()[0].resume!(runId, "이건 뭐야").done;
+  expect(getRunAction(db, runId)!.id).toBe(action.id);
+  expect(loadThread(db, threadId).messages.at(-1)!.content).toContain("메시지를 처리하지 못했습니다");
+  let release!: (value: string) => void;
+  model.converse.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+  const late = flow.workflows()[0].resume!(runId, "메모는 늦은 답으로").done;
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  flow.cancel(runId); release(JSON.stringify({ kind: "set_inputs", patch: { memo: "늦은 답" } })); await late;
+  expect(getRun(db, runId).status).toBe("cancelled");
+  expect(tool.execute).toHaveBeenCalledTimes(1);
+});
+
+it("keeps the original reason, the inputs and the stop location when a failure cannot be recovered here", async () => {
+  tool.execute = vi.fn(async (): Promise<ToolResult> => ({ status: "failed", message: "기준일 자료가 아닙니다.", recovery: "new_run", step: "evidence", trace: [{ step: "evidence", ms: 3 }] }));
+  const model = scripted({ kind: "reply", message: "기준일 자료가 아니어서 멈췄습니다." });
+  flow = chatFlow([tool], model.converse); const runId = start();
+  await flow.submit(runId, getRunAction(db, runId)!.id, input);
+  const action = getRunAction(db, runId) as BusinessAction;
+  expect(getRun(db, runId).status).toBe("waiting_user");
+  expect(action.question).toContain("기준일 자료가 아닙니다.");
+  expect(action.question).toContain("새 작업으로 시작해 주세요");
+  expect(action.input).toEqual(input);
+  expect(readTrace(db, runId).find((event) => event.payload.phase === "execute")?.payload).toMatchObject({ outcome: "failed", step: "evidence", recovery: "new_run", steps: [{ step: "evidence", ms: 3 }] });
+  await flow.workflows()[0].resume!(runId, "왜 멈췄어?").done;
+  expect(model.prompts[0]).toMatchObject({ step: "evidence", lastError: "기준일 자료가 아닙니다." });
+  expect(tool.execute).toHaveBeenCalledTimes(1);
+});
+
+it("drives daily cash by chat through partial answers, an explanation and a refused approval to the same verified report", async () => {
+  const books = fixtureBooks(); const status = books.status.worksheets[0];
+  status.getCell("O2").value = 108000; status.getCell("O4").value = 108000;
+  const sources = new WorkSources(db);
+  const chosen: BusinessInput = { values: { workDate: "2026-10-14" }, files: {} };
+  for (const [key, book, name] of [["previousReport", books.report, "report.xlsx"], ["weeklyPlans", books.weekly, "weekly.xlsx"], ["cashStatus", books.status, "KC.xlsx"]] as const) {
+    const path = join(folder, name); await writeFile(path, key === "previousReport" ? await annualReportFixture() : Buffer.from(await book.xlsx.writeBuffer()));
+    const source = (await sources.register([path], "file")).find((item) => item.name === name)!;
+    chosen.files[key] = await sources.files(source.id);
+  }
+  const plans = (amount: string) => [{ direction: "out", description: "당일 추가 지급", party: "추가 거래처", amount }, { direction: "in", description: "당일 추가 입금", party: "입금 거래처", amount: "1000" }];
+  const model = scripted(
+    { kind: "set_inputs", patch: { actualEdits: {}, planEdits: { add: plans("5000") } } },
+    { kind: "reply", message: "전일 잔액에 입출금을 반영한 값과 계좌잔고가 달라서 확인이 필요합니다." },
+    { kind: "set_inputs", patch: { cashChanges: { "140013557434:KRW": { incoming: "10,000", outgoing: 2000 } }, actualEdits: { changes: [{ index: 2, amount: "2000" }] } } },
+    { kind: "set_inputs", patch: { review: true } },
+    { kind: "set_inputs", patch: { planEdits: { clearAdded: true, add: plans("6000") } } },
+  );
+  flow = chatFlow([dailyCashTool], model.converse, 30000);
+  const { runId, done } = flow.workflows()[0].start({ threadId, workspaceId: "default", text: "일일자금일보 작성" }); await done;
+  const action = () => getRunAction(db, runId) as BusinessAction;
+  const say = (text: string) => flow.workflows()[0].resume!(runId, text).done;
+  await flow.submit(runId, action().id, chosen);
+  await say("어제는 계획대로 집행했고, 오늘 계획에 지급 5000원과 입금 1000원을 추가해줘");
+  expect(action().question).toContain("장부와 실제 잔고 차이");
+  expect(model.prompts[0]).toMatchObject({ step: "ledger", code: "ACTUALS_CONFIRM" });
+  const waiting = action().id;
+  await say("왜 차이가 나?");
+  expect(action().id).toBe(waiting);
+  expect(model.prompts[1]).toMatchObject({ step: "ledger", code: "CASH_RECONCILE" });
+  await say("그 계좌는 입금 10,000 출금 2,000이고 2번 거래는 2000원만 나갔어");
+  expect(action().question).toContain("최종 확인");
+  expect(JSON.parse(action().input.values.planEdits).add).toHaveLength(2);
+  const firstReview = action().fields.find((field) => field.key === "review")!.confirm!;
+  const reviewing = action().id;
+  await say("좋아 승인해");
+  expect(action().id).toBe(reviewing);
+  expect(getRun(db, runId).status).toBe("waiting_user");
+  await say("추가 지급은 6000원으로 바꿔줘");
+  const review = action().fields.find((field) => field.key === "review")!.confirm!;
+  expect(review).not.toBe(firstReview);
+  await flow.submit(runId, action().id, { ...action().input, values: { ...action().input.values, review } });
+  expect(getRun(db, runId).status, action()?.question).toBe("completed");
+  const report = (await loadWorkbook(await readFile(join(folder, "report.xlsx")))).getWorksheet("261013")!;
+  expect(report.getCell("H237").result).toBe(101000);
+  expect(report.getCell("H131").value).toBe(1000);
+  expect(report.getCell("H158").value).toBe(6000);
+  const trace = readTrace(db, runId);
+  expect(trace.filter((event) => event.payload.phase === "execute").map((event) => event.payload.code ?? event.payload.outcome)).toEqual(["ACTUALS_CONFIRM", "CASH_RECONCILE", "REVIEW", "REVIEW", "completed"]);
+  expect(trace.filter((event) => event.payload.operation === "converse").map((event) => event.payload.decision)).toEqual(["set_inputs", "reply", "set_inputs", "rejected", "set_inputs"]);
+}, 30000);

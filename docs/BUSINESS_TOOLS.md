@@ -19,6 +19,18 @@ Current implementation, 2026-11-05. `BusinessFlow` is the shared executor; `dail
 | `completed`   | `summary`, XLSX `file`, nonempty `checks`, optional PNG `image` and `externalData` | Validate, save, register, then expose artifacts |
 | `failed`      | `message`                                                                          | Reopen the input card with previous answers     |
 
+Every result may also carry `step` (where the fixed sequence stopped), `trace` (time per step) and, for `needs_input`, a stable `code` naming the question. A `failed` result may carry `recovery` (`fix_input`, `retry`, `environment`, `new_run`): the executor then keeps the original message and adds what the person can do; an unclassified failure is only reported, never re-run automatically. `BusinessFlow` records one local-only `execute` trace event per run with these IDs and timings (no amounts).
+
+### Chat messages to a waiting tool
+
+When a model client is configured, a chat message sent to a waiting fixed-input tool is interpreted once by [agentTurn.ts](../electron/business/agentTurn.ts) into `reply`, `set_inputs`, `retry`, `cancel` or `switch`. Step order, calculations and validation stay in the tool; the model only proposes.
+
+- `reply` adds an assistant message and keeps the same pending action, so the input card and its unsaved draft remain.
+- `set_inputs` is a typed patch merged per field kind (`movements`, account rows, cash rows, `confirm`, `select`, number, date, text) into the stored answers and submitted through the normal path. Required checks are relaxed for follow-up fields so a partial answer reaches the tool, which asks again for what is missing. Earlier follow-up answers may be revised; base fields and source files stay locked after the first run.
+- A field marked `manualOnly` (Daily Cash's final `review`) and a confirmation that is not currently being asked can never be set from chat.
+- A model failure, an invalid decision, or a reply that arrives after cancellation changes nothing: the card and answers stay.
+- `switch` currently only points the person to the existing **작업 변경** control.
+
 After an answer, execution starts again from the beginning with accumulated values and the checkpoint. Reuse cached external observations. Keep calculations deterministic; do not perform payments, postings, or other irreversible remote writes in this contract.
 
 Fields support `file`, `date`, `text`, `number`, and `movements`. `multiple: true` permits multiple files. `confirm` is a field property: the confirmation button submits its exact value. `movements` submits `{changes, add}` JSON. New field types require changes to [shared types](../src/app-types/BusinessTool.types.ts), `BusinessFlow.validateFields`, and [BusinessToolCard](../src/Features/Agent/components/BusinessToolCard.tsx).

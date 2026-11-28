@@ -28,15 +28,15 @@ it("asks only for unresolved account locations and accepts the form's existing m
   account.getCell(3).value = "001234"; account.getCell(4).value = "기업_입출금_원화";
   input.files.cashStatus = [await file(books.status, "261013_현황.xlsx")];
   const result = await dailyCashTool.execute(input);
-  expect(result).toMatchObject({ status: "needs_input", fields: [{ key: "accountBindings", type: "text", accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "109000" }] }] });
+  expect(result).toMatchObject({ status: "needs_input", code: "ACCOUNT_BINDING", step: "ledger", fields: [{ key: "accountBindings", type: "text", accountRows: [{ key: "001234:KRW", name: "기업_입출금_원화", currency: "KRW", balance: "109000" }] }] });
   if (result.status !== "needs_input") return;
   expect(result.question).toContain("261012"); expect(result.question).toContain("행 번호"); expect(result.question).not.toContain("JSON");
   input.values.accountBindings = '{"001234:KRW":"H10"}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "REVIEW", step: "review", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
   input.values.accountBindings = '{"001234:KRW":"H23"}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("통화/정기예금") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "fix_input", step: "ledger", message: expect.stringContaining("통화/정기예금") });
   input.values.accountBindings = '{"001234:KRW":"H10","TEST-TERM:KRW":"H10"}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("중복") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "fix_input", step: "ledger", message: expect.stringContaining("중복") });
   input.values.accountBindings = "invalid";
   const retry = await dailyCashTool.execute(input);
   expect(retry).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ accountRows: expect.any(Array) })] });
@@ -47,7 +47,7 @@ it("asks for corrected source files when a report balance has no KC account to c
   const { input, books, file } = await setup();
   books.report.getWorksheet(1)!.getCell("H9").value = 100;
   input.files.previousReport = [await file(books.report, "전일.xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("누락된 계좌") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "new_run", step: "ledger", message: expect.stringContaining("누락된 계좌") });
 });
 
 async function confirm(input: Parameters<BusinessTool["execute"]>[0]) {
@@ -83,7 +83,7 @@ it.each(["261013_자금현황표[KC].xlsx", "자금현황표.xlsx"])("uses the w
 }, artifactTestTimeout);
 it("matches the KC file date to the report date (work date minus one), not the work date", async () => {
   const { input, books, file } = await setup(); input.files.cashStatus = [await file(books.status, "261014_자금현황표[KC].xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("기준일 2026-10-14와 일보 기준일 2026-10-13") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "new_run", step: "evidence", message: expect.stringContaining("기준일 2026-10-14와 일보 기준일 2026-10-13") });
 });
 it("preserves a year of historical sheets, including distant used cells, when appending the next report", async () => {
   const { input, books, file } = await setup();
@@ -158,7 +158,7 @@ it("reads a truly empty cell as 0 but still asks for a formula without a saved r
   s.getCell("I30").value = null; input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
   expect((await confirm(input)).status).toBe("completed");
   s.getCell("I30").value = { formula: "H30*1" } as ExcelJS.CellValue; input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ key: "cell_I30", type: "number" })] });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "PRIOR_AMOUNT_MISSING", step: "evidence", fields: [expect.objectContaining({ key: "cell_I30", type: "number" })] });
   input.values.cell_I30 = "0"; expect((await confirm(input)).status).toBe("completed");
 }, artifactTestTimeout);
 it("asks for actual execution, rather than treating weekly plans as actuals", async () => {
@@ -169,7 +169,7 @@ it("rejects duplicate weekly versions and an already existing target sheet", asy
   const { input, books, file } = await setup(); input.files.weeklyPlans.push(input.files.weeklyPlans[0]);
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("중복") });
   input.files.weeklyPlans.pop(); books.report.addWorksheet("261013"); input.files.previousReport = [await file(books.report, "전일일보.xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("이미") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "new_run", step: "evidence", message: expect.stringContaining("이미") });
 });
 it("requires explicit values for missing formula caches and does not silently use zero", async () => {
   const { books, input, file } = await setup(); books.report.getWorksheet(1)!.getCell("H21").value = { formula: "D21+E21-G21" }; input.files.previousReport = [await file(books.report, "전일.xlsx")];
@@ -177,11 +177,11 @@ it("requires explicit values for missing formula caches and does not silently us
 });
 it("stops when actual account cash differs from ledger or a term has not settled", async () => {
   const { books, input, file } = await setup(); const s = books.status.getWorksheet(1)!; s.getCell("O2").value = 108000; s.getCell("O4").value = 108000; input.files.cashStatus = [await file(books.status, "261013_자금현황표[KC].xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" }), expect.objectContaining({ key: "actualEdits", type: "movements" })]) });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "CASH_RECONCILE", step: "ledger", fields: expect.arrayContaining([expect.objectContaining({ key: "cashChanges" }), expect.objectContaining({ key: "actualEdits", type: "movements" })]) });
 });
 it("requires corrections when planned executions do not reconcile the holding cash", async () => {
   const { input } = await setup(); input.values.actualEdits = '{"changes":[{"index":2,"amount":"2000"}]}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", question: expect.stringContaining("실적 내역과 원화 계좌잔고") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "CLOSING_MISMATCH", step: "ledger", question: expect.stringContaining("실적 내역과 원화 계좌잔고") });
 });
 it("parses merged KC identifiers separately per currency and rejects incorrect totals", () => {
   const { status } = fixtureBooks(); const s = status.getWorksheet(1)!;
@@ -274,13 +274,13 @@ it("requires deposit execution confirmation and rejects principal mismatches and
   const { input } = await depositSetup(); delete input.values.depositEdits;
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "depositEdits", type: "movements" })]) });
   input.values.depositEdits = '{"changes":[{"index":2,"amount":20300}]}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", question: expect.stringContaining("맞지 않는 원금 300원") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "DEPOSIT_MISMATCH", step: "ledger", question: expect.stringContaining("맞지 않는 원금 300원") });
   input.values.depositEdits = '{"changes":[{"index":1,"amount":0}]}';
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", question: expect.stringContaining("만기 감소 10000원") });
   input.values.depositEdits = '{"changes":[{"index":1,"amount":10000,"party":"하나은행 테스트"}]}';
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", question: expect.stringContaining("맞지 않는 원금 10000원") });
   input.values.depositEdits = '{"add":[{"direction":"in","description":"사업부문 현금유입","amount":100}]}';
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", question: expect.stringContaining("적요만 허용") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "EDITS_REJECTED", step: "ledger", question: expect.stringContaining("적요만 허용") });
 });
 it("includes confirmed deposit interest in final review and invalidates approval when it changes", async () => {
   const { input } = await depositSetup(); const first = await dailyCashTool.execute(input); if (first.status !== "needs_input") throw new Error("review");
@@ -326,7 +326,7 @@ it("keeps JPY and CNY separate and uses KC foreign balances with per-unit FX rat
 }, artifactTestTimeout);
 it("never combines a months-old daily report with a current KC snapshot", async () => {
   const { books, input, file } = await setup(); books.report.getWorksheet(1)!.name = "260528"; input.files.previousReport = [await file(books.report, "old.xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("너무 오래") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "new_run", step: "evidence", message: expect.stringContaining("너무 오래") });
 });
 it("re-asks for confirmation when actual or next-day plan changes after review", async () => {
   const { input } = await setup(); const result = await dailyCashTool.execute(input); if (result.status !== "needs_input") throw new Error("review");
@@ -420,7 +420,7 @@ it("preserves styles and row heights outside the execution-entry formatting chan
 it("returns no completed artifacts if Excel export fails", async () => {
   const { input } = await setup();
   vi.mocked(renderSheet).mockRejectedValueOnce(new Error("Excel 출력 실패"));
-  expect(await confirm(input)).toEqual({ status: "failed", message: "Excel 출력 실패" });
+  expect(await confirm(input)).toMatchObject({ status: "failed", message: "Excel 출력 실패", step: "produce", trace: [{ step: "evidence" }, { step: "ledger" }, { step: "rates" }, { step: "review" }, { step: "produce" }] });
 });
 
 it("discloses LibreOffice fallback in the result and audit", async () => {
@@ -443,14 +443,14 @@ it.each(["G248", "D237", "H10", "E10", "G10"])("rejects an Excel-calculated fina
     sheet.getCell(address).value = 999;
     return { bytes, sheet, image: Buffer.alloc(0), engine: "Excel", fallbackReason: undefined };
   });
-  expect(await confirm(input)).toMatchObject({ status: "failed", message: expect.stringContaining("Excel 재계산 후") });
+  expect(await confirm(input)).toMatchObject({ status: "failed", step: "produce", message: expect.stringContaining("Excel 재계산 후") });
 });
 
 it("falls back to manually entered rates after a failed retry and records them as manual", async () => {
   const { input } = await setup(); vi.mocked(fetchHana).mockClear().mockRejectedValueOnce(new Error("화면 변경")).mockRejectedValueOnce(new Error("화면 변경"));
-  const first = await dailyCashTool.execute(input); expect(first).toMatchObject({ status: "needs_input", fields: [expect.objectContaining({ key: "retryRates", confirm: "확인" })] });
+  const first = await dailyCashTool.execute(input); expect(first).toMatchObject({ status: "needs_input", code: "FX_FETCH_FAILED", step: "rates", fields: [expect.objectContaining({ key: "retryRates", confirm: "확인" })] });
   input.values.retryRates = "확인";
-  const second = await dailyCashTool.execute(input); expect(second).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "manualUSD", type: "number" }), expect.objectContaining({ key: "manualJPY100" })]) });
+  const second = await dailyCashTool.execute(input); expect(second).toMatchObject({ status: "needs_input", code: "FX_MANUAL_REQUIRED", step: "rates", fields: expect.arrayContaining([expect.objectContaining({ key: "manualUSD", type: "number" }), expect.objectContaining({ key: "manualJPY100" })]) });
   Object.assign(input.values, { manualRateDate: "2026-10-13", manualRateRound: "1", manualUSD: "1402.5", manualJPY100: "950.12", manualCNY: "199.9" });
   const review = await dailyCashTool.execute(input); expect(review.status).toBe("needs_input"); if (review.status !== "needs_input") return;
   expect(review.fields.map((field) => field.key)).toContain("review"); expect(review.question).toContain("USD 1402.5"); expect(review.question).toContain("JPY(1엔) 9.5012");
@@ -510,7 +510,7 @@ it("reasks invalid previous amounts as numeric fields and explicitly resets unre
   }
   delete input.values.cell_H21;
   input.values.previousValues = "invalid";
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: [{ key: "previousValues", label: expect.any(String), confirm: "{}" }] });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", code: "PRIOR_OVERRIDE_INVALID", step: "evidence", fields: [{ key: "previousValues", label: expect.any(String), confirm: "{}" }] });
   input.values.previousValues = "{}";
   expect(await dailyCashTool.execute(input)).toMatchObject({ status: "needs_input", fields: expect.arrayContaining([expect.objectContaining({ key: "review" })]) });
 });
@@ -520,7 +520,7 @@ it("asks for an Excel recalculation instead of bulk JSON when many cached amount
   const sheet = books.report.getWorksheet(1)!;
   for (const row of [9, 10, 11, 12, 13, 15, 21, 23, 24, 26, 28, 30, ...layout(sheet).termRows]) sheet.getCell(`H${row}`).value = { formula: "0" };
   input.files.previousReport = [await file(books.report, "전일.xlsx")];
-  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", message: expect.stringContaining("Excel에서 열어 수식을 계산하고 저장") });
+  expect(await dailyCashTool.execute(input)).toMatchObject({ status: "failed", recovery: "new_run", step: "evidence", message: expect.stringContaining("Excel에서 열어 수식을 계산하고 저장") });
 });
 
 it("keeps template SUMs, cash flow links, FX links and bottom totals as formulas", async () => {

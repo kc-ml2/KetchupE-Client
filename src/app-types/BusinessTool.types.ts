@@ -13,6 +13,8 @@ export type BusinessField = { key: string; label: string; type: "file" | "date" 
   accountRows?: { key: string; name: string; currency: string; balance: string; maturity?: string }[];
   cashRows?: { key: string; name: string; currency: string; opening: string; balance: string }[];
   movementAccounts?: { value: string; label: string }[];
+  /** Only the person can fill this (e.g. the final approval button); a chat message never sets it. */
+  manualOnly?: boolean;
 };
 export type BusinessInput = { values: Record<string, string>; files: Record<string, WorkFile[]> };
 export type BusinessAction = {

@@ -44,6 +44,22 @@ describe("useAgentRun", () => {
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a form-based business card mounted while a chat message is answered", async () => {
+    const { api, emit } = fakeApi();
+    const onMessages = vi.fn();
+    const action = { id: "action-1", type: "business_tool" as const, title: "일일자금일보", question: "집행 내역 확인", fields: [], input: { values: {}, files: {} } };
+    const { result } = renderHook(() => useAgentRun(api, "thread-card", onMessages));
+    act(() => result.current.attach("run-card", action));
+    await act(async () => { await result.current.resume("왜 확인해야 해?"); });
+    expect(result.current.view).toMatchObject({ isRunning: true, action: { id: "action-1" } });
+    expect(onMessages).toHaveBeenCalledTimes(1);
+    emit({ runId: "run-card", seq: 1, type: "ask_user", payload: { question: "자금현황표에 거래 적요가 없기 때문입니다.", action } });
+    expect(result.current.view).toMatchObject({ isRunning: false, waitingQuestion: "자금현황표에 거래 적요가 없기 때문입니다.", action: { id: "action-1" } });
+    await act(async () => { await result.current.resume("2번은 미집행"); });
+    emit({ runId: "run-card", seq: 2, type: "status", payload: { phase: "원천 자료 확인 및 업무 실행 중", messagesChanged: true } });
+    expect(result.current.view.action).toBeNull();
+  });
+
   it("restores an ASK-waiting agent run but ignores canvas runs", async () => {
     const { api } = fakeApi();
     (api.openRun as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ runId: "run-2", status: "waiting_user", kind: "agent" });

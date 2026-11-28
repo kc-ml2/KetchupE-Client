@@ -212,7 +212,7 @@ export function startAgentRuntime(options: RuntimeOptions): AgentRuntime {
   });
   const businessFlow = new BusinessFlow(db, [...businessTools.map((tool) => ({ ...tool, execute: ({ signal, values, files, checkpoint }: Parameters<typeof tool.execute>[0]) => executeBusinessJob(join(dirname(options.workerPath), "business.worker.js"), { toolId: tool.id, version: tool.version, input: { values, files, checkpoint } }, signal) })), excelTool], join(options.userData, "business-output"), emit, async (bytes, sheet) => {
     await readWorkbookJob(join(dirname(options.workerPath), "workbook.worker.js"), { bytes: Buffer.from(bytes), fingerprint: createHash("sha256").update(bytes).digest("hex"), action: sheet ? { kind: "validate", sheet } : { kind: "inspect" } });
-  });
+  }, undefined, (system, prompt, signal) => harnessModel.complete({ system, prompt, purpose: "business", maxOutputTokens: 2000 }, { ...policyProfile, modelAlias: current.modelAlias || "gateway-default" }, signal));
   const harness: Harness = new Harness({ db, workflows: [
     {
       ...CHAT_ROUTE,

@@ -53,7 +53,8 @@ export async function renderSheet(bytes: Uint8Array, name: string, checks: strin
       return { ...await renderWithEngine(bytes, name, checks, signal, "LibreOffice", textFitRanges), fallbackReason: error.message };
     } catch (fallbackError) {
       signal.throwIfAborted();
-      throw new Error(`${error.message}\nLibreOffice 대체 출력도 완료하지 못했습니다. ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+      // Both export engines failed: the inputs are intact and the person can retry once the local Excel/LibreOffice setup works.
+      throw Object.assign(new Error(`${error.message}\nLibreOffice 대체 출력도 완료하지 못했습니다. ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`), { recovery: "environment" as const });
     }
   }
 }

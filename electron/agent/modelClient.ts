@@ -77,7 +77,7 @@ export interface ModelClient {
   complete(input: { system?: string; prompt: string; purpose?: ModelCallPurpose; maxOutputTokens?: number }, profile: PolicyProfile, signal: AbortSignal): Promise<string>;
 }
 
-export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas" | "excel";
+export type ModelCallPurpose = "policy" | "verify" | "answer" | "canvas" | "excel" | "business";
 
 export type ModelCallInfo = {
   purpose: ModelCallPurpose;

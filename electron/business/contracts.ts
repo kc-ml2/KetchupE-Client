@@ -17,10 +17,16 @@ export const businessInputSchema = z.object({
   values: z.record(z.string(), z.string().max(4000)),
   files: z.record(z.string(), z.array(z.object({ sourceId: z.string().min(1).max(100), relativePath: z.string().max(4096), name: z.string().max(500) }).strict()).max(MAX_FILES_PER_FIELD)),
 }).strict();
+/** Time spent in each named step of one execution, in order; the last entry is where it stopped. */
+export type StepTrace = { step: string; ms: number };
+/** What the user can do about a failure. Absent = unclassified: keep state, explain, never re-run automatically. */
+export type Recovery = "fix_input" | "retry" | "environment" | "new_run";
+/** `code` names why a tool stopped (a stable ID per question or failure); `step` names where. Both are for tracing and the chat turn, never shown as-is. */
+type Stop = { code?: string; step?: string; trace?: StepTrace[] };
 export type ToolResult =
-  | { status: "needs_input"; replaceFields?: boolean; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
-  | { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; previews?: string[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
-  | { status: "failed"; message: string; code?: string };
+  | Stop & { status: "needs_input"; replaceFields?: boolean; question: string; fields: BusinessField[]; checkpoint?: Record<string, unknown> }
+  | Stop & { status: "completed"; summary: string; file: { name: string; bytes: Uint8Array }; additionalFiles?: { name: string; bytes: Uint8Array }[]; previews?: string[]; checkpoint?: Record<string, unknown>; image?: { name: string; bytes: Uint8Array }; validationSheet?: string; checks: { name: string; passed: boolean }[]; externalData?: Record<string, unknown> }
+  | Stop & { status: "failed"; message: string; recovery?: Recovery };
 export type BusinessTool = WorkflowRoute & {
   version: string;
   title: string;

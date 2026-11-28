@@ -131,8 +131,13 @@ export const useAgentRun = (api: KetchupEAgentAPI | null, threadId: string | nul
     async (text: string, files?: WorkFile[]) => {
       if (!api || !view.runId || view.waitingQuestion === null) return false;
       bind(view.runId);
-      setView({ ...initial, runId: view.runId, isRunning: true, phase: "deciding" });
-      try { await (files?.length ? api.resumeRun(view.runId, text, files) : api.resumeRun(view.runId, text)); }
+      // A chat message to a form-based tool may only be a question: keep the card mounted so its unsaved draft survives the answer.
+      const card = view.action?.type === "business_tool" && !view.action.conversational ? view.action : undefined;
+      setView({ ...initial, runId: view.runId, isRunning: true, phase: "deciding", action: card });
+      try {
+        await (files?.length ? api.resumeRun(view.runId, text, files) : api.resumeRun(view.runId, text));
+        if (card) messagesChanged.current();
+      }
       catch (cause) { setView({ ...view, error: String(cause) }); return false; }
       return true;
     },

@@ -11,10 +11,21 @@ import { TraceWriter } from "../agent/trace.ts";
 import { startWorkflowRun } from "../agent/runLifecycle.ts";
 import type { AgentWorkflow, WorkflowStartInput } from "../agent/workflows.ts";
 import { WorkSources } from "../work/sources.ts";
-import { businessInputSchema, businessTraceSchema, type BusinessTool } from "./contracts.ts";
+import { businessInputSchema, businessTraceSchema, type BusinessTool, type Recovery } from "./contracts.ts";
+import { applyPatch, parseDecision, PatchError, TURN_SYSTEM, turnPrompt } from "./agentTurn.ts";
 
 /** `confirmed` flips on the first accepted submission; until then every prefilled value (suggested files, today's date) stays editable. */
-type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean; baseArtifactId?: string; revision?: number };
+type Job = { toolId: string; version: string; input: BusinessInput; fingerprints: Record<string, string[]>; fields: BusinessField[]; checkpoint?: Record<string, unknown>; pendingKeys?: string[]; confirmed?: boolean; baseArtifactId?: string; revision?: number;
+  /** Where and why the tool last stopped, and the last failure: the state a chat turn explains and the trace records. */
+  stop?: { step?: string; code?: string }; lastError?: { message: string; recovery?: Recovery; step?: string } };
+/** A chat-driven submission: the user's message is already in the thread, `echo` states what was applied. */
+type ChatSubmission = { echo: string };
+const RECOVERY_GUIDE: Record<Recovery, string> = {
+  fix_input: "입력한 내용은 보관되어 있습니다. 해당 입력을 고친 뒤 다시 실행할 수 있습니다.",
+  retry: "입력한 내용은 보관되어 있습니다. 같은 입력으로 다시 실행할 수 있습니다.",
+  environment: "입력한 내용은 보관되어 있습니다. 위 메시지의 실행 환경을 확인한 뒤 같은 입력으로 다시 실행해 주세요.",
+  new_run: "원천 파일이나 작업일을 바꿔야 해결됩니다. 지금까지의 입력과 진행 상태는 이 작업에 보관되어 있습니다. 이 작업을 중단하고 새 작업으로 시작해 주세요.",
+};
 const emptyInput = (): BusinessInput => ({ values: {}, files: {} });
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fieldKey = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
@@ -34,10 +45,13 @@ export class BusinessFlow {
   private readonly pending = new Set<Promise<void>>();
   private readonly submissions = new Map<string, Promise<void>>();
   private readonly active = new Map<string, AbortController>();
+  private readonly turns = new Map<string, AbortController>();
   constructor(private readonly db: DatabaseSync, tools: BusinessTool[], private readonly outputDir: string,
     private readonly emit: (event: AgentStreamEvent) => void,
     private readonly validateWorkbook: (bytes: Uint8Array, sheet?: string) => Promise<void>,
-    private readonly timeoutMs = 120000) {
+    private readonly timeoutMs = 120000,
+    /** Interprets chat messages sent to a waiting tool. Without it, fixed-input tools keep pointing at the input card. */
+    private readonly converse?: (system: string, prompt: string, signal: AbortSignal) => Promise<string>) {
     for (const tool of tools) {
       if (this.tools.has(tool.id)) throw new Error("duplicate business tool");
       this.validateFields(tool.fields);
@@ -80,7 +94,8 @@ export class BusinessFlow {
     const job = this.job(runId);
     if (getRun(this.db, runId).status !== "waiting_user") throw new Error("입력 대기 중인 작업이 아닙니다.");
     if (!files.length && /^(취소|중단|그만|cancel|stop)[.!\s]*$/i.test(text.trim())) this.cancel(runId);
-    else if (this.tools.get(job.toolId)?.editable) return { runId, done: this.converse(runId, job, text, files) };
+    else if (this.tools.get(job.toolId)?.editable) return { runId, done: this.fillFromChat(runId, job, text, files) };
+    else if (this.converse && text.trim()) return { runId, done: this.turn(runId, text.trim()) };
     else {
       appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: text });
       this.ask(runId, "입력 화면에서 확인 내용을 작성해 주세요. 확인되지 않은 대화 내용을 계산 입력으로 사용하지 않습니다.");
@@ -93,7 +108,7 @@ export class BusinessFlow {
    * so the tool contract and validation stay unchanged. Attachments add to the source files; text fills, in order, the missing
    * request, extra detail before the first run, the pending question, or a revision of the finished result.
    */
-  private converse(runId: string, job: Job, text: string, files: WorkFile[]): Promise<void> {
+  private fillFromChat(runId: string, job: Job, text: string, files: WorkFile[]): Promise<void> {
     const input = structuredClone(job.input);
     const hadSource = Boolean(input.files.source?.length);
     if (files.length) input.files.source = [...(input.files.source ?? []), ...files].filter((file, index, list) => list.findIndex(item => sameFile(item, file)) === index);
@@ -130,7 +145,74 @@ export class BusinessFlow {
     return task;
   }
 
-  private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string, display?: string): Promise<void> {
+  /**
+   * One chat message to a waiting fixed-input tool: the model proposes a single decision, code decides what it may touch.
+   * A reply keeps the same action (and the card's draft); an input change goes through the same submission path as the card.
+   */
+  private turn(runId: string, text: string): Promise<void> {
+    if (this.submissions.has(runId)) return Promise.reject(new Error("이미 처리 중인 입력 요청입니다."));
+    const task = this.runTurn(runId, text);
+    this.pending.add(task);
+    this.submissions.set(runId, task);
+    void task.finally(() => { this.pending.delete(task); if (this.submissions.get(runId) === task) this.submissions.delete(runId); }).catch(() => undefined);
+    return task;
+  }
+
+  private async runTurn(runId: string, text: string): Promise<void> {
+    const job = this.job(runId), tool = this.tools.get(job.toolId), action = getRunAction(this.db, runId);
+    if (!tool || !action) throw new Error("입력 대기 중인 작업이 아닙니다.");
+    const controller = new AbortController();
+    this.turns.set(runId, controller);
+    const started = Date.now();
+    let decision = "error";
+    const current = () => getRun(this.db, runId).status === "waiting_user" && getRunAction(this.db, runId)?.id === action.id;
+    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: text });
+    try {
+      const editable = this.chatKeys(job, tool);
+      let raw: string;
+      try {
+        raw = await this.abortable(this.converse!(TURN_SYSTEM, turnPrompt({ title: tool.title, step: job.stop?.step, code: job.stop?.code, question: action.question, lastError: job.lastError?.message,
+          fields: job.fields, editable, pending: new Set(job.pendingKeys ?? job.fields.map((field) => field.key)), values: job.input.values,
+          fileNames: Object.fromEntries(Object.entries(job.input.files).map(([key, list]) => [key, list.map((file) => file.name)])), userText: text }), controller.signal), controller.signal);
+      } finally { this.turns.delete(runId); }
+      // The run may have been cancelled, switched or answered through the card while the model was thinking.
+      if (!current()) return;
+      const parsed = parseDecision(raw);
+      decision = parsed.kind;
+      if (parsed.kind === "reply") this.say(runId, parsed.message);
+      else if (parsed.kind === "cancel") this.cancel(runId);
+      else if (parsed.kind === "switch") this.say(runId, "이 작업을 그만두고 다른 작업으로 바꾸려면 입력창의 **작업 변경**을 사용해 주세요. 지금까지 입력한 내용은 그대로 있습니다.");
+      else {
+        const values = parsed.kind === "retry" ? job.input.values : applyPatch(job.fields, job.input.values, parsed.patch, editable);
+        const changed = Object.keys(values).filter((key) => values[key] !== job.input.values[key]);
+        if (parsed.kind === "set_inputs" && !changed.length) { decision = "no_change"; this.say(runId, "바꿀 내용을 찾지 못했습니다. 어떤 항목을 어떻게 바꿀지 다시 말씀해 주시거나 입력 카드에서 직접 고쳐 주세요."); return; }
+        const input = { values, files: job.input.files };
+        await this.executeSubmission(runId, action.id, input, text, undefined, { echo: changed.length ? `다음 내용을 반영해 다시 확인합니다.\n${this.describeInput(job, input, changed)}` : "같은 입력으로 다시 실행합니다." });
+      }
+    } catch (error) {
+      if (controller.signal.aborted || !current()) return;
+      // A rejected patch or input is explained in its own words; a model failure never loses the card or the answers.
+      decision = error instanceof PatchError ? "rejected" : decision;
+      this.say(runId, error instanceof PatchError || decision !== "error" ? `${error instanceof Error ? error.message : String(error)}\n\n입력한 내용은 그대로 있습니다. 입력 카드에서 직접 고칠 수도 있습니다.` : "메시지를 처리하지 못했습니다. 입력한 내용은 그대로 있습니다. 입력 카드에서 계속하거나 다시 말씀해 주세요.");
+    } finally {
+      this.turns.delete(runId);
+      new TraceWriter(this.db, runId).record("model.completed", "runtime", { localOnly: true, phase: "model", operation: "converse", decision, step: job.stop?.step, code: job.stop?.code }, { startedAt: started });
+    }
+  }
+
+  /** Fields a chat message may set: never files, never person-only approvals, never the fixed base inputs, and a confirmation only while it is being asked. */
+  private chatKeys(job: Job, tool: BusinessTool): Set<string> {
+    const pending = new Set(job.pendingKeys ?? job.fields.map((field) => field.key));
+    return new Set(job.fields.filter((field) => field.type !== "file" && !field.manualOnly && !(job.confirmed && tool.fields.some((base) => base.key === field.key)) && (field.confirm === undefined || pending.has(field.key))).map((field) => field.key));
+  }
+
+  /** Adds an assistant message without replacing the pending action, so the input card and its unsaved draft stay as they are. */
+  private say(runId: string, message: string) {
+    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: message });
+    this.event(runId, "ask_user", { question: message, action: getRunAction(this.db, runId) });
+  }
+
+  private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string, display?: string, chat?: ChatSubmission): Promise<void> {
     const job = this.job(runId);
     const tool = this.tools.get(job.toolId);
     if (!tool || tool.version !== job.version) throw new Error("업무 버전이 변경되었습니다. 현재 작업을 중단하고 새로 요청해 주세요.");
@@ -151,12 +233,13 @@ export class BusinessFlow {
       }
       job.pendingKeys = [];
     }
-    this.validateInput(revised ? job.fields.map(field => tool.fields.some(base => base.key === field.key) ? field : { ...field, required: false }) : job.fields, input);
-    if (!tool.editable && (job.confirmed && Object.entries(job.input.values).some(([key, value]) => value && input.values[key] !== value && (tool.fields.some((field) => field.key === key) || !job.pendingKeys?.includes(key))) || Object.keys(job.fingerprints).some((key) => JSON.stringify(input.files[key]) !== JSON.stringify(job.input.files[key])))) throw new Error("확정된 원천 자료나 기준 정보는 변경할 수 없습니다. 새 작업으로 요청해 주세요.");
+    // A chat answer may be partial or revise an earlier answer: the tool re-validates everything and asks again for what is missing.
+    this.validateInput(revised || chat ? job.fields.map(field => tool.fields.some(base => base.key === field.key) ? field : { ...field, required: false }) : job.fields, input);
+    if (!tool.editable && (job.confirmed && Object.entries(job.input.values).some(([key, value]) => value && input.values[key] !== value && (tool.fields.some((field) => field.key === key) || (!chat && !job.pendingKeys?.includes(key)))) || Object.keys(job.fingerprints).some((key) => JSON.stringify(input.files[key]) !== JSON.stringify(job.input.files[key])))) throw new Error("확정된 원천 자료나 기준 정보는 변경할 수 없습니다. 새 작업으로 요청해 주세요.");
     const controller = new AbortController();
     this.active.set(runId, controller);
     const timeout = setTimeout(() => controller.abort(new Error("업무 실행 시간이 초과되었습니다.")), tool.executionTimeoutMs ?? this.timeoutMs);
-    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: display ?? this.describeInput(job, input) });
+    appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, ...(chat ? { role: "assistant" as const, content: chat.echo } : { role: "user" as const, content: display ?? this.describeInput(job, input) }) });
     setRunStatus(this.db, runId, "running");
     if (tool.editable) this.db.prepare("DELETE FROM run_actions WHERE run_id=?").run(runId);
     this.event(runId, "status", { phase: "원천 자료 확인 및 업무 실행 중", messagesChanged: true });
@@ -187,6 +270,7 @@ export class BusinessFlow {
       job.fingerprints = Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((value) => value.fingerprint)]));
       this.save(runId, job);
       new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "files" }, { startedAt: filesStarted });
+      const executeStarted = Date.now();
       const result = await this.abortable(tool.execute({ values: input.values, files, checkpoint: job.checkpoint ?? {}, signal: controller.signal, changedKeys,
         userText: userText ?? changedKeys.filter(key => key === "revision" || key === "revisionAnswer" || /^answer\d+$/.test(key)).map(key => input.values[key]).join("\n"),
         onTrace: (event) => {
@@ -197,6 +281,10 @@ export class BusinessFlow {
         if (!controller.signal.aborted && getRun(this.db, runId).status === "running") this.event(runId, "status", { phase });
       } }), controller.signal);
       controller.signal.throwIfAborted();
+      // One record per execution: where it stopped, why, and how long each step took. IDs and timings only, no amounts.
+      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "execute", outcome: result.status, step: result.step, code: result.code, steps: result.trace, ...(result.status === "failed" ? { recovery: result.recovery } : {}) }, { startedAt: executeStarted });
+      job.stop = { step: result.step, code: result.code };
+      job.lastError = result.status === "failed" ? { message: result.message, recovery: result.recovery, step: result.step } : undefined;
       if (Object.values(input.files).flat().some((file) => !sources.has(file.sourceId))) throw new Error("실행 중 자료 연결이 해제되었습니다.");
       if (result.status === "needs_input") {
         this.validateFields(result.fields);
@@ -211,7 +299,7 @@ export class BusinessFlow {
         job.checkpoint = result.checkpoint ?? job.checkpoint;
         if (JSON.stringify(job.checkpoint ?? {}).length > 1000000) throw new Error("업무 중간 상태가 너무 큽니다.");
         this.save(runId, job); this.ask(runId, result.question);
-      } else if (result.status === "failed") this.retry(runId, result.message, result.code);
+      } else if (result.status === "failed") { this.save(runId, job); this.retry(runId, result.message, result.code, result.recovery); }
       else if (result.status === "completed") {
         if (!result.checks.length || result.checks.some((check) => check.passed !== true)) throw new Error("업무 검증을 통과하지 못했습니다.");
         const outputs = [result.file, ...(result.additionalFiles ?? [])];
@@ -265,7 +353,11 @@ export class BusinessFlow {
         this.event(runId, "completed", { text: message, outcome: "success" });
       } else throw new Error("잘못된 업무 결과입니다.");
     } catch (error) {
-      if (getRun(this.db, runId).status === "running") this.retry(runId, error instanceof Error ? error.message : String(error), error instanceof Error && "code" in error ? String(error.code) : undefined);
+      if (getRun(this.db, runId).status === "running") {
+        const message = error instanceof Error ? error.message : String(error);
+        const saved = this.job(runId); saved.lastError = { message }; this.save(runId, saved);
+        this.retry(runId, message, error instanceof Error && "code" in error ? String(error.code) : undefined);
+      }
     } finally { clearTimeout(timeout); this.active.delete(runId); }
   }
 
@@ -276,6 +368,7 @@ export class BusinessFlow {
     const run = getRun(this.db, runId);
     if (run.status !== "running" && run.status !== "waiting_user") return;
     this.active.get(runId)?.abort(new Error("작업을 중단했습니다."));
+    this.turns.get(runId)?.abort(new Error("작업을 중단했습니다."));
     setRunStatus(this.db, runId, "cancelled", "CANCELLED");
     this.event(runId, "failed", { code: "CANCELLED", message: "작업을 중단했습니다." });
   }
@@ -310,9 +403,9 @@ export class BusinessFlow {
     return [...Object.keys(job.fingerprints), ...Object.entries(job.input.values).filter(([key, value]) => value && (!job.pendingKeys?.includes(key) || base.some((field) => field.key === key))).map(([key]) => key)];
   }
   /** One line per editable field so the submitted answer reads as the user's turn in the thread. */
-  private describeInput(job: Job, input: BusinessInput): string {
+  private describeInput(job: Job, input: BusinessInput, only?: string[]): string {
     const locked = new Set(this.lockedKeys(job));
-    return job.fields.filter((field) => !locked.has(field.key)).map((field) => {
+    return job.fields.filter((field) => only ? only.includes(field.key) : !locked.has(field.key)).map((field) => {
       if (field.type === "file") { const names = (input.files[field.key] ?? []).map((file) => file.name); return names.length ? `${field.label}: ${names.join(", ")}` : ""; }
       const value = input.values[field.key]?.trim() ?? "";
       if (!value) return "";
@@ -346,7 +439,9 @@ export class BusinessFlow {
     if (emit) this.event(runId, "completed", { text, outcome: status === "completed" ? "success" : "abstained" });
   }
   /** An error never ends the run by itself: the same input card comes back with the message, so answers survive and the user decides whether to fix, retry or stop. */
-  private retry(runId: string, message: string, code?: string) {
+  private retry(runId: string, message: string, code?: string, recovery?: Recovery) {
+    // A classified failure keeps its original reason and says what the person can do; nothing is re-run on its own.
+    if (recovery) { this.ask(runId, `${message}\n\n${RECOVERY_GUIDE[recovery]}`); return; }
     if (code && !["LIMIT", "UNSUPPORTED"].includes(code)) {
       this.ask(runId, `처리 중 내부 오류가 발생했습니다 (${code}). 입력한 답변은 보관되어 있습니다. 같은 요청으로 다시 시도하거나 추가 지시를 보낼 수 있습니다.`);
       return;
