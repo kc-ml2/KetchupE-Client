@@ -6,6 +6,7 @@ import ExcelJS from "exceljs";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { openAgentDb } from "../db/openAgentDb.ts";
 import { createThread, ensureWorkspace, getRun, getRunAction, loadThread } from "../agent/store.ts";
+import { buildRunTrace } from "../agent/telemetry.ts";
 import { readTrace } from "../agent/trace.ts";
 import { WorkSources } from "../work/sources.ts";
 import { SelectiveWorkbook } from "../work/selectiveWorkbook.ts";
@@ -402,6 +403,34 @@ it("answers a chat question without replacing the pending action or running the 
   expect(JSON.stringify(model.prompts[0].fields)).not.toContain("approve");
   expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "ask_user", payload: { question: "메모는 결과에 기록됩니다.", action: expect.objectContaining({ id: action.id }) } }));
   expect(loadThread(db, threadId).messages.slice(-2).map((message) => [message.role, message.content])).toEqual([["user", "메모는 왜 필요해?"], ["assistant", "메모는 결과에 기록됩니다."]]);
+});
+
+it("exports the trajectory of a tool that opts in, with text only as the content mode allows, and nothing for one that does not", async () => {
+  const options = { userId: "u", identityKey: "key", contentMode: "internal_full" as const, environment: "test", tenantId: "t", resource: {} };
+  const drive = async () => {
+    tool.execute = vi.fn().mockResolvedValueOnce(followUp()).mockResolvedValue(success());
+    const model = scripted({ kind: "reply", message: "메모는 결과에 기록됩니다." }, { kind: "set_inputs", patch: { memo: "확인함 1,234,567원" } });
+    flow = chatFlow([tool], model.converse); const runId = start();
+    await flow.submit(runId, getRunAction(db, runId)!.id, input);
+    await flow.workflows()[0].resume!(runId, "메모는 왜 필요해?").done;
+    await flow.workflows()[0].resume!(runId, "메모는 확인함 1,234,567원으로").done;
+    expect(getRun(db, runId).status).toBe("completed");
+    return runId;
+  };
+  expect(buildRunTrace(db, await drive(), options)).toBeUndefined();
+  await flow.stop(); tool.telemetry = "trajectory"; threadId = createThread(db, "default").id;
+  const exported = await drive();
+  const built = buildRunTrace(db, exported, { ...options, contentMode: "ops" })!;
+  const text = JSON.stringify(built.payload);
+  const names = (built.payload as { resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[] }).resourceSpans[0].scopeSpans[0].spans.map((span) => span.name);
+  expect(names).toEqual(["business.fixture", "stop.INPUT", "submit", "execute", "stop.MEMO_NEEDED", "wait.after_reply", "turn.chat", "submit", "execute", "turn.chat"]);
+  expect(text).toContain('"INPUT>MEMO_NEEDED"'); expect(text).toContain('"reply>set_inputs"'); expect(text).toContain('"memo"');
+  // In ops mode what was said is only a hash: nothing Korean, none of the digits typed in chat, no file name.
+  expect(text).not.toMatch(/[가-힣]/); expect(text).not.toContain("1,234,567"); expect(text).not.toContain("source.xlsx"); expect(text).toContain("hmac-sha256:");
+  // internal_full carries the request, the chat, the model reply and the question as written; file names and patch values stay structured-out.
+  const full = JSON.stringify(buildRunTrace(db, exported, options)!.payload);
+  for (const said of ["테스트 엑셀 만들어줘", "메모는 왜 필요해?", "메모는 결과에 기록됩니다.", "메모와 승인이 필요합니다.", "메모는 확인함 1,234,567원으로", "테스트 업무 완료"]) expect(full).toContain(said);
+  expect(built.terminal).toBe(true); expect(built.scores.map((score) => [score.name, score.value])).toEqual([["runtime/completed", 1], ["business/stops", 2], ["business/executions", 2], ["business/failures", 0], ["business/turns", 2], ["business/turns_rejected", 0]]);
 });
 
 it("applies a chat answer through the tool, but never a person-only approval or a fixed base input", async () => {

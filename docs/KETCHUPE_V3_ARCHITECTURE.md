@@ -65,7 +65,7 @@ The **작업 변경** control lets a user correct any running or waiting workflo
 
 A request may switch at most twice and cannot revisit a selected workflow. The selected-workflow trace persists this limit across restarts. Each executor keeps its own domain budget; routing is separately timed and workflow transitions are bounded. This is correction of a misrouted request, not a general workflow graph or automatic multi-task composition engine.
 
-All executor events pass through the Harness, which assigns one increasing renderer sequence per request. `workflow_changed` moves the UI between text/input-card and Canvas views, clearing stale streaming text and controls. Multiple trace writers allocate sequence numbers from SQLite. Any locally restricted stage keeps the combined request out of central telemetry; tool-derived handoff reasons are omitted and other reasons follow the configured content mode.
+All executor events pass through the Harness, which assigns one increasing renderer sequence per request. `workflow_changed` moves the UI between text/input-card and Canvas views, clearing stale streaming text and controls. Multiple trace writers allocate sequence numbers from SQLite. Any locally restricted stage keeps the combined request out of central telemetry, except that a business tool declaring `telemetry: "trajectory"` exports a trajectory of its own stages, with text subject to the content mode ([business tools](BUSINESS_TOOLS.md)); tool-derived handoff reasons are omitted and other reasons follow the configured content mode.
 
 ## RAG, retrieval, and context
 

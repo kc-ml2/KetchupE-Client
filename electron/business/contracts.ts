@@ -48,6 +48,8 @@ export type BusinessTool = WorkflowRoute & {
    * `context` is what the tool derived from the values (e.g. the report date) for choosing between several candidates.
    * The executor prefills a field only when one candidate is clearly it; the tool still validates every file it is given.
    */
+  /** "trajectory": this tool's runs are exported to central telemetry — stop codes, steps, decisions, counts and timings as written, and what was said (request, chat, replies, questions, errors) as the telemetry content mode allows. Absent: local trace only. */
+  telemetry?: "trajectory";
   suggestFiles?: (files: { name: string; relativePath: string }[], values: Record<string, string>) => { candidates: Record<string, number[]>; context?: Record<string, string> };
   execute: (input: {
     values: Record<string, string>;

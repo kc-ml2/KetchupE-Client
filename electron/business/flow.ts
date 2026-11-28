@@ -8,6 +8,7 @@ import type { WorkFile } from "../../src/app-types/WorkSource.types.ts";
 import { REVISE_REQUEST_TEXT } from "../../src/app-types/BusinessTool.types.ts";
 import { appendMessage, getRun, getRunAction, setRunStatus } from "../agent/store.ts";
 import { TraceWriter } from "../agent/trace.ts";
+import type { TraceEventType } from "../agent/contracts.ts";
 import { startWorkflowRun } from "../agent/runLifecycle.ts";
 import type { AgentWorkflow, WorkflowStartInput } from "../agent/workflows.ts";
 import { WorkSources } from "../work/sources.ts";
@@ -70,7 +71,7 @@ export class BusinessFlow {
 
   private start(tool: BusinessTool, input: WorkflowStartInput) {
     const { runId } = startWorkflowRun(this.db, { threadId: input.threadId, goal: input.text, kind: tool.id, retrievalProfile: "local", policyProfile: `${tool.id}@${tool.version}`, answerProfile: "deterministic" }, input.runId);
-    new TraceWriter(this.db, runId).record("run.started", "runtime", { localOnly: true, toolId: tool.id, version: tool.version });
+    this.mark(runId, "run.started", { toolId: tool.id, version: tool.version, telemetry: tool.telemetry });
     let initial = emptyInput(), checkpoint: Record<string, unknown> | undefined;
     let fingerprints: Job["fingerprints"] = {}, baseArtifactId: string | undefined;
     if (tool.editable) {
@@ -175,24 +176,25 @@ export class BusinessFlow {
     const controller = new AbortController();
     this.turns.set(runId, controller);
     const started = Date.now();
-    let decision = "error";
+    let decision = "error", reply: string | undefined;
     try {
       const audit = JSON.parse(String(earlier.audit)) as { checks?: unknown; externalData?: unknown };
       // ponytail: the record is cut at 12,000 characters; pick fields per tool if a result outgrows it.
       const parsed = parseDecision(await this.abortable(this.converse!(RESULT_SYSTEM, JSON.stringify({ title: tool.title, result: String(earlier.message ?? ""), checks: audit.checks, record: JSON.stringify(audit.externalData ?? {}).slice(0, 12_000), userText: text }), controller.signal), controller.signal));
       decision = parsed.kind === "reply" ? "reply" : "start";
       if (parsed.kind !== "reply" || getRun(this.db, runId).status !== "running") return false;
+      reply = parsed.message;
       this.finish(runId, parsed.message, "abstained");
       return true;
     } catch { return false; }
     finally {
       this.turns.delete(runId);
-      new TraceWriter(this.db, runId).record("model.completed", "runtime", { localOnly: true, phase: "model", operation: "result_question", decision }, { startedAt: started });
+      this.mark(runId, "model.completed", { phase: "model", operation: "result_question", decision }, started, { input: text, output: reply });
     }
   }
 
   /** Looks through the connected folders and prefills the file fields the person has not filled. Failing to look is not an error: the card opens empty. */
-  private async lookFor(runId: string): Promise<void> {
+  private async lookFor(runId: string, trigger: "start" | "card" = "start"): Promise<void> {
     const job = this.job(runId), tool = this.tools.get(job.toolId)!;
     const controller = new AbortController();
     this.turns.set(runId, controller);
@@ -203,8 +205,8 @@ export class BusinessFlow {
       for (const [key, files] of Object.entries(found.files)) if (!job.input.files[key]?.length) job.input.files[key] = files;
       job.search = found.search;
       this.save(runId, job);
-      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "discover", connected: found.search.connected, problems: found.search.problems.length,
-        fields: Object.fromEntries(Object.entries(found.search.fields).map(([key, field]) => [key, { status: field.status, candidates: field.candidates.length }])) }, { startedAt: started });
+      this.mark(runId, "tool.completed", { phase: "discover", trigger, connected: found.search.connected, problems: found.search.problems.length,
+        fields: Object.fromEntries(Object.entries(found.search.fields).map(([key, field]) => [key, { status: field.status, candidates: field.candidates.length }])) }, started);
     } catch { /* cancelled or unreadable sources: the person can still pick files */ }
     finally { this.turns.delete(runId); }
   }
@@ -221,7 +223,7 @@ export class BusinessFlow {
     this.validateInput(tool.fields.map((field) => ({ ...field, required: false })), job.input);
     this.save(runId, job);
     setRunStatus(this.db, runId, "running");
-    return this.track(runId, this.lookFor(runId).then(() => { if (getRun(this.db, runId).status === "running") this.ask(runId, action.question); }));
+    return this.track(runId, this.lookFor(runId, "card").then(() => { if (getRun(this.db, runId).status === "running") this.ask(runId, action.question); }));
   }
 
   /**
@@ -243,7 +245,7 @@ export class BusinessFlow {
     const controller = new AbortController();
     this.turns.set(runId, controller);
     const started = Date.now();
-    let decision = "error";
+    let decision = "error", changed: string[] = [];
     const current = () => getRun(this.db, runId).status === "waiting_user" && getRunAction(this.db, runId)?.id === action.id;
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "user", content: text });
     try {
@@ -263,7 +265,7 @@ export class BusinessFlow {
       else if (parsed.kind === "switch") this.say(runId, "이 작업을 그만두고 다른 작업으로 바꾸려면 입력창의 **작업 변경**을 사용해 주세요. 지금까지 입력한 내용은 그대로 있습니다.");
       else {
         const values = parsed.kind === "retry" ? job.input.values : applyPatch(job.fields, job.input.values, parsed.patch, editable);
-        const changed = Object.keys(values).filter((key) => values[key] !== job.input.values[key]);
+        changed = Object.keys(values).filter((key) => values[key] !== job.input.values[key]);
         if (parsed.kind === "set_inputs" && !changed.length) { decision = "no_change"; this.say(runId, "바꿀 내용을 찾지 못했습니다. 어떤 항목을 어떻게 바꿀지 다시 말씀해 주시거나 입력 카드에서 직접 고쳐 주세요."); return; }
         const input = { values, files: job.input.files };
         await this.executeSubmission(runId, action.id, input, text, undefined, { echo: changed.length ? `다음 내용을 반영해 다시 확인합니다.\n${this.describeInput(job, input, changed)}` : "같은 입력으로 다시 실행합니다." });
@@ -275,7 +277,7 @@ export class BusinessFlow {
       this.say(runId, error instanceof PatchError || decision !== "error" ? `${error instanceof Error ? error.message : String(error)}\n\n입력한 내용은 그대로 있습니다. 입력 카드에서 직접 고칠 수도 있습니다.` : "메시지를 처리하지 못했습니다. 입력한 내용은 그대로 있습니다. 입력 카드에서 계속하거나 다시 말씀해 주세요.");
     } finally {
       this.turns.delete(runId);
-      new TraceWriter(this.db, runId).record("model.completed", "runtime", { localOnly: true, phase: "model", operation: "converse", decision, step: job.stop?.step, code: job.stop?.code }, { startedAt: started });
+      this.mark(runId, "model.completed", { phase: "model", operation: "converse", decision, step: job.stop?.step, code: job.stop?.code, changed }, started, { input: text });
     }
   }
 
@@ -288,7 +290,7 @@ export class BusinessFlow {
   /** Adds an assistant message without replacing the pending action, so the input card and its unsaved draft stay as they are. */
   private say(runId: string, message: string) {
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: message });
-    this.event(runId, "ask_user", { question: message, action: getRunAction(this.db, runId) });
+    this.event(runId, "ask_user", { question: message, action: getRunAction(this.db, runId) }, { reply: true }, { output: message });
   }
 
   private async executeSubmission(runId: string, actionId: string, raw: unknown, userText?: string, display?: string, chat?: ChatSubmission): Promise<void> {
@@ -349,20 +351,20 @@ export class BusinessFlow {
       job.input = input; job.confirmed = true;
       job.fingerprints = Object.fromEntries(Object.entries(files).map(([key, list]) => [key, list.map((value) => value.fingerprint)]));
       this.save(runId, job);
-      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "files" }, { startedAt: filesStarted });
+      this.mark(runId, "tool.completed", { phase: "files", via: chat ? "chat" : "card", changed: changedKeys }, filesStarted);
       const executeStarted = Date.now();
       const result = await this.abortable(tool.execute({ values: input.values, files, checkpoint: job.checkpoint ?? {}, signal: controller.signal, changedKeys,
         userText: userText ?? changedKeys.filter(key => key === "revision" || key === "revisionAnswer" || /^answer\d+$/.test(key)).map(key => input.values[key]).join("\n"),
         onTrace: (event) => {
           if (controller.signal.aborted) return;
           const safe = businessTraceSchema.parse(event);
-          new TraceWriter(this.db, runId).record(safe.phase === "model" ? "model.completed" : "tool.completed", "runtime", { ...safe, localOnly: true }, { startedAt: Date.now() - safe.durationMs });
+          this.mark(runId, safe.phase === "model" ? "model.completed" : "tool.completed", safe, Date.now() - safe.durationMs);
         }, onProgress: (phase) => {
         if (!controller.signal.aborted && getRun(this.db, runId).status === "running") this.event(runId, "status", { phase });
       } }), controller.signal);
       controller.signal.throwIfAborted();
       // One record per execution: where it stopped, why, and how long each step took. IDs and timings only, no amounts.
-      new TraceWriter(this.db, runId).record("tool.completed", "runtime", { localOnly: true, phase: "execute", outcome: result.status, step: result.step, code: result.code, steps: result.trace, ...(result.status === "failed" ? { recovery: result.recovery } : {}) }, { startedAt: executeStarted });
+      this.mark(runId, "tool.completed", { phase: "execute", outcome: result.status, step: result.step, code: result.code, steps: result.trace, ...(result.status === "failed" ? { recovery: result.recovery } : {}) }, executeStarted, result.status === "failed" ? { output: result.message } : undefined);
       job.stop = { step: result.step, code: result.code };
       job.lastError = result.status === "failed" ? { message: result.message, recovery: result.recovery, step: result.step } : undefined;
       if (Object.values(input.files).flat().some((file) => !sources.has(file.sourceId))) throw new Error("실행 중 자료 연결이 해제되었습니다.");
@@ -409,7 +411,7 @@ export class BusinessFlow {
         if (tool.updateSource) {
           const selected = input.files[tool.updateSource]; const original = files[tool.updateSource];
           if (selected?.length !== 1 || original?.length !== 1) throw new Error("갱신할 원본 XLSX를 하나 선택해야 합니다.");
-          new TraceWriter(this.db, runId).record("workflow.effect_started", "runtime", { localOnly: true, toolId: tool.id });
+          this.mark(runId, "workflow.effect_started", { toolId: tool.id });
           await sources.replace(selected[0], original[0].fingerprint, result.file.bytes);
         }
         const artifacts = outputs.map((file) => ({ ...file, id: randomUUID() }));
@@ -455,7 +457,7 @@ export class BusinessFlow {
     this.active.get(runId)?.abort(new Error("작업을 중단했습니다."));
     this.turns.get(runId)?.abort(new Error("작업을 중단했습니다."));
     setRunStatus(this.db, runId, "cancelled", "CANCELLED");
-    this.event(runId, "failed", { code: "CANCELLED", message: "작업을 중단했습니다." });
+    this.event(runId, "failed", { code: "CANCELLED", message: "작업을 중단했습니다." }, { code: "CANCELLED" });
   }
   async stop() { for (const id of this.active.keys()) this.cancel(id); await Promise.allSettled([...this.pending]); }
 
@@ -523,7 +525,7 @@ export class BusinessFlow {
     this.db.prepare("INSERT INTO run_actions (run_id, action) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET action = excluded.action").run(runId, JSON.stringify(action));
     setRunStatus(this.db, runId, "waiting_user");
     appendMessage(this.db, { threadId: getRun(this.db, runId).threadId, runId, role: "assistant", content: question });
-    this.event(runId, "ask_user", { question, action });
+    this.event(runId, "ask_user", { question, action }, { step: job.stop?.step, code: job.stop?.code, pending: job.pendingKeys ?? job.fields.map((field) => field.key) }, { output: question });
   }
   private finish(runId: string, text: string, status: "completed" | "abstained", emit = true) {
     setRunStatus(this.db, runId, status);
@@ -540,10 +542,17 @@ export class BusinessFlow {
     }
     this.ask(runId, `${message}\n\n${this.tools.get(this.job(runId).toolId)?.editable ? "채팅으로 추가 지시를 보내거나 📎로 파일을 더 첨부해 이어갈 수 있습니다." : "입력을 고친 뒤 다시 실행할 수 있습니다. 원천 파일이나 작업일을 바꿔야 하면 작업을 중단하고 새로 시작하세요."}`);
   }
-  private event(runId: string, type: AgentStreamEvent["type"], payload: unknown) {
+  /**
+   * The one writer of a run's trajectory. Every record stays in the local trace; a tool that declares `telemetry: "trajectory"` also has
+   * these records exported centrally. `detail` holds IDs, field keys, counts and timings only; what was said goes in `text`, which the
+   * exporter treats by the telemetry content mode (hashed in `ops`, redacted in `redacted_eval`, as written in `internal_full`).
+   */
+  private mark(runId: string, type: TraceEventType, detail: Record<string, unknown> = {}, startedAt?: number, text?: { input?: string; output?: string }): number {
+    return new TraceWriter(this.db, runId).record(type, "runtime", { ...detail, ...(text ? { text } : {}), localOnly: true }, startedAt === undefined ? {} : { startedAt });
+  }
+  private event(runId: string, type: AgentStreamEvent["type"], payload: unknown, detail: Record<string, unknown> = {}, text?: { input?: string; output?: string }) {
     const traceType = type === "ask_user" ? "run.waiting_user" : type === "completed" ? "run.completed" : type === "failed" ? "run.failed" : "tool.started";
-    const seq = new TraceWriter(this.db, runId).record(traceType, "runtime", { localOnly: true });
-    this.emit({ runId, seq, type, payload });
+    this.emit({ runId, seq: this.mark(runId, traceType, detail, undefined, text), type, payload });
   }
   private validateFields(fields: BusinessField[]) {
     if (fields.some((field) => (field.type === "select" || field.options) && (!field.options?.length || field.options.length > 20 || new Set(field.options.map((o) => o.value)).size !== field.options.length))) throw new Error("잘못된 선택 항목입니다.");

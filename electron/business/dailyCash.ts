@@ -54,7 +54,7 @@ const STEP_RECOVERY: Record<string, Recovery | undefined> = { evidence: "new_run
 const correctionHelp = '표에서 실제 금액을 고치고(미집행은 0) 계획에 없는 거래는 행을 추가하세요.';
 
 export const dailyCashTool: BusinessTool = {
-  id: "daily_cash", version: "1.4.2", title: "일일자금일보",
+  id: "daily_cash", version: "1.4.2", title: "일일자금일보", telemetry: "trajectory",
   updateSource: "previousReport",
   description: "전일 일보·주간계획·KC 자금현황표로 작업일 직전 영업일(주말·공휴일 제외) 기준 일일자금일보 시트와 PNG를 생성한다. 자금현황표 기준일은 작업일에서 자동 결정하며 별도로 묻지 않는다. 지주현금 계획의 실제 집행을 담당자가 확인하고 계좌잔고 및 총 원화를 대사한다.",
   initialQuestion: "작업일과 원천 파일을 지정해 주세요. 자금현황표 기준일은 작업일 전날(주말·공휴일이면 직전 영업일)로 자동 적용합니다.",

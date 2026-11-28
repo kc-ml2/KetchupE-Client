@@ -94,8 +94,8 @@ export function buildRunTrace(
   if (!run) return undefined;
   const events = readTrace(db, runId);
   const started = events.find((event) => event.type === "run.started");
-  if (events.some((event) => event.payload.localOnly === true)) return undefined;
   const answer = db.prepare("SELECT content FROM messages WHERE run_id = ? AND role = 'assistant' ORDER BY rowid DESC LIMIT 1").get(runId) as { content: string } | undefined;
+  if (events.some((event) => event.payload.localOnly === true)) return events.some((event) => event.payload.telemetry === "trajectory") ? buildBusinessTrace(run, events, answer?.content, options) : undefined;
   const text = (value: string | undefined) => value === undefined
     ? undefined
     : options.contentMode === "internal_full"
@@ -368,6 +368,102 @@ export function buildRunTrace(
     ],
   };
   return { traceId, payload, scores, terminal };
+}
+
+/** Only identifier-shaped strings leave the machine: no spaces, no Korean, so a message, an amount or a file name cannot pass. */
+const ident = (value: unknown): string | undefined => typeof value === "string" && /^[A-Za-z0-9_./:@-]{1,100}$/.test(value) ? value : undefined;
+const idents = (value: unknown): string | undefined => Array.isArray(value) ? value.map(ident).filter(Boolean).join(",") || undefined : undefined;
+const count = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+/**
+ * A business tool's run as a trajectory: where it stopped (code/step), what the person and the model decided, how long each step and
+ * each wait took. Structured fields are identifiers and numbers only. What was said (request, chat, replies, questions, errors) is
+ * exported as text under the content mode: hashed in `ops`, redacted in `redacted_eval`, as written in `internal_full`.
+ */
+function buildBusinessTrace(run: RunSummaryRow, all: TraceEvent[], answer: string | undefined, options: Parameters<typeof buildRunTrace>[2]): { traceId: string; payload: unknown; scores: Score[]; terminal: boolean } {
+  const events = all.filter((event) => event.payload.localOnly === true);
+  const toolId = ident(events.find((event) => event.payload.telemetry === "trajectory")?.payload.toolId) ?? "business";
+  const version = ident(events.find((event) => event.type === "run.started" && event.payload.version)?.payload.version);
+  const traceId = traceIdFor(run.id), rootSpanId = spanIdFor(run.id, 0);
+  const endIso = run.finished_at ?? all.at(-1)?.startedAt ?? run.created_at;
+  const terminal = run.status !== "running" && run.status !== "waiting_user";
+  const common = [
+    ...attr("langfuse.trace.name", `business.${toolId}`),
+    ...attr("langfuse.user.id", options.userId),
+    ...attr("langfuse.session.id", hmac(options.identityKey, run.thread_id)),
+    ...attr("langfuse.trace.tags", [toolId, run.status, "business"]),
+    ...attr("langfuse.release", options.resource["service.version"]),
+    ...attr("langfuse.environment", options.environment),
+    ...attr("langfuse.trace.metadata.trajectorySchemaVersion", TRAJECTORY_SCHEMA_VERSION),
+    ...attr("langfuse.trace.metadata.contentMode", options.contentMode),
+    ...attr("langfuse.trace.metadata.tenantId", hmac(options.identityKey, options.tenantId)),
+  ];
+  const text = (value: unknown) => typeof value !== "string" || !value ? undefined : options.contentMode === "internal_full" ? value : options.contentMode === "redacted_eval" ? redactSensitiveText(value) : hmac(options.identityKey, value);
+  const said = (event: TraceEvent) => { const pair = (event.payload.text ?? {}) as { input?: unknown; output?: unknown }; return [...attr("langfuse.observation.input", text(pair.input)), ...attr("langfuse.observation.output", text(pair.output))]; };
+  const meta = (values: Record<string, AttrValue | undefined>) => Object.entries(values).flatMap(([key, value]) => attr(`langfuse.observation.metadata.${key}`, value));
+  const stops = events.filter((event) => event.type === "run.waiting_user" && event.payload.reply !== true);
+  const turns = events.filter((event) => event.payload.operation === "converse");
+  const executions = events.filter((event) => event.payload.phase === "execute");
+  const models = events.filter((event) => event.type === "model.completed");
+  const tokens = models.reduce((sum, event) => sum + (count(event.payload.promptTokens) ?? 0) + (count(event.payload.completionTokens) ?? 0), 0);
+  const failures = executions.filter((event) => event.payload.outcome === "failed");
+  const waitMs = events.filter((event) => event.type === "run.waiting_user").reduce((sum, event) => sum + Math.max(0, Date.parse(all.find((next) => next.seq > event.seq)?.startedAt ?? endIso) - Date.parse(event.startedAt)), 0);
+  const failed = run.status === "failed" || run.status === "cancelled";
+  const spans: OtlpSpan[] = [{
+    traceId, spanId: rootSpanId, name: `business.${toolId}`, kind: 1, startTimeUnixNano: nanos(run.created_at), endTimeUnixNano: nanos(endIso),
+    attributes: [
+      ...attr("langfuse.observation.type", "agent"), ...common,
+      ...attr("langfuse.observation.input", text(run.goal)), ...attr("langfuse.observation.output", text(answer)),
+      ...Object.entries({ toolId, version, status: run.status, errorCode: ident(run.error_code), path: stops.map((event) => ident(event.payload.code) ?? "INPUT").join(">"), lastStep: ident(executions.at(-1)?.payload.step), lastCode: ident(executions.at(-1)?.payload.code),
+        stops: stops.length, executions: executions.length, failures: failures.length, turns: turns.length, turnDecisions: turns.map((event) => ident(event.payload.decision) ?? "error").join(">"),
+        modelCalls: models.length, totalTokens: tokens, waitMs, workMs: Math.max(0, Date.parse(endIso) - Date.parse(run.created_at) - waitMs) }).flatMap(([key, value]) => attr(`langfuse.trace.metadata.${key}`, value)),
+      ...attr("langfuse.observation.level", failed ? "ERROR" : "DEFAULT"),
+    ],
+    status: failed ? { code: 2, message: ident(run.error_code) ?? run.status } : { code: 1 },
+  }];
+  for (const event of events) {
+    const payload = event.payload, next = all.find((candidate) => candidate.seq > event.seq);
+    const span = (name: string, type: string, attributes: OtlpAttr[], parent = rootSpanId, startMs = 0, durationMs = event.durationMs ?? 0, key: number | string = event.seq): string => {
+      const spanId = spanIdFor(run.id, key);
+      spans.push({ traceId, spanId, parentSpanId: parent, name, kind: 1, startTimeUnixNano: nanos(event.startedAt, startMs), endTimeUnixNano: nanos(event.startedAt, startMs + durationMs), attributes: [...attr("langfuse.observation.type", type), ...common, ...(key === event.seq ? said(event) : []), ...attributes] });
+      return spanId;
+    };
+    if (event.type === "run.waiting_user") {
+      // The span lasts as long as the person took: a stop that people sit on is visible next to one they answer at once.
+      span(payload.reply === true ? "wait.after_reply" : `stop.${ident(payload.code) ?? "INPUT"}`, "span", meta({ step: ident(payload.step), code: ident(payload.code), pending: idents(payload.pending) }), rootSpanId, 0, Math.max(0, Date.parse(next?.startedAt ?? endIso) - Date.parse(event.startedAt)));
+    } else if (payload.phase === "discover") {
+      const fields = Object.entries((payload.fields ?? {}) as Record<string, { status?: unknown; candidates?: unknown }>).flatMap(([key, field]) => ident(key) ? [`${key}:${ident(field.status) ?? "?"}:${count(field.candidates) ?? 0}`] : []);
+      span("discover", "retriever", meta({ trigger: ident(payload.trigger), connected: payload.connected === true, problems: count(payload.problems), fields }));
+    } else if (payload.operation === "converse" || payload.operation === "result_question") {
+      span(`turn.${payload.operation === "converse" ? "chat" : "result_question"}`, "agent", meta({ decision: ident(payload.decision), step: ident(payload.step), code: ident(payload.code), changed: idents(payload.changed) }));
+    } else if (payload.phase === "files") {
+      span("submit", "span", meta({ via: ident(payload.via), changed: idents(payload.changed) }));
+    } else if (payload.phase === "execute") {
+      const level = payload.outcome === "failed" ? "ERROR" : "DEFAULT";
+      const parent = span("execute", "tool", [...meta({ outcome: ident(payload.outcome), step: ident(payload.step), code: ident(payload.code), recovery: ident(payload.recovery) }), ...attr("langfuse.observation.level", level)]);
+      let offset = 0;
+      for (const [index, step] of (Array.isArray(payload.steps) ? payload.steps as { step?: unknown; ms?: unknown }[] : []).entries()) {
+        const ms = count(step.ms) ?? 0;
+        span(`step.${ident(step.step) ?? "unknown"}`, "span", [], parent, offset, ms, `${event.seq}:${index}`);
+        offset += ms;
+      }
+    } else if (event.type === "model.completed" || event.type === "tool.completed") {
+      // Phases a tool reports itself (profile, model, analysis, export): the schema they pass is numbers, enums and an error code.
+      const input = count(payload.promptTokens) ?? 0, output = count(payload.completionTokens) ?? 0;
+      span(`phase.${ident(payload.phase) ?? "unknown"}`, event.type === "model.completed" ? "generation" : "span", [
+        ...attr("langfuse.observation.model.name", ident(payload.modelAlias)),
+        ...(event.type === "model.completed" ? attr("langfuse.observation.usage_details", JSON.stringify({ input, output, total: input + output })) : []),
+        ...meta({ operation: ident(payload.operation), attempt: count(payload.attempt), rowCount: count(payload.rowCount), outputBytes: count(payload.outputBytes), finishReason: ident(payload.finishReason), errorCode: ident(payload.errorCode) }),
+      ]);
+    }
+  }
+  const score = (name: string, value: number, dataType: Score["dataType"] = "NUMERIC"): Score => ({ traceId, parentSpanId: rootSpanId, name, value, dataType });
+  const scores = terminal ? [
+    { ...score("runtime/completed", run.status === "completed" ? 1 : 0, "BOOLEAN"), comment: run.status },
+    score("business/stops", stops.length), score("business/executions", executions.length), score("business/failures", failures.length),
+    score("business/turns", turns.length), score("business/turns_rejected", turns.filter((event) => ["rejected", "error", "no_change"].includes(String(event.payload.decision))).length),
+  ] : [];
+  return { traceId, payload: { resourceSpans: [{ resource: { attributes: Object.entries(options.resource).flatMap(([key, value]) => attr(key, value)) }, scopeSpans: [{ scope: { name: "ketchupe-business" }, spans }] }] }, scores, terminal };
 }
 
 export function interactionScore(runId: string, kind: InteractionKind): Score {
